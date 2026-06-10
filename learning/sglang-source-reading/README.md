@@ -11,6 +11,7 @@ flowchart TD
   C --> D["第 4 讲：ModelRunner 与 attention backend"]
   D --> E["第 5 讲：Speculative Decoding"]
   E --> F["第 6 讲：多进程 / 多卡 / 分布式"]
+  F --> G["第 7 讲：Disaggregation / PD 分离"]
 ```
 
 ## 已生成内容
@@ -21,6 +22,7 @@ flowchart TD
 - [03-kv-cache-radix-cache.md](./03-kv-cache-radix-cache.md)：理解 KV cache 内存池、Radix prefix cache、HiCache 与 Scheduler 的配合。
 - [04-model-runner-attention.md](./04-model-runner-attention.md)：理解 `ForwardBatch`、`ModelRunner` 前向分发、`RadixAttention` 与 attention backend 如何读写 KV cache。
 - [05-speculative-decoding.md](./05-speculative-decoding.md)：理解 draft worker、target verify、`spec_info`、EAGLE/NGRAM、spec v1/v2 与接受 token 后处理。
+- [06-multiprocess-distributed.md](./06-multiprocess-distributed.md)：理解 Engine 如何拉起 Tokenizer/Scheduler/Detokenizer，TP/PP/DP/DP attention 如何组织 rank 与通信。
 
 ## 怎么使用这些笔记
 
