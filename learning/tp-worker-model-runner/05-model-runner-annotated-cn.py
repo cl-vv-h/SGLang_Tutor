@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
-# SGLang 教学注释版源码副本
+# SGLang 中文精读注释版源码副本
 # =============================================================================
 # 说明：
 # 1. 本文件由 learning 教学材料生成，来源于 SGLang 原始源码。
-# 2. 这里添加了中文教学注释，帮助理解架构、数据流和关键代码块。
+# 2. 注释重点解释每个类、函数和关键代码块在运行时承担的职责。
 # 3. 这不是运行时代码，不要从业务代码中 import 本文件。
 # 4. 原始源码没有被修改；如需对照，请查看 python/sglang/srt/... 下的对应文件。
 # =============================================================================
@@ -25,6 +25,8 @@
 # ==============================================================================
 """ModelRunner runs the forward passes of the models."""
 
+# 下面开始保留原始 imports。
+# 这些 import 展示了该文件依赖的边界：tp_worker 主要依赖 manager、distributed 和 ModelRunner；model_runner 则依赖分布式、attention、KV cache、graph、loader、sampling 等几乎整个执行层。
 from __future__ import annotations
 
 import contextlib
@@ -84,9 +86,11 @@ from sglang.srt.distributed import (
     get_pp_group,
     get_tp_group,
     get_world_group,
-    # 教学注释：初始化 torch distributed 进程组，这是 TP/PP/DP 通信的基础。
+    # 初始化 torch distributed 进程组。
+    # 这是 NCCL/Gloo/Mooncake 等通信 backend 的基础，所有 TP/PP/DP collective 都依赖它。
     init_distributed_environment,
-    # 教学注释：创建模型并行组，包括 tensor parallel、pipeline parallel、attention DP/CP 和 MoE EP/DP。
+    # 创建 SGLang/vLLM 风格的模型并行组。
+    # 这里同时配置 TP、PP、attention DP/CP、MoE EP/DP 等维度，使后续模型层可以直接查询所属 group。
     initialize_model_parallel,
     set_custom_all_reduce,
     set_mscclpp_all_reduce,
@@ -296,14 +300,16 @@ TORCH_DTYPE_TO_KV_CACHE_STR = {
 }
 
 
-# 教学注释：根据模型是否使用 MLA 动态注册 MLA attention backend。
+# MLA 模型需要特殊 attention backend。
+# 这个函数根据模型配置动态注册 backend，使后续 init_attention_backend 可以按统一名字创建实现。
 def add_mla_attention_backend(backend_name):
     if backend_name not in MLA_ATTENTION_BACKENDS:
         MLA_ATTENTION_BACKENDS.append(backend_name)
         logger.info(f"Added {backend_name} to MLA_ATTENTION_BACKENDS.")
 
 
-# 教学注释：根据 chunked prefix cache 配置动态注册对应 attention backend。
+# chunked prefix cache 会改变 attention backend 的缓存组织方式。
+# 这里在运行时把对应 backend 加入注册表，让配置解析阶段可以选择它。
 def add_chunked_prefix_cache_attention_backend(backend_name):
     if backend_name not in CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS:
         CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS.append(backend_name)
@@ -321,7 +327,8 @@ logger = logging.getLogger(__name__)
 _UNSET: Any = object()
 
 
-# 教学注释：从不同模型 wrapper 中找到真正包含 transformer layers 的语言模型对象。
+# 不同模型 wrapper 的层级结构不一致，有的 layers 在 model.model.layers，有的直接在 model.layers。
+# piecewise CUDA graph 需要枚举 transformer layers，因此先通过该函数找到真正的语言模型主体。
 def resolve_language_model(model: nn.Module) -> nn.Module:
     model_cls_name = model.__class__.__name__
     if model_cls_name == "Qwen3OmniMoeForConditionalGeneration":
@@ -333,16 +340,20 @@ def resolve_language_model(model: nn.Module) -> nn.Module:
     return model.model
 
 
-# 教学注释：日志过滤器，只允许 rank0 打印部分日志，避免多进程重复刷屏。
+# 多进程并行启动时，每个 rank 都可能打印同样日志。
+# 这个过滤器只允许 rank0 输出部分日志，避免初始化和加载阶段的日志被重复刷屏。
 class RankZeroFilter(logging.Filter):
     """Filter that only allows INFO level logs from rank 0, but allows all other levels from any rank."""
 
-    # 教学注释：初始化当前对象的基础状态；在 ModelRunner 中还会触发分布式、模型加载、内存池和 graph 初始化。
+    # 初始化当前对象持有的运行时状态。
+    # 在 TpModelWorker 中，这里会创建 ModelConfig、ModelRunner、tokenizer 和并行通信组引用。
+    # 在 ModelRunner 中，这里会保存设备/rank/spec/parallel 配置，并继续触发分布式初始化与模型执行环境初始化。
     def __init__(self, is_rank_zero):
         super().__init__()
         self.is_rank_zero = is_rank_zero
 
-    # 教学注释：`filter` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 日志过滤器的实际判断函数。
+    # record 只有在当前进程是 rank0 时才会通过，其他 rank 的重复日志会被过滤掉。
     def filter(self, record):
         if record.levelno == logging.INFO:
             return self.is_rank_zero
@@ -350,7 +361,9 @@ class RankZeroFilter(logging.Filter):
 
 
 @dataclass
-# 教学注释：ModelRunner.forward 的统一返回结构，承载 logits/hidden states/spec 信息和辅助指标。
+# ModelRunner.forward 的统一返回结构。
+# logits_output 可能是真正的 logits，也可能是 PP 中间 rank 传给下一阶段的 PPProxyTensors。
+# 其余字段用于告诉上层是否可走 graph、是否发生 cuda graph padding，以及 speculative/metrics/debug 相关输出。
 class ModelRunnerOutput:
     logits_output: Union[LogitsProcessorOutput, PPProxyTensors]
     can_run_graph: bool
@@ -359,12 +372,16 @@ class ModelRunnerOutput:
     indexer_topk_output: Optional[TopkCaptureOutput] = None
 
 
-# 教学注释：ModelRunner 汇总了模型执行所需的硬件、通信、内存、kernel 和前向路径。
-# 教学注释：模型执行核心：封装分布式初始化、模型加载、KV cache、attention backend、CUDA graph、forward 和 sampling。
+# ModelRunner 是 SGLang 模型执行层的核心对象。
+# 它把模型权重、分布式通信组、KV cache 内存池、attention backend、CUDA graph、采样器等运行资源放在一起管理。
+# Scheduler 和 TpModelWorker 不直接接触这些底层资源，而是通过 ModelRunner.forward/sample 等统一入口使用它们。
+# 阅读这个类时，可以按“初始化资源 -> 构造 ForwardBatch metadata -> 执行 model.forward -> 采样/返回结果”的顺序理解。
 class ModelRunner(ModelRunnerKVCacheMixin):
     """ModelRunner runs the forward passes of the models."""
 
-    # 教学注释：初始化当前对象的基础状态；在 ModelRunner 中还会触发分布式、模型加载、内存池和 graph 初始化。
+    # 初始化当前对象持有的运行时状态。
+    # 在 TpModelWorker 中，这里会创建 ModelConfig、ModelRunner、tokenizer 和并行通信组引用。
+    # 在 ModelRunner 中，这里会保存设备/rank/spec/parallel 配置，并继续触发分布式初始化与模型执行环境初始化。
     def __init__(
         self,
         model_config: ModelConfig,
@@ -409,7 +426,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.moe_dp_size = server_args.moe_dp_size
         self.model_config = model_config
         self.dist_port = nccl_port
-        # 教学注释：server_args 是运行时总开关，后续分布式、attention backend、graph、LoRA、spec 都依赖它。
+        # 保存 server_args。
+        # 这是运行时配置的总入口，后续是否启用 speculative decoding、LoRA、CUDA graph、attention backend、MoE、DP/PP/TP 等都从这里读取。
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
         self.is_generation = model_config.is_generation
@@ -545,7 +563,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             self.init_threads_binding()
 
         # Get available memory before model loading
-        # 教学注释：先初始化分布式并记录加载前显存，后续用来估算权重和 KV cache 的预算。
+        # 先初始化分布式环境，再加载模型。
+        # 这样可以在权重加载前获得通信组和显存基线，后续 KV cache 大小估算会用到这个基线。
         pre_model_load_memory = self.init_torch_distributed()
 
         # Initialize MooncakeTransferEngine
@@ -575,7 +594,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self._linear_attn_registry_cache: Any = _UNSET
 
         # Initialize the model runner
-        # 教学注释：进入 ModelRunner 主初始化流水线：加载权重、建内存池、建 backend、warmup、图捕获。
+        # 进入 ModelRunner 主初始化流水线。
+        # 这一调用会继续完成模型加载、KV cache、attention backend、kernel warmup 和 graph capture。
         self.initialize(pre_model_load_memory)
         self.check_quantized_moe_compatibility()
 
@@ -608,7 +628,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self._model_update_group = {}
         self._weights_send_group = {}
 
-    # 教学注释：`init_msprobe` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化 msprobe 精度调试工具。
+    # 如果安装了 msprobe，它可以在 forward 过程中 dump tensor，帮助定位 NPU/混合精度场景下的数值问题。
     def init_msprobe(self):
         # Init the msprobe
         try:
@@ -624,7 +645,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             config_path=self.server_args.msprobe_dump_config
         )
 
-    # 教学注释：`init_mindspore_runner` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化 MindSpore 后端相关通信。
+    # 当 model_impl 为 MindSpore 且设备为 NPU 时，这里会调用 MindSpore runner 建立分布式环境。
     def init_mindspore_runner(self):
         # Init the mindspore runner
         # for now, there is only some communication initialization work
@@ -639,7 +661,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 port=self.dist_port,
             )
 
-    # 教学注释：ModelRunner 的主体初始化流水线：加载模型、建 KV cache、建 attention backend、warmup 和 graph capture。
+    # ModelRunner 的主体初始化流水线。
+    # 这个函数按顺序加载模型、准备 MoE、配置 KV cache dtype、初始化内存池、建立 attention backend、warmup kernel、捕获 graph。
+    # 很多高性能路径必须在这里提前完成，否则真实请求到来时会承担昂贵的首次初始化成本。
     def initialize(self, pre_model_load_memory: float):
         server_args = self.server_args
 
@@ -687,8 +711,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         # Load the model
         self.sampler = create_sampler()
-        # 教学注释：加载模型权重前后会做 memory saver、远端权重、量化和 monkey patch 等准备。
+        # 开始加载模型权重。
+        # load_model 内部会进入 memory saver 上下文，调用 loader，并在加载后记录 dtype、sliding window、量化和 debug 状态。
         self.load_model()
+        # 准备 MoE top-k 路由。
+        # 对 MoE 模型而言，专家选择和 token 分发是 forward 性能的关键路径之一。
         self._prepare_moe_topk()
 
         # Load the expert backup client
@@ -784,10 +811,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             enable_batch_invariant_mode()
 
         # Deduce KV cache dtype
+        # 确定 KV cache dtype。
+        # 注意它可能不同于模型权重 dtype，例如 FP8 KV cache 可以显著降低显存占用。
         self.configure_kv_cache_dtype()
 
         # Init memory pool and attention backends
-        # 教学注释：KV cache/request-token pool 在这里建立，是后续 continuous batching 的核心状态。
+        # 初始化 KV cache 与请求/token 内存池。
+        # continuous batching 的核心是复用这些池中的位置，而不是为每个请求重新分配大块显存。
         self.init_memory_pool(pre_model_load_memory)
 
         # Must be called AFTER init_memory_pool so the pool object exists for
@@ -800,6 +830,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
         # Init ngram embedding token table
+        # 如果模型需要 ngram embedding，这里建立请求维度的 token table。
+        # 该 table 会在 sampling 后更新，下一轮 forward 可以使用最新 token 历史。
         self.maybe_init_ngram_embedding()
 
         # Init routed experts capturer
@@ -835,12 +867,15 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     ),
                     host_to_device_ratio=hisparse_cfg.host_to_device_ratio,
                 )
-            # 教学注释：attention backend 决定 prefill/decode 的核心 attention kernel 实现。
+            # 初始化 attention backend。
+            # backend 会在每次 forward 前根据 ForwardBatch 准备 page table、seq lens、workspace 等 metadata，并最终调用具体 attention kernel。
             self.init_attention_backend()
-            # 教学注释：在正式 graph capture 或服务请求前预热关键 kernel，减少首请求抖动。
+            # 预热或调优 kernel。
+            # 这一步把编译、autotune、workspace 初始化等开销尽量放到服务启动时完成。
             self.kernel_warmup()
             self._pre_initialize_flashinfer_allreduce_workspace()
-            # 教学注释：固定形状 decode 会被捕获为 device graph，后续可直接 replay。
+            # 捕获 device graph。
+            # decode 场景形状相对稳定，捕获后可以通过 replay 减少 Python 调度和 kernel launch 开销。
             self.init_device_graphs()
         elif self.device == "cpu":
             self.init_attention_backend()
@@ -875,7 +910,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             register_forward_hooks(self.model, server_args.forward_hooks)
 
         # Initialize piecewise CUDA graph
-        # 教学注释：piecewise graph 以层或算子片段为单位捕获，用来覆盖更复杂的动态路径。
+        # 初始化 piecewise CUDA graph。
+        # 它不是捕获整个 forward，而是捕获 attention/MoE 等局部片段，以适配更动态的执行形状。
         self.init_piecewise_cuda_graphs()
 
         self.prealloc_symmetric_memory_pool()
@@ -883,7 +919,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if self.canary_manager is not None and not self.is_draft_worker:
             self.canary_manager.mark_init_finished()
 
-    # 教学注释：`adjust_hybrid_swa_layers_for_pp` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 在 pipeline parallel 场景下修正 hybrid sliding-window attention 的层信息。
+    # PP 会把模型层切给不同 rank，因此原本的全局层配置需要映射到当前 rank 负责的局部层范围。
     def adjust_hybrid_swa_layers_for_pp(self):
         if not self.is_hybrid_swa:
             return
@@ -906,7 +943,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.model_config.swa_attention_layer_ids = swa_attention_layer_ids
         self.model_config.full_attention_layer_ids = full_attention_layer_ids
 
-    # 教学注释：`init_routed_experts_capturer` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化 routed experts 捕获器。
+    # 它用于记录 MoE 路由时 token 被分配到哪些 expert，方便调试、负载均衡或统计专家分布。
     def init_routed_experts_capturer(self):
         if not self.server_args.disable_shared_experts_fusion and hasattr(
             self.model, "num_fused_shared_experts"
@@ -926,7 +964,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
         )
 
-    # 教学注释：`init_indexer_capturer` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化 DSA/indexer 捕获器。
+    # 某些稀疏或动态索引 kernel 会产生索引信息，这里注册捕获器以便后续检查和调试。
     def init_indexer_capturer(self):
         enable = get_global_server_args().enable_return_indexer_topk
         # Producer wiring is CUDA-only (Indexer.forward_cuda + MLA skip_topk
@@ -954,7 +993,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
         )
 
-    # 教学注释：`init_aux_hidden_state_capture` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化辅助 hidden states 捕获逻辑。
+    # EAGLE3、DFLASH 等 speculative 路径需要中间层 hidden states，target 模型会在这里安装对应捕获点。
     def init_aux_hidden_state_capture(self):
         """Configure auxiliary hidden state capture for speculative decoding.
 
@@ -973,7 +1013,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 )
             self.model.set_dflash_layers_to_capture(self.dflash_target_layer_ids)
 
-    # 教学注释：`remote_instance_init_transfer_engine` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 初始化远端实例权重传输引擎。
+    # 当权重加载或同步需要跨实例传输时，这个 engine 负责底层数据通道和连接管理。
     def remote_instance_init_transfer_engine(self):
         try:
             from mooncake.engine import TransferEngine
@@ -994,7 +1035,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             local_ip, self.remote_instance_transfer_engine.get_rpc_port()
         ).to_host_port_str()
 
-    # 教学注释：`_register_to_engine_info_bootstrap` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 向传输引擎注册当前实例信息。
+    # 远端实例需要知道本 rank 的地址、设备和通信元信息，才能建立正确的数据传输关系。
     def _register_to_engine_info_bootstrap(self):
         """Register transfer engine info with the EngineInfoBootstrapServer via HTTP PUT.
 
@@ -1041,7 +1083,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 f"Failed to register transfer engine info for tp_rank={self.tp_rank}: {e}"
             )
 
-    # 教学注释：`model_specific_adjustment` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 根据模型类型做运行时修正。
+    # 不同模型家族可能需要特殊 rope、attention、linear attention 或配置兼容处理，这些差异在加载前统一收口。
     def model_specific_adjustment(self):
         server_args = self.server_args
 
@@ -1063,7 +1106,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if not server_args.disable_chunked_prefix_cache:
             log_info_on_rank0(logger, "Chunked prefix cache is turned on.")
 
-    # 教学注释：`check_quantized_moe_compatibility` 用于运行时校验，确保模型、权重或执行环境满足后续 forward 的假设。
+    # `check_quantized_moe_compatibility` 负责校验运行时假设。
+    # 这类检查通常用来提前发现权重、并行配置或后端能力不匹配的问题。
     def check_quantized_moe_compatibility(self):
         if (
             quantization_config := getattr(
@@ -1102,7 +1146,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     f"You can fix this by setting arguments `--tp` and `--ep` correctly."
                 )
 
-    # 教学注释：初始化 torch distributed、TP/PP/DP/EP 通信组，并检查加载前显存状态。
+    # 初始化 torch distributed 和 SGLang 的模型并行通信组。
+    # 这里会设置当前 device，选择 backend，创建 TP/PP/DP/EP/attention DP 等 group。
+    # 返回的 pre_model_load_memory 会用于后续估算模型权重和 KV cache 可用显存。
     def init_torch_distributed(self):
         tic = time.perf_counter()
         logger.info("Init torch distributed begin.")
@@ -1169,7 +1215,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     torch.ops.sgl_kernel.initialize(self.tp_size, self.tp_rank)
 
                     @torch.library.register_fake("sgl_kernel::shm_allgather")
-                    # 教学注释：`_` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+                    # 为 CPU shared-memory allgather 注册 fake kernel。
+                    # torch compile/export 需要 fake implementation 推断输出形状；这里用 cat 模拟 TP rank 聚合后的结果。
                     def _(data, dim):
                         return torch.cat([data] * self.tp_size, dim=dim)
 
@@ -1232,7 +1279,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             distributed=get_world_group().world_size > 1,
             cpu_group=get_world_group().cpu_group,
         )
+        # 保存 tensor parallel group。
+        # 后续权重切分、all-reduce、attention/MLP gather-scatter 都会使用这个 group。
         self.tp_group = get_tp_group()
+        # 读取 pipeline parallel 通信组。
+        # 后续 forward_batch_generation 会用 pp_group.is_last_rank 判断当前 rank 是否负责采样。
         self.pp_group = get_pp_group()
         self.attention_tp_group = get_attention_tp_group()
 
@@ -1253,7 +1304,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         return pre_model_load_memory
 
-    # 教学注释：`init_shared_mooncake_transfer_engine` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化共享 Mooncake transfer engine。
+    # Mooncake 用于某些 disaggregation/远端传输场景，这里准备跨组件共享的传输通道。
     def init_shared_mooncake_transfer_engine(self):
         """
         Need MooncakeTransferEngine when:
@@ -1299,7 +1351,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 ),
             )
 
-    # 教学注释：根据 LoadConfig/DeviceConfig 调用 loader 加载权重，并设置 dtype、滑窗、量化、debug hook 等模型状态。
+    # 加载模型权重并完成模型对象的运行时修正。
+    # 这里会构造 LoadConfig/DeviceConfig，进入 memory saver 上下文，调用模型 loader，处理远端权重、量化、滑窗、dtype、debug hook 等状态。
+    # 加载完成后，ModelRunner 才能根据模型结构建立 KV cache 与 attention backend。
     def load_model(self):
         tic_total = time.perf_counter()
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
@@ -1509,7 +1563,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     f"TP rank {self.tp_rank} could finish the model loading, but there are other ranks that didn't finish loading. It is likely due to unexpected failures (e.g., OOM) or a slow node."
                 ) from None
 
-    # 教学注释：对 MoE top-k 路由逻辑做运行时准备，兼容不同 MoE 后端。
+    # MoE 模型的路由通常依赖 top-k expert 选择。
+    # 这个函数根据当前 MoE backend 做兼容性准备，确保后续 forward 中路由 kernel 能拿到正确配置。
     def _prepare_moe_topk(self):
         balancer_cls = None
         num_prepared = 0
@@ -1561,7 +1616,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 logger, f"Prepared {num_prepared} DeepEP waterfill TopK modules."
             )
 
-    # 教学注释：`update_expert_location` 属于运行时热更新/LoRA/权重管理接口，worker 层通常转发，ModelRunner 层负责具体执行。
+    # 更新 MoE expert 在各 rank 上的位置映射。
+    # EPLB 或 elastic expert parallel 会动态调整 expert 布局，forward 前必须让路由逻辑看到最新位置。
     def update_expert_location(
         self,
         new_expert_location_metadata: ExpertLocationMetadata,
@@ -1604,7 +1660,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     weight_name_filter=weight_name_filter,
                 )
 
-    # 教学注释：`maybe_recover_ep_ranks` 是可选特性入口，只有相关配置或模型能力开启时才真正执行。
+    # `maybe_recover_ep_ranks` 是可选特性的懒初始化或条件更新入口。
+    # 只有模型结构或 server_args 启用对应能力时，这段逻辑才会产生实际效果。
     def maybe_recover_ep_ranks(self):
         # TODO(perf): `active_ranks.all()` on a CUDA tensor triggers host-device
         # synchronization, and this function is on the forward-path.
@@ -1646,7 +1703,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
             logger.info(f"recover ranks {ranks_to_recover} done")
 
-    # 教学注释：`_get_healthy_expert_location_src_rank` 是状态查询或配置解析辅助函数，通常把底层运行时信息暴露给调度层或初始化流程。
+    # 选择可用于恢复 expert location 的健康源 rank。
+    # 恢复时需要从仍然持有可信 expert 元数据的 rank 复制状态。
     def _get_healthy_expert_location_src_rank(
         self, invoked_in_elastic_ep_rejoin_path: bool
     ) -> int:
@@ -1666,7 +1724,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             "All ranks are marked as elastic_ep_rejoin."
         )
 
-    # 教学注释：`update_weights_from_disk` 属于运行时热更新/LoRA/权重管理接口，worker 层通常转发，ModelRunner 层负责具体执行。
+    # 从磁盘路径加载新的权重并更新当前模型。
+    # worker 层负责接收请求对象，ModelRunner 层负责真正调用 loader、同步 rank 并刷新模型状态。
+    # 这类接口常用于不停服替换权重或把模型切换到新的 checkpoint。
     def update_weights_from_disk(
         self,
         model_path: str,
@@ -1690,7 +1750,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             message = f"Failed to get model loader: {loader}."
             return False, message
 
-        # 教学注释：`get_weight_iter` 是状态查询或配置解析辅助函数，通常把底层运行时信息暴露给调度层或初始化流程。
+        # 构造权重迭代器。
+        # loader 会从当前 ModelConfig 和模型对象中找到权重来源；如果传入 weight_name_filter，则只保留需要更新的参数。
         def get_weight_iter(config):
             iter = loader._get_weights_iterator(
                 DefaultModelLoader.Source.init_new(config, self.model)
@@ -1702,7 +1763,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
             return iter
 
-        # 教学注释：`model_load_weights` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+        # 执行实际权重写入。
+        # load_weights_and_postprocess 会把迭代器中的参数加载到模型，并完成 loader 需要的后处理。
         def model_load_weights(model, iter):
             loader.load_weights_and_postprocess(model, iter, target_device)
             return model
@@ -1743,7 +1805,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         logger.info("Update weights end.")
         return True, "Succeeded to update model weights."
 
-    # 教学注释：`init_weights_send_group_for_remote_instance` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化向远端实例发送权重所需的通信组。
+    # 这个路径用于把当前实例的权重同步给另一个远端服务实例，常见于模型迁移、实例扩容或远端热更新。
     def init_weights_send_group_for_remote_instance(
         self,
         master_address,
@@ -1793,7 +1856,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         current_platform.empty_cache()
         return success, message
 
-    # 教学注释：`send_weights_to_remote_instance` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 把当前模型权重发送到远端实例。
+    # 函数会依赖前面建立的 send group，把每个 rank 持有的参数分片传到对应接收端。
     def send_weights_to_remote_instance(
         self,
         master_address,
@@ -1842,7 +1906,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         current_platform.empty_cache()
         return success, message
 
-    # 教学注释：初始化权重更新通信组，让多个 rank 能同步接收更新。
+    # 初始化权重更新使用的分布式通信组。
+    # 多 rank 模型在热更新时必须让每个 rank 收到自己负责的权重分片，因此需要单独的更新组来协调通信。
     def init_weights_update_group(
         self,
         master_address,
@@ -1889,7 +1954,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.error(message)
             return False, message
 
-    # 教学注释：销毁权重更新通信组，释放相关分布式资源。
+    # 销毁权重更新通信组。
+    # 当一次热更新流程结束或不再需要该 group 时释放资源，避免长期占用分布式通信句柄。
     def destroy_weights_update_group(self, group_name):
         try:
             if group_name in self._model_update_group:
@@ -1903,7 +1969,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.error(message)
             return False, message
 
-    # 教学注释：通过分布式通信更新权重，适配多 rank 场景。
+    # 通过分布式通信接收并更新权重。
+    # 这条路径适合权重已经分散在多个 rank 或远端发送端的场景，避免把完整权重先聚合到单个进程。
     def update_weights_from_distributed(
         self,
         names,
@@ -1963,7 +2030,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.error(error_msg)
             return False, error_msg
 
-    # 教学注释：`_update_bucketed_weights_from_distributed` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 处理 bucket 化后的分布式权重更新。
+    # bucket 把多个小 tensor 合并传输，可以减少通信次数；这里负责拆解 bucket 并把参数写回模型。
     def _update_bucketed_weights_from_distributed(
         self, names, dtypes, shapes, group_name
     ):
@@ -1995,7 +2063,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.error(error_msg)
             return False, error_msg
 
-    # 教学注释：从 tensor payload 更新权重，常用于本地或远端权重热更新。
+    # 从内存中的 tensor 字典更新权重。
+    # 这条路径绕过磁盘文件，适合控制面已经把参数 tensor 直接传给 worker 的情况。
     def update_weights_from_tensor(
         self,
         named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
@@ -2027,7 +2096,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             raise NotImplementedError(f"Unknown load_format={load_format}")
         return True, "Success"
 
-    # 教学注释：`_update_weights_from_flattened_bucket` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 处理 flattened bucket 格式的权重更新。
+    # 多个参数被打平成一个连续 tensor 传输；这里根据 metadata 还原每个参数并写入模型。
     def _update_weights_from_flattened_bucket(
         self,
         flattened_tensor_bucket_dict,
@@ -2060,7 +2130,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         return True, "Success"
 
-    # 教学注释：按参数名读取权重，常用于校验、debug 或远端更新流程。
+    # 按参数名读取当前模型权重。
+    # 常用于热更新前后的校验、debug，或把本实例的某些权重片段发送给远端实例。
     def get_weights_by_name(
         self, name: str, truncate_size: int = 100
     ) -> Optional[torch.Tensor]:
@@ -2078,7 +2149,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.error(f"Error when getting parameter {name}: {e}")
             return None
 
-    # 教学注释：`init_lora_manager` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化 LoRA manager。
+    # 该对象负责 adapter 的加载、卸载、batch 级选择以及 LoRA 权重在 TP rank 上的切分和缓存。
     def init_lora_manager(self):
         self.lora_manager = LoRAManager(
             base_model=self.model,
@@ -2095,7 +2167,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             lora_paths=self.server_args.lora_paths,
         )
 
-    # 教学注释：`_init_lora_cuda_graph_moe_buffers` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 为 LoRA 与 CUDA graph/MoE 组合场景准备额外 buffer。
+    # graph capture 对内存地址稳定性要求高，因此 LoRA/MoE 的动态状态需要提前放入固定 buffer。
     def _init_lora_cuda_graph_moe_buffers(self):
         """Phase 1 of LoRA CUDA graph init: pre-allocate MoE intermediate buffers.
 
@@ -2124,7 +2197,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 )
                 break
 
-    # 教学注释：`load_lora_adapter` 处理模型/权重的加载或保存，是执行层生命周期管理的一部分。
+    # 动态加载一个 LoRA adapter。
+    # ModelRunner 会把 LoRA 权重放入 LoRA manager 管理；后续请求可以通过 lora id 选择使用哪个 adapter。
     def load_lora_adapter(self, lora_ref: LoRARef):
         """Load a new lora adapter from disk or huggingface."""
 
@@ -2142,7 +2216,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         return result
 
-    # 教学注释：`load_lora_adapter_from_tensors` 处理模型/权重的加载或保存，是执行层生命周期管理的一部分。
+    # 直接从 tensor payload 加载 LoRA adapter。
+    # 如果 payload 是 flattened_bucket，会先根据 metadata 还原各个 LoRA tensor，再交给 LoRA manager 注册。
     def load_lora_adapter_from_tensors(
         self, lora_ref: LoRARef, tensors, config_dict, added_tokens_config=None
     ):
@@ -2153,7 +2228,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         logger.info(f"LoRA adapter loading from tensors completes: {lora_ref}.")
         return result
 
-    # 教学注释：`unload_lora_adapter` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 卸载一个 LoRA adapter。
+    # 这会从 LoRA manager 中移除对应 adapter 的权重和索引，后续请求不能再引用它。
     def unload_lora_adapter(self, lora_ref: LoRARef):
         """Unload a lora adapter that was previously loaded during initialization or dynamic loading."""
 
@@ -2172,7 +2248,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return result
 
     @property
-    # 教学注释：`qwen3_next_config` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 读取 Qwen3-Next 这类 hybrid/linear attention 模型的专用配置。
+    # 这些属性会影响 KV cache 组织、attention backend 和层级执行方式。
     def qwen3_next_config(self):
         config = self.model_config.hf_config
         if isinstance(config, Qwen3NextConfig):
@@ -2180,7 +2257,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return None
 
     @property
-    # 教学注释：`hybrid_lightning_config` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 读取 hybrid lightning 模型配置。
+    # 该配置描述哪些层走特殊 linear/hybrid attention 路径。
     def hybrid_lightning_config(self):
         config = self.model_config.hf_config
         if isinstance(config, BailingHybridConfig):
@@ -2188,7 +2266,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return None
 
     @property
-    # 教学注释：`hybrid_gdn_config` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 读取 hybrid GDN 模型配置。
+    # ModelRunner 通过该属性判断是否需要启用对应 linear attention 运行时支持。
     def hybrid_gdn_config(self):
         config = self.model_config.hf_config.get_text_config()
         if isinstance(
@@ -2204,7 +2283,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return None
 
     @property
-    # 教学注释：`mamba2_config` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 读取 Mamba2 配置。
+    # Mamba/SSM 类模型和标准 transformer attention 不同，因此需要单独暴露配置给执行层。
     def mamba2_config(self):
         config = self.model_config.hf_config
         if isinstance(config, NemotronHConfig) and self.is_draft_worker:
@@ -2238,7 +2318,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return None
 
     @property
-    # 教学注释：`max_token_pool_size` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 返回 token pool 的最大容量。
+    # Scheduler 和内存池逻辑会用这个值判断还能容纳多少 token/KV cache 条目。
     def max_token_pool_size(self):
         """Return the max token pool size considering hybrid swa settings."""
         if self.is_hybrid_swa:
@@ -2247,14 +2328,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             return self.max_total_num_tokens
 
     @property
-    # 教学注释：`kimi_linear_config` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 读取 Kimi linear attention 相关配置。
+    # 该配置会影响 linear attention registry 和 backend 的选择。
     def kimi_linear_config(self):
         config = self.model_config.hf_config
         if isinstance(config, KimiLinearConfig):
             return config
         return None
 
-    # 教学注释：`_get_linear_attn_registry_result` 是状态查询或配置解析辅助函数，通常把底层运行时信息暴露给调度层或初始化流程。
+    # 从 linear attention registry 中查找当前模型匹配的实现。
+    # 如果匹配成功，后续属性会复用该结果获取模型 spec 和配置。
     def _get_linear_attn_registry_result(self):
         if self._linear_attn_registry_cache is _UNSET:
             self._linear_attn_registry_cache = get_linear_attn_config(
@@ -2263,13 +2346,15 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return self._linear_attn_registry_cache
 
     @property
-    # 教学注释：`linear_attn_model_spec` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 返回当前 linear attention 模型的 spec。
+    # spec 描述模型需要的线性 attention 执行方式和缓存结构。
     def linear_attn_model_spec(self):
         result = self._get_linear_attn_registry_result()
         return result[0] if result else None
 
     @property
-    # 教学注释：`mambaish_config` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 读取 Mamba-like 模型配置。
+    # 这类模型使用状态空间或混合模块，执行路径与纯 attention 模型不同。
     def mambaish_config(self):
         existing = (
             self.mamba2_config
@@ -2282,7 +2367,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         result = self._get_linear_attn_registry_result()
         return result[1] if result else None
 
-    # 教学注释：根据配置和量化方式决定 KV cache 使用的 dtype。
+    # 决定 KV cache 实际使用的数据类型。
+    # auto 模式会参考模型量化配置；显式配置可选择 FP8、BF16、FP4 等类型。
+    # KV cache dtype 直接影响显存占用、attention kernel 兼容性和精度。
     def configure_kv_cache_dtype(self):
         if self.server_args.kv_cache_dtype == "auto":
             quant_config = getattr(self.model, "quant_config", None)
@@ -2329,7 +2416,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
             )
 
-    # 教学注释：通过一次小矩阵乘法预热 cuBLAS，避免真实请求第一次触发初始化开销。
+    # 通过一个很小的矩阵乘法触发 cuBLAS 初始化。
+    # 这样真实请求第一次执行 matmul 时不会额外承担库初始化延迟。
     def init_cublas(self):
         """We need to run a small matmul to init cublas. Otherwise, it will raise some errors later."""
         dtype = torch.float16
@@ -2339,21 +2427,29 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         c = a @ b
         return c
 
-    # 教学注释：创建 attention backend，处理普通、hybrid、PDMux 和 two-batch-overlap 分支。
+    # 创建当前 ModelRunner 使用的 attention backend。
+    # 普通路径只创建一个 backend；PDMux 会创建 decode backend 组；two-batch-overlap 会包一层 TBO backend。
+    # attention backend 负责为每次 forward 准备 page table、seq lens、workspace 等 kernel metadata。
     def init_attention_backend(self):
         """Init attention kernel backend."""
+        # PDMux 会为 decode 准备一组 attention backend。
+        # 不同 SM group 可以使用不同 decode backend，从而支持更细粒度的并行调度。
         if self.server_args.enable_pdmux:
             self.attn_backend = self._get_attention_backend(init_new_workspace=True)
             self.decode_attn_backend_group = []
             for _ in range(self.server_args.sm_group_num):
                 self.decode_attn_backend_group.append(self._get_attention_backend())
             self.decode_attn_backend = self.decode_attn_backend_group[0]
+        # two-batch-overlap 会把 attention backend 包装成 TBO backend。
+        # 目的是让两个 batch 的部分计算阶段重叠，提高 GPU 利用率。
         elif self.server_args.enable_two_batch_overlap and not self.is_draft_worker:
             self.attn_backend = TboAttnBackend.init_new(self._get_attention_backend)
         else:
             self.attn_backend = self._get_attention_backend()
 
-    # 教学注释：解析 prefill/decode backend 配置，并在需要时创建 hybrid attention backend。
+    # 解析 prefill 与 decode 的 attention backend 配置。
+    # 如果两者不同，会创建 HybridAttnBackend，把 prefill 和 decode 分发到不同实现。
+    # 该函数还会把最终选择写回 global server args，便于其他模块读取。
     def _get_attention_backend(self, init_new_workspace: bool = False):
         """Init attention kernel backend."""
         draft_attn_backend = self.server_args.speculative_draft_attention_backend
@@ -2371,6 +2467,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             self.decode_attention_backend_str,
         ) = self.server_args.get_attention_backends()
 
+        # prefill 和 decode 的最优 attention backend 可能不同。
+        # 当两者不同，HybridAttnBackend 会在运行时根据 forward mode 选择对应实现。
         if self.decode_attention_backend_str != self.prefill_attention_backend_str:
             from sglang.srt.layers.attention.hybrid_attn_backend import (
                 HybridAttnBackend,
@@ -2408,7 +2506,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         ) = (self.prefill_attention_backend_str, self.decode_attention_backend_str)
         return attn_backend
 
-    # 教学注释：按 backend 名称实例化具体 attention backend，并包一层统一 wrapper。
+    # 按字符串名称从 ATTENTION_BACKENDS 注册表中实例化具体 backend。
+    # 创建后会经过 attn_backend_wrapper 包装，使外层调用拥有统一接口。
     def _get_attention_backend_from_str(
         self, backend_str: str, init_new_workspace: bool = False
     ):
@@ -2418,7 +2517,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         full_attention_backend = ATTENTION_BACKENDS[backend_str](self)
         return attn_backend_wrapper(self, full_attention_backend)
 
-    # 教学注释：在 CUDA graph capture 前预热/调优 kernel，例如 FlashInfer autotune 和 DeepGEMM warmup。
+    # 在 graph capture 和真实请求前预热关键 kernel。
+    # FlashInfer autotune、PP parallel DeepGEMM warmup 等逻辑都在这里触发。
+    # 这一步的目标是把编译、调优和 workspace 初始化尽量移到服务启动阶段。
     def kernel_warmup(self):
         """Warmup and tune kernels before cuda graph capture."""
         if self.device != "cuda":
@@ -2439,7 +2540,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
             pp_parallel_deep_gemm_warmup(self)
 
-    # 教学注释：提前初始化 FlashInfer allreduce workspace，避免图捕获期间出现 collective 操作。
+    # 预初始化 FlashInfer allreduce fusion workspace。
+    # 这一步必须发生在 CUDA graph capture 前，避免 graph 捕获过程中触发 broadcast/barrier 等 collective 导致死锁。
     def _pre_initialize_flashinfer_allreduce_workspace(self):
         """Pre-initialize flashinfer allreduce fusion workspaces.
 
@@ -2461,7 +2563,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             dtype=self.dtype,
         )
 
-    # 教学注释：判断当前硬件、MoE backend、spec 模式是否适合运行 FlashInfer autotune。
+    # 判断当前配置是否应该运行 FlashInfer autotune。
+    # 函数会排除禁用开关、不支持的 MoE backend、低于 sm90 的 GPU，以及 draft worker 等不适合调优的场景。
     def _should_run_flashinfer_autotune(self) -> bool:
         """Check if flashinfer autotune should be run."""
         if self.server_args.disable_flashinfer_autotune:
@@ -2502,7 +2605,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         return True
 
-    # 教学注释：执行 FlashInfer autotune，并把调优结果写入缓存文件。
+    # 执行 FlashInfer autotune。
+    # 它会选择或创建 cache 文件，在 forward_stream 上跑 _dummy_run，让 FlashInfer 为当前模型、并行配置和硬件生成更合适的 kernel 参数。
     def _flashinfer_autotune(self):
         """Run flashinfer autotune."""
         from flashinfer.autotuner import autotune
@@ -2533,7 +2637,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         torch.cuda.current_stream().wait_stream(self.forward_stream)
         logger.info("FlashInfer autotune completed.")
 
-    # 教学注释：根据模型、并行配置和硬件信息生成 FlashInfer autotune 缓存路径。
+    # 生成 FlashInfer autotune 结果的缓存路径。
+    # 路径由模型、dtype、量化、MoE backend、TP/PP/DP/EP 和 GPU 架构共同决定，避免不同运行配置复用错误调优结果。
     def _flashinfer_autotune_cache_path(self) -> Path:
         import flashinfer
 
@@ -2570,7 +2675,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             / f"rank_tp{self.tp_rank}_pp{self.pp_rank}_dp{self.dp_rank or 0}.json"
         )
 
-    # 教学注释：构造假的 ForwardBatch 做一次 warmup forward，用于 autotune、profile 和图捕获前准备。
+    # 构造一个假的 ForwardBatch 并执行一次前向。
+    # 它用于 FlashInfer autotune、graph capture 前 warmup、DeepGEMM warmup 等场景。
+    # 重点是它会模拟 decode/extend/speculative 等不同模式需要的张量形状和 metadata。
     def _dummy_run(
         self,
         batch_size: int,
@@ -2732,7 +2839,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             global_dp_buffer_len = None
             global_num_tokens_cpu = None
 
-        # 教学注释：`get_spec_info` 是状态查询或配置解析辅助函数，通常把底层运行时信息暴露给调度层或初始化流程。
+        # 为 dummy run 构造 speculative decoding 的验证信息。
+        # EAGLE、DFLASH、ngram 等算法需要不同的 spec_info 形状；warmup 时不关心真实 token，只需要 metadata 能驱动 kernel 初始化。
         def get_spec_info():
             spec_info = None
             if self.spec_algorithm.is_eagle() or self.spec_algorithm.is_standalone():
@@ -2836,10 +2944,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if lora_ids is not None:
             self.lora_manager.prepare_lora_batch(forward_batch)
 
-        # 教学注释：每次 forward 前 attention backend 都要根据 batch 形状重建 metadata。
+        # 为当前 batch 初始化 attention metadata。
+        # 这通常包括 seq_lens、prefix_lens、page table、cache loc、custom mask、workspace 指针等 kernel 输入。
         self.attn_backend.init_forward_metadata(forward_batch)
 
-        # 教学注释：`run_once` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+        # dummy run 的单次前向函数。
+        # 它重置 DP padding 状态、准备 PP proxy 或 embedding kwargs，然后调用 model.forward 触发 kernel 编译、autotune 或 graph capture 前的预热。
         def run_once():
             forward_batch.dp_local_start_pos = forward_batch.dp_local_num_tokens = None
             set_dp_buffer_len(
@@ -2871,12 +2981,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         torch.get_device_module(self.device).synchronize()
         self.tp_group.barrier()
-        # 教学注释：ForwardContext 把当前 attention backend 暴露给模型层，模型内部 attention 会从上下文读取执行后端。
+        # 建立 ForwardContext。
+        # 模型层内部不直接持有 ModelRunner，而是通过上下文读取当前 attention backend 和相关运行状态。
         with forward_context(ForwardContext(attn_backend=self.attn_backend)):
             with torch.inference_mode(), run_ctx or empty_context():
                 run_once()
 
-    # 教学注释：如果模型启用 ngram embedding，初始化 token table 和模块内部 buffer。
+    # 如果模型启用了 ngram embedding，这里初始化 token table 与模块内部 buffer。
+    # ngram embedding 依赖请求维度的 token 历史，因此需要和 req_to_token_pool 的容量对齐。
     def maybe_init_ngram_embedding(self):
         self.use_ngram_embedding = self.model_config.use_ngram_embedding
         if self.use_ngram_embedding:
@@ -2899,7 +3011,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                         self.max_running_requests, chunked_prefill_size, self.device
                     )
 
-    # 教学注释：sampling 后把新 token 写回 ngram token table。
+    # 每次采样出新 token 后，把 token 写回 ngram token table。
+    # 这样下一轮 forward 的 ngram embedding 能看到最新生成结果。
     def maybe_update_ngram_token_table(
         self,
         next_token_ids: torch.Tensor,
@@ -2922,7 +3035,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             ignore_tokens=None,
         )
 
-    # 教学注释：捕获 decode 阶段的 CUDA/CPU/NPU graph，加速后续固定形状执行。
+    # 捕获设备 graph，主要用于 decode 阶段的固定形状加速。
+    # 函数会根据设备类型选择 CUDA/CPU/NPU/out-of-tree graph runner。
+    # 捕获成功后，_forward_raw 可以在形状匹配时直接 replay graph，减少 Python 和 kernel launch 开销。
     def init_device_graphs(self):
         """Capture device graphs."""
         self.graph_runner = None
@@ -2975,7 +3090,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             f"mem usage={self.graph_mem_usage:.2f} GB. avail mem={after_mem:.2f} GB."
         )
 
-    # 教学注释：按 attention/MoE 层粒度初始化 piecewise CUDA graph。
+    # 初始化更细粒度的 piecewise CUDA graph。
+    # 它会遍历模型 layers，收集 attention 层、MoE 层和相关 fusion/indexer，用于局部图捕获。
+    # 这种方式比整图 capture 更灵活，适合一些动态性更强的 prefill/extend 路径。
     def init_piecewise_cuda_graphs(self, force_for_draft_worker: bool = False):
         """Initialize piecewise CUDA graph runner."""
         self.piecewise_cuda_graph_runner = None
@@ -3110,7 +3227,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             f"mem usage={mem_usage:.2f} GB. avail mem={after_mem:.2f} GB."
         )
 
-    # 教学注释：`init_threads_binding` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化 CPU 线程绑核策略。
+    # 在 CPU 或混合后端下，线程绑定会影响推理吞吐和延迟稳定性。
     def init_threads_binding(self):
         omp_cpuids = os.environ.get("SGLANG_CPU_OMP_THREADS_BIND", "all")
         cpu_ids_by_node = get_cpu_ids_by_node()
@@ -3145,7 +3263,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     f"Please set proper `--max-total-tokens` to avoid the out-of-memory error."
                 )
 
-    # 教学注释：对支持 torch tensor parallel 的模型应用 TP 切分策略。
+    # 对支持 torch tensor parallel 的模型应用 TP 切分策略。
+    # 这通常发生在模型加载完成之后、正式服务之前。
     def apply_torch_tp(self):
         logger.info(f"Enabling torch tensor parallelism on {self.tp_size} devices.")
         from sglang.srt.layers.model_parallel import tensor_parallel
@@ -3153,11 +3272,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         device_mesh = torch.distributed.init_device_mesh(self.device, (self.tp_size,))
         tensor_parallel(self.model, device_mesh)
 
-    # 教学注释：`update_decode_attn_backend` 属于运行时热更新/LoRA/权重管理接口，worker 层通常转发，ModelRunner 层负责具体执行。
+    # 切换当前 decode attention backend。
+    # PDMux 场景会维护多个 decode backend，运行时根据 stream/group 选择其中一个执行。
     def update_decode_attn_backend(self, stream_idx: int):
         self.decode_attn_backend = self.decode_attn_backend_group[stream_idx]
 
-    # 教学注释：decode 前向路径：准备 attention metadata，调用模型生成下一个 token 的 logits。
+    # decode 模式通常每个请求只生成一个 token。
+    # 函数先准备模型特定 metadata 和 attention metadata，然后调用 model.forward。
+    # decode 形状相对稳定，因此是 CUDA graph replay 的主要优化对象。
     def forward_decode(
         self,
         forward_batch: ForwardBatch,
@@ -3172,6 +3294,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 # e.g. Moss-VL's prefill cross-attention custom mask.
                 self.model.prepare_forward_batch(forward_batch)
             if self.server_args.enable_pdmux:
+                # PDMux decode 路径使用专门的 decode attention backend。
+                # decode metadata 与 prefill metadata 的形状和 kernel 需求不同，因此单独初始化。
                 self.decode_attn_backend.init_forward_metadata(forward_batch)
                 # PDmux selects a per-stream backend; publish it to model-layer
                 # readers via the active ForwardContext so RadixAttention etc.
@@ -3191,7 +3315,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             else contextlib.nullcontext()
         )
 
-        # 教学注释：`_do_forward` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+        # decode 路径中真正调用模型的一小段闭包。
+        # 外层已经准备好 attention metadata 和计时上下文；闭包只负责把 input_ids、positions、ForwardBatch 以及 PP kwargs 交给 model.forward。
         def _do_forward():
             return self.model.forward(
                 forward_batch.input_ids,
@@ -3208,7 +3333,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     return _do_forward()
             return _do_forward()
 
-    # 教学注释：extend/prefill 前向路径：处理输入 embedding、PP proxy、图回放，然后调用模型。
+    # extend/prefill 模式处理 prompt token 或新增上下文 token。
+    # 这里会准备 PP proxy、input_embeds、image/multimodal replacement embeds、embedding mode 等 kwargs。
+    # 如果 piecewise CUDA graph 覆盖当前 batch，会优先 replay；否则走普通 model.forward。
     def forward_extend(
         self,
         forward_batch: ForwardBatch,
@@ -3277,7 +3404,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
         return (ret, can_run_graph)
 
-    # 教学注释：DP attention 下空闲 worker 的 forward 路径，用于保持分布式执行同步。
+    # idle forward 用于 DP attention 等需要所有 rank 同步参与的场景。
+    # 即使某个 rank 当前没有真实 token，也要维护 metadata 或清理旧 metadata，避免通信侧等待失败。
     def forward_idle(
         self, forward_batch: ForwardBatch, pp_proxy_tensors=None
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
@@ -3309,7 +3437,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 **kwargs,
             )
 
-    # 教学注释：split prefill 前向路径：根据 split_index 推进分片 prefill。
+    # split prefill 的模型执行段。
+    # 它会根据 split_index 和 split_forward_count 计算当前片段范围，然后调用模型的 forward_split_prefill。
+    # 执行后推进 split_index，供下一次调用继续处理剩余 prompt。
     def forward_split_prefill(
         self,
         forward_batch: ForwardBatch,
@@ -3337,7 +3467,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         forward_batch.split_index = next_split_index
         return ret
 
-    # 教学注释：ModelRunner 对外统一 forward 入口，包裹 profiling、canary、EPLB 和错误恢复逻辑。
+    # ModelRunner 对外统一 forward 入口。
+    # 它负责包裹 profiling、canary、expert distribution recorder、EPLB 和错误恢复等横切逻辑。
+    # 真正根据 ForwardMode 选择执行路径的代码在 _forward_raw 中。
     def forward(
         self,
         forward_batch: ForwardBatch,
@@ -3432,7 +3564,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         return output
 
-    # 教学注释：真正的 forward 分发器：根据 ForwardMode 选择 decode/extend/idle/split_prefill，并处理 graph replay。
+    # ModelRunner 的核心 forward 分发器。
+    # 这里先建立 ForwardContext，让模型内部 attention 能拿到当前 backend。
+    # 然后根据 batch 形状判断是否可走 graph replay；如果不能 replay，就根据 ForwardMode 分发到 decode、extend、split prefill 或 idle。
     def _forward_raw(
         self,
         forward_batch: ForwardBatch,
@@ -3457,7 +3591,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             can_run_graph = bool(
                 mode_check()
                 and self.graph_runner
-                # 教学注释：如果当前 batch 形状可被已捕获 graph 覆盖，就走 graph replay 而不是 eager forward。
+                # 判断当前 ForwardBatch 是否能被已捕获 graph 覆盖。
+                # 如果 batch size、token 数、padding 模式等条件匹配，就可以走 replay 快路径。
                 and self.graph_runner.can_run(forward_batch)
             )
 
@@ -3509,28 +3644,32 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self.hisparse_coordinator.num_real_reqs.fill_(forward_batch.batch_size)
 
             # Forward without cuda graph
-            # 教学注释：decode 模式通常每个请求只推进一个 token，是最适合 CUDA graph replay 的路径。
+            # decode 分支。
+            # 每个请求通常只推进一个 token，是服务中最高频、最需要低延迟优化的路径。
             if forward_batch.forward_mode.is_decode():
                 ret = self.forward_decode(
                     forward_batch,
                     skip_attn_backend_init=skip_attn_backend_init,
                     pp_proxy_tensors=pp_proxy_tensors,
                 )
-            # 教学注释：split prefill 把长 prefill 拆成多个片段，降低单次显存和延迟尖峰。
+            # split prefill 分支。
+            # 当前调用只处理长 prompt 的一个片段，处理完成后等待下一次 split 继续推进。
             elif forward_batch.forward_mode.is_split_prefill():
                 ret = self.forward_split_prefill(
                     forward_batch,
                     reinit_attn_backend=reinit_attn_backend,
                     forward_count=split_forward_count,
                 )
-            # 教学注释：extend/prefill 模式处理新增 prompt token，通常 token 数更多、形状更动态。
+            # extend/prefill 分支。
+            # 它处理 prompt 或新追加上下文，token 数多且形状动态，通常需要重新准备 attention metadata。
             elif forward_batch.forward_mode.is_extend(include_draft_extend_v2=True):
                 ret, can_run_graph = self.forward_extend(
                     forward_batch,
                     skip_attn_backend_init=skip_attn_backend_init,
                     pp_proxy_tensors=pp_proxy_tensors,
                 )
-            # 教学注释：idle batch 用于 DP attention 等场景，让没有真实 token 的 rank 仍参与同步。
+            # idle 分支。
+            # 某些并行模式下，即使没有本地真实 token，也要执行空 forward 来保持 rank 间同步。
             elif forward_batch.forward_mode.is_idle():
                 ret = self.forward_idle(
                     forward_batch, pp_proxy_tensors=pp_proxy_tensors
@@ -3546,14 +3685,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
-    # 教学注释：采样前对 logits 做 logit bias、soft cap、grammar/mask 等预处理。
+    # 采样前的 logits 预处理。
+    # 这里会应用 logit bias、softcap、grammar/mask、logprob 需要的归一化等逻辑。
+    # 预处理后的 logits 才会交给 sampler 执行 temperature/top-p/top-k 等采样策略。
     def _preprocess_logits(
         self, logits_output: LogitsProcessorOutput, sampling_info: SamplingBatchInfo
     ):
         # NOTE: In overlap mode, the function update_regex_vocab_mask (in sample)
         #       was executed after we processed last batch's results.
-
         # Calculate logits bias and apply it to next_token_logits.
+
         sampling_info.update_regex_vocab_mask()
         sampling_info.apply_logits_bias(logits_output.next_token_logits)
 
@@ -3564,7 +3705,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # when structured output (grammar) is used.
         sampling_info.vocab_mask = None
 
-    # 教学注释：根据 logits 和 sampling_info 采样 next token，并维护 ngram token table。
+    # 根据 logits 和 sampling_info 生成 next token。
+    # decode 模式采样位置是一批请求的一维位置；prefill 模式通常取每个序列末尾 token 的 logits。
+    # 采样后还会更新 ngram token table，保持后续 forward 的辅助状态一致。
     def sample(
         self,
         logits_output: LogitsProcessorOutput,
@@ -3582,7 +3725,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self._preprocess_logits(logits_output, forward_batch.sampling_info)
 
         # Sample the next tokens
-        # 教学注释：Sampler 读取 logits 和 sampling_info，执行 temperature/top-p/top-k/grammar 等采样规则。
+        # 调用采样器。
+        # sampler 会根据 sampling_info 执行 temperature、top-p、top-k、min-p、grammar mask、logprob 等策略。
         next_token_ids = self.sampler(
             logits_output,
             forward_batch.sampling_info,
@@ -3599,7 +3743,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.maybe_update_ngram_token_table(next_token_ids, forward_batch)
         return next_token_ids
 
-    # 教学注释：只计算 logprob，不采样 token，服务 return_logprob / prefill-only 等路径。
+    # 只计算 logprob，不生成 next token。
+    # 这个路径服务 return_logprob、prefill-only 或验证类请求，避免走不必要的 sampling。
     def compute_logprobs_only(
         self,
         logits_output: LogitsProcessorOutput,
@@ -3632,14 +3777,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             forward_batch.token_ids_logprobs,
         )
 
-    # 教学注释：把当前模型保存到远端存储或指定位置。
+    # 把当前模型保存到远端位置。
+    # 这通常用于把运行时模型权重导出给外部存储或其他实例复用。
     def save_remote_model(self, url: str):
         from sglang.srt.model_loader.loader import RemoteModelLoader
 
         logger.info(f"Saving model to {url}")
         RemoteModelLoader.save_model(self.model, self.model_config.model_path, url)
 
-    # 教学注释：`save_sharded_model` 处理模型/权重的加载或保存，是执行层生命周期管理的一部分。
+    # 保存当前 rank 负责的分片模型。
+    # 在 TP/PP 场景中，每个 rank 只持有部分权重，因此保存时需要按 sharded 格式组织输出。
     def save_sharded_model(
         self, path: str, pattern: Optional[str] = None, max_size: Optional[int] = None
     ):
@@ -3650,11 +3797,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         ShardedStateLoader.save_model(self.model, path, pattern, max_size)
 
-    # 教学注释：`check_weights` 用于运行时校验，确保模型、权重或执行环境满足后续 forward 的假设。
+    # `check_weights` 负责校验运行时假设。
+    # 这类检查通常用来提前发现权重、并行配置或后端能力不匹配的问题。
     def check_weights(self, action: str):
         return self._weight_checker.handle(action=action)
 
-    # 教学注释：`update_weights_from_ipc` 属于运行时热更新/LoRA/权重管理接口，worker 层通常转发，ModelRunner 层负责具体执行。
+    # 通过 IPC 共享内存或句柄接收权重 tensor。
+    # 这种方式避免大 tensor 在进程间重复拷贝，适合本机多进程权重热更新。
     def update_weights_from_ipc(self, recv_req):
         """Update weights from IPC for checkpoint-engine integration."""
         try:
@@ -3672,7 +3821,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.error(f"IPC weight update failed: {e}")
             return False, str(e)
 
-    # 教学注释：`prealloc_symmetric_memory_pool` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 预分配 symmetric memory pool。
+    # symmetric memory 要求多个 rank 上的内存布局对齐，提前分配可以支持特定通信或 fused kernel。
     def prealloc_symmetric_memory_pool(self):
         # PyTorch mempools never de-fragment memory in OOM scenarios, so we need to pre-allocate a large chunk of memory to limit fragmentation.
         if (
@@ -3694,7 +3844,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     device=self.device,
                 )
 
-    # 教学注释：`_maybe_rebalance_after_rank_fault` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # rank 故障后尝试重新平衡专家或运行时状态。
+    # 这是 elastic/容错路径的一部分，用于让服务在部分 rank 异常后尽量恢复可用。
     def _maybe_rebalance_after_rank_fault(
         self,
         output: ModelRunnerOutput,
@@ -3725,21 +3876,24 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return output
 
 
-# 教学注释：`_model_load_weights_direct` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+# 直接把给定 named_tensors 写入模型。
+# 这是权重更新底层工具函数，绕过高级 loader，逐个参数调用模型的加载逻辑。
 def _model_load_weights_direct(model, named_tensors: List[Tuple[str, torch.Tensor]]):
     params_dict = dict(model.named_parameters())
     for name, tensor in named_tensors:
         default_weight_loader(params_dict[name], tensor)
 
 
-# 教学注释：`_unwrap_tensor` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+# 从序列化或封装对象中取出当前 rank 需要的 tensor。
+# 如果 tensor 是按 rank 分片保存的，这里会选择对应 tp_rank 的分片并移动到目标 device。
 def _unwrap_tensor(tensor, tp_rank, device):
     if isinstance(tensor, LocalSerializedTensor):
         tensor = tensor.get(tp_rank)
     return tensor.to(device)
 
 
-# 教学注释：`_build_step_span_name` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+# 根据 ForwardBatch 构造 tracing/profiling span 名称。
+# 名称中包含 forward mode 等信息，便于在性能分析工具中区分 decode、extend、verify 等阶段。
 def _build_step_span_name(forward_batch: ForwardBatch) -> str:
     """Build a profile-trace span name for one forward step."""
     mode = forward_batch.forward_mode
@@ -3751,13 +3905,15 @@ def _build_step_span_name(forward_batch: ForwardBatch) -> str:
 
 
 @dataclass
-# 教学注释：本地序列化 tensor 的轻量封装，用于权重更新通信。
+# 用于权重更新流程的本地序列化 tensor 描述。
+# 它把 tensor 的存储位置、形状和 dtype 信息包装起来，方便跨接口传递。
 class LocalSerializedTensor:
     """torch.Tensor that gets serialized by MultiprocessingSerializer (which only serializes a pointer and not the data).
     The i-th element in the list corresponds to i-th rank's GPU."""
 
     values: List[bytes]
 
-    # 教学注释：`get` 是状态查询或配置解析辅助函数，通常把底层运行时信息暴露给调度层或初始化流程。
+    # 读取 LocalSerializedTensor 中指定 rank 的 tensor。
+    # 权重更新流程可以通过该方法为不同 TP rank 取出对应参数分片。
     def get(self, rank: int):
         return MultiprocessingSerializer.deserialize(self.values[rank])

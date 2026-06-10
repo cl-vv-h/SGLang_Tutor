@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
-# SGLang 教学注释版源码副本
+# SGLang 中文精读注释版源码副本
 # =============================================================================
 # 说明：
 # 1. 本文件由 learning 教学材料生成，来源于 SGLang 原始源码。
-# 2. 这里添加了中文教学注释，帮助理解架构、数据流和关键代码块。
+# 2. 注释重点解释每个类、函数和关键代码块在运行时承担的职责。
 # 3. 这不是运行时代码，不要从业务代码中 import 本文件。
 # 4. 原始源码没有被修改；如需对照，请查看 python/sglang/srt/... 下的对应文件。
 # =============================================================================
@@ -25,6 +25,8 @@
 # ==============================================================================
 """A tensor parallel worker."""
 
+# 下面开始保留原始 imports。
+# 这些 import 展示了该文件依赖的边界：tp_worker 主要依赖 manager、distributed 和 ModelRunner；model_runner 则依赖分布式、attention、KV cache、graph、loader、sampling 等几乎整个执行层。
 from __future__ import annotations
 
 import logging
@@ -72,49 +74,61 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# 教学注释：这一层只定义 Scheduler 需要的 worker 能力；真正实现放在 TpModelWorker。
-# 教学注释：Tensor Parallel worker 的抽象基类，规定 Scheduler 能调用的模型执行接口，并把大量能力委托给 ModelRunner。
+# BaseTpWorker 是 Scheduler 能看到的 TP worker 抽象接口。
+# 它不关心具体模型如何加载、forward 如何执行，只规定 worker 必须提供哪些能力。
+# 这里很多方法只是把调用转交给 ModelRunner，目的是让调度层不直接依赖模型执行细节。
 class BaseTpWorker(ABC):
     @abstractmethod
-    # 教学注释：生成主入口：把 ScheduleBatch 转成 ForwardBatch，调用 ModelRunner 做前向，并在 PP 末级完成采样。
+    # 这是 TpModelWorker 的生成主入口。
+    # 输入是 Scheduler 组织好的 ScheduleBatch；函数先构造 ForwardBatch，再调用 ModelRunner.forward。
+    # 如果当前 PP rank 是最后一级，它会拿到 logits 并执行 sampling；否则只把 hidden states 传给下一段 pipeline。
+    # 这里也是 speculative verify、prefill-only、overlap sampling、dLLM 等分支汇合的位置。
     def forward_batch_generation(self, forward_batch: ForwardBatch):
         pass
 
     @property
     @abstractmethod
-    # 教学注释：抽象属性或属性方法，用来暴露当前 worker 持有的底层 ModelRunner。
+    # 暴露当前 worker 持有的 ModelRunner。
+    # BaseTpWorker 通过抽象属性约束子类；Scheduler 和通用 worker 方法可以统一访问底层执行器。
     def model_runner(self) -> "ModelRunner":
         pass
 
     @property
-    # 教学注释：读取模型滑动窗口大小，调度层会据此判断 KV cache 与 attention 的可用范围。
+    # 返回模型的 sliding window 大小。
+    # 调度层和 KV cache 逻辑会根据这个值判断哪些历史 token 仍需保留在 attention 窗口内。
     def sliding_window_size(self) -> Optional[int]:
         return self.model_runner.sliding_window_size
 
     @property
-    # 教学注释：判断模型是否混合使用 full attention 与 sliding-window attention。
+    # 返回模型是否混合使用 full attention 与 sliding-window attention。
+    # 如果为 true，调度和 KV cache 容量估算需要同时考虑普通层与 SWA 层的 token 上限。
     def is_hybrid_swa(self) -> bool:
         return self.model_runner.is_hybrid_swa
 
-    # 教学注释：读取每层 token/KV cache 相关信息，用于容量估算或监控。
+    # 返回 full attention 层和 SWA 层分别可容纳的 token 数。
+    # hybrid SWA 模型中，不同层的 KV cache 容量可能不同，调度层需要这两个值做安全容量判断。
     def get_tokens_per_layer_info(self):
         return (
             self.model_runner.full_max_total_num_tokens,
             self.model_runner.swa_max_total_num_tokens,
         )
 
-    # 教学注释：返回 tokenizer/model 相关的 padding 函数，供 batch 构造阶段使用。
+    # 返回模型自定义的 pad_input_ids 函数。
+    # 有些模型在 padding input ids 时需要特殊 token 或位置处理；没有自定义函数时返回 None。
     def get_pad_input_ids_func(self):
         return getattr(self.model_runner.model, "pad_input_ids", None)
 
-    # 教学注释：返回 request/token/KV cache 等内存池对象，供调度层观察和复用。
+    # 暴露请求到 token 的映射池，以及 token 到 KV cache 的分配器。
+    # Scheduler 通过这些池管理 continuous batching 中每个请求占用的 KV cache 位置。
     def get_memory_pool(self) -> Tuple[ReqToTokenPool, BaseTokenToKVPoolAllocator]:
         return (
             self.model_runner.req_to_token_pool,
             self.model_runner.token_to_kv_pool_allocator,
         )
 
-    # 教学注释：`update_weights_from_disk` 属于运行时热更新/LoRA/权重管理接口，worker 层通常转发，ModelRunner 层负责具体执行。
+    # 从磁盘路径加载新的权重并更新当前模型。
+    # worker 层负责接收请求对象，ModelRunner 层负责真正调用 loader、同步 rank 并刷新模型状态。
+    # 这类接口常用于不停服替换权重或把模型切换到新的 checkpoint。
     def update_weights_from_disk(self, recv_req: UpdateWeightFromDiskReqInput):
         success, message = self.model_runner.update_weights_from_disk(
             recv_req.model_path,
@@ -123,7 +137,8 @@ class BaseTpWorker(ABC):
         )
         return success, message
 
-    # 教学注释：初始化权重更新通信组，让多个 rank 能同步接收更新。
+    # 初始化权重更新使用的分布式通信组。
+    # 多 rank 模型在热更新时必须让每个 rank 收到自己负责的权重分片，因此需要单独的更新组来协调通信。
     def init_weights_update_group(self, recv_req: InitWeightsUpdateGroupReqInput):
         success, message = self.model_runner.init_weights_update_group(
             recv_req.master_address,
@@ -135,14 +150,16 @@ class BaseTpWorker(ABC):
         )
         return success, message
 
-    # 教学注释：销毁权重更新通信组，释放相关分布式资源。
+    # 销毁权重更新通信组。
+    # 当一次热更新流程结束或不再需要该 group 时释放资源，避免长期占用分布式通信句柄。
     def destroy_weights_update_group(self, recv_req: DestroyWeightsUpdateGroupReqInput):
         success, message = self.model_runner.destroy_weights_update_group(
             recv_req.group_name,
         )
         return success, message
 
-    # 教学注释：`init_weights_send_group_for_remote_instance` 属于初始化阶段，重点看它创建哪些运行时状态以及这些状态会被哪个 forward 分支使用。
+    # 初始化向远端实例发送权重所需的通信组。
+    # 这个路径用于把当前实例的权重同步给另一个远端服务实例，常见于模型迁移、实例扩容或远端热更新。
     def init_weights_send_group_for_remote_instance(
         self, recv_req: InitWeightsSendGroupForRemoteInstanceReqInput
     ):
@@ -158,7 +175,8 @@ class BaseTpWorker(ABC):
         )
         return success, message
 
-    # 教学注释：`send_weights_to_remote_instance` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 把当前模型权重发送到远端实例。
+    # 函数会依赖前面建立的 send group，把每个 rank 持有的参数分片传到对应接收端。
     def send_weights_to_remote_instance(
         self, recv_req: SendWeightsToRemoteInstanceReqInput
     ):
@@ -169,7 +187,8 @@ class BaseTpWorker(ABC):
         )
         return success, message
 
-    # 教学注释：通过分布式通信更新权重，适配多 rank 场景。
+    # 通过分布式通信接收并更新权重。
+    # 这条路径适合权重已经分散在多个 rank 或远端发送端的场景，避免把完整权重先聚合到单个进程。
     def update_weights_from_distributed(
         self, recv_req: UpdateWeightsFromDistributedReqInput
     ):
@@ -182,7 +201,8 @@ class BaseTpWorker(ABC):
         )
         return success, message
 
-    # 教学注释：从 tensor payload 更新权重，常用于本地或远端权重热更新。
+    # 从内存中的 tensor 字典更新权重。
+    # 这条路径绕过磁盘文件，适合控制面已经把参数 tensor 直接传给 worker 的情况。
     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
 
         monkey_patch_torch_reductions()
@@ -194,30 +214,35 @@ class BaseTpWorker(ABC):
         )
         return success, message
 
-    # 教学注释：`update_weights_from_ipc` 属于运行时热更新/LoRA/权重管理接口，worker 层通常转发，ModelRunner 层负责具体执行。
+    # 通过 IPC 共享内存或句柄接收权重 tensor。
+    # 这种方式避免大 tensor 在进程间重复拷贝，适合本机多进程权重热更新。
     def update_weights_from_ipc(self, recv_req: UpdateWeightsFromIPCReqInput):
         """Update weights from IPC for checkpoint-engine integration."""
         success, message = self.model_runner.update_weights_from_ipc(recv_req)
         return success, message
 
-    # 教学注释：按参数名读取权重，常用于校验、debug 或远端更新流程。
+    # 按参数名读取当前模型权重。
+    # 常用于热更新前后的校验、debug，或把本实例的某些权重片段发送给远端实例。
     def get_weights_by_name(self, recv_req: GetWeightsByNameReqInput):
         parameter = self.model_runner.get_weights_by_name(
             recv_req.name, recv_req.truncate_size
         )
         return parameter
 
-    # 教学注释：`load_lora_adapter` 处理模型/权重的加载或保存，是执行层生命周期管理的一部分。
+    # 动态加载一个 LoRA adapter。
+    # ModelRunner 会把 LoRA 权重放入 LoRA manager 管理；后续请求可以通过 lora id 选择使用哪个 adapter。
     def load_lora_adapter(self, recv_req: LoadLoRAAdapterReqInput):
         result = self.model_runner.load_lora_adapter(recv_req.to_ref())
         return result
 
-    # 教学注释：`unload_lora_adapter` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 卸载一个 LoRA adapter。
+    # 这会从 LoRA manager 中移除对应 adapter 的权重和索引，后续请求不能再引用它。
     def unload_lora_adapter(self, recv_req: UnloadLoRAAdapterReqInput):
         result = self.model_runner.unload_lora_adapter(recv_req.to_ref())
         return result
 
-    # 教学注释：`load_lora_adapter_from_tensors` 处理模型/权重的加载或保存，是执行层生命周期管理的一部分。
+    # 直接从 tensor payload 加载 LoRA adapter。
+    # 如果 payload 是 flattened_bucket，会先根据 metadata 还原各个 LoRA tensor，再交给 LoRA manager 注册。
     def load_lora_adapter_from_tensors(
         self, recv_req: LoadLoRAAdapterFromTensorsReqInput
     ):
@@ -242,20 +267,26 @@ class BaseTpWorker(ABC):
         )
         return result
 
-    # 教学注释：embedding 模型入口：执行 forward 后直接返回 embedding，而不是采样 token。
+    # embedding 模型不需要采样 next token。
+    # 这里仍然复用 ForwardBatch 和 ModelRunner.forward，但直接返回 embedding/pooler 输出。
     def forward_batch_embedding(self, batch: ScheduleBatch):
-        # 教学注释：ScheduleBatch 在进入模型前会被转换成 ForwardBatch，补齐位置、KV cache、sampling 等张量视图。
+        # 把调度层 ScheduleBatch 转换为模型层 ForwardBatch。
+        # 这个转换会准备 input_ids、positions、seq_lens、KV cache location、sampling_info、spec_info 等模型执行需要的张量视图。
         forward_batch = ForwardBatch.init_new(batch, self.model_runner)
         output = self.model_runner.forward(forward_batch).logits_output
         return output  # Returns EmbeddingPoolerOutput
 
 
-# 教学注释：TpModelWorker 是每个 TP rank 上的执行入口，生命周期与 server worker 进程绑定。
-# 教学注释：真实的 TP 模型 worker，负责按 rank 初始化模型运行器、处理 PP/TP/Spec/dLLM 分支，并承接生成请求。
+# TpModelWorker 是每个 tensor-parallel rank 上实际运行的 worker。
+# 它负责把 server_args、TP/PP rank、模型配置和 tokenizer 等运行时信息组装起来。
+# 请求到来时，它把 ScheduleBatch 转成 ForwardBatch，再调用 ModelRunner 执行真正的模型前向。
+# 如果启用了 PP、speculative decoding、dLLM 或 overlap，这一层会决定走哪条分支。
 class TpModelWorker(BaseTpWorker):
     """A tensor parallel model worker."""
 
-    # 教学注释：初始化当前对象的基础状态；在 ModelRunner 中还会触发分布式、模型加载、内存池和 graph 初始化。
+    # 初始化当前对象持有的运行时状态。
+    # 在 TpModelWorker 中，这里会创建 ModelConfig、ModelRunner、tokenizer 和并行通信组引用。
+    # 在 ModelRunner 中，这里会保存设备/rank/spec/parallel 配置，并继续触发分布式初始化与模型执行环境初始化。
     def __init__(
         self,
         server_args: ServerArgs,
@@ -274,7 +305,8 @@ class TpModelWorker(BaseTpWorker):
         is_multi_layer_eagle: bool = False,
     ):
         # Parse args
-        # 教学注释：server_args 是运行时总开关，后续分布式、attention backend、graph、LoRA、spec 都依赖它。
+        # 保存 server_args。
+        # 这是运行时配置的总入口，后续是否启用 speculative decoding、LoRA、CUDA graph、attention backend、MoE、DP/PP/TP 等都从这里读取。
         self.server_args = server_args
         self.tp_size = server_args.tp_size
         self.ep_size = server_args.ep_size
@@ -309,6 +341,8 @@ class TpModelWorker(BaseTpWorker):
             self.tokenizer = self.processor = None
         else:
             if self.model_config.is_multimodal:
+                # 初始化 processor。
+                # 多模态模型可能需要 processor 处理图像、视频或其他非文本输入。
                 self.processor = get_processor(
                     server_args.tokenizer_path,
                     tokenizer_mode=server_args.tokenizer_mode,
@@ -318,6 +352,8 @@ class TpModelWorker(BaseTpWorker):
                 )
                 self.tokenizer = get_tokenizer_from_processor(self.processor)
             else:
+                # 初始化 tokenizer。
+                # worker 需要 tokenizer 来处理 padding、特殊 token、stop token 等与请求解析相关的逻辑。
                 self.tokenizer = get_tokenizer(
                     server_args.tokenizer_path,
                     tokenizer_mode=server_args.tokenizer_mode,
@@ -328,6 +364,8 @@ class TpModelWorker(BaseTpWorker):
         self.device = self.model_runner.device
 
         # Init nccl groups
+        # 读取 pipeline parallel 通信组。
+        # 后续 forward_batch_generation 会用 pp_group.is_last_rank 判断当前 rank 是否负责采样。
         self.pp_group = get_pp_group()
         self.world_group = get_world_group()
 
@@ -362,7 +400,9 @@ class TpModelWorker(BaseTpWorker):
         self.enable_spec = server_args.speculative_algorithm is not None
         self.hicache_layer_transfer_counter = None
 
-    # 教学注释：根据当前 worker 是否为 draft worker 选择 target/draft 模型路径并创建 ModelConfig。
+    # 根据 worker 身份选择模型路径并创建 ModelConfig。
+    # 普通 target worker 使用主模型路径；draft worker 使用 speculative_draft_model_path。
+    # 这样 speculative decoding 可以让 target 模型和 draft 模型拥有不同配置。
     def _init_model_config(self):
         from sglang.srt.configs.model_config import ModelConfig
 
@@ -381,7 +421,9 @@ class TpModelWorker(BaseTpWorker):
             is_draft_model=self.is_draft_worker,
         )
 
-    # 教学注释：构造 ModelRunner，把分布式 rank、内存池和模型配置交给底层执行器。
+    # 创建底层 ModelRunner。
+    # 这里把 TP rank、PP rank、DP rank、GPU id、通信端口和内存池等信息一起传入。
+    # 从这一刻开始，模型加载、KV cache、attention backend 等重资源都交给 ModelRunner 管理。
     def _init_model_runner(self):
         from sglang.srt.model_executor.model_runner import ModelRunner
 
@@ -405,7 +447,8 @@ class TpModelWorker(BaseTpWorker):
             draft_model_idx=0 if self.is_multi_layer_eagle else None,
         )
 
-    # 教学注释：为 multi-layer EAGLE speculative decoding 创建多个 draft ModelRunner。
+    # multi-layer EAGLE 会在不同 draft step 使用多个 draft runner。
+    # 这个函数按 speculative_num_steps 创建一组 ModelRunner，让每一步草稿验证可以拥有独立执行状态。
     def _init_multi_layer_eagle_model_runners(self):
         from sglang.srt.model_executor.model_runner import ModelRunner
 
@@ -433,7 +476,8 @@ class TpModelWorker(BaseTpWorker):
                 )
             )
 
-    # 教学注释：按配置初始化 diffusion/denoising LLM 相关算法组件。
+    # dLLM 是 diffusion/denoising 风格的生成路径。
+    # 如果配置启用 dLLM，这里会初始化对应算法对象；后续 forward_batch_generation 会分流到 dLLM 专用实现。
     def _init_dllm_algorithm(self):
         from sglang.srt.dllm.algorithm.base import DllmAlgorithm
 
@@ -443,24 +487,29 @@ class TpModelWorker(BaseTpWorker):
             self.dllm_algorithm = None
 
     @property
-    # 教学注释：抽象属性或属性方法，用来暴露当前 worker 持有的底层 ModelRunner。
+    # 暴露当前 worker 持有的 ModelRunner。
+    # BaseTpWorker 通过抽象属性约束子类；Scheduler 和通用 worker 方法可以统一访问底层执行器。
     def model_runner(self) -> "ModelRunner":
         return self._model_runner
 
-    # 教学注释：注册 HiCache 层间传输计数器，便于监控 cache 迁移。
+    # 注册 HiCache 层级传输计数器。
+    # 计数器用于观察每层 cache 传输完成情况，帮助调度或诊断跨层缓存迁移。
     def register_hicache_layer_transfer_counter(self, counter: LayerDoneCounter):
         self.hicache_layer_transfer_counter = counter
 
-    # 教学注释：为当前 batch 设置 HiCache consumer，使后续 forward 能写入/读取对应 cache 通道。
+    # 为当前 batch 设置 HiCache consumer 索引。
+    # 后续 forward 中的 cache 读取/写入会带上这个 consumer 标识，以区分不同请求或不同缓存通道。
     def set_hicache_consumer(self, consumer_index: int):
         if self.hicache_layer_transfer_counter is not None:
             self.hicache_layer_transfer_counter.set_consumer(consumer_index)
 
-    # 教学注释：`register_hisparse_coordinator` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+    # 注册 HiSparse 协调器。
+    # HiSparse 相关 attention 或 cache 路径需要一个协调对象来管理稀疏结构和跨层状态。
     def register_hisparse_coordinator(self, coordinator):
         self.model_runner.hisparse_coordinator = coordinator
 
-    # 教学注释：向 Scheduler 暴露 worker 的运行时能力和容量信息。
+    # 把当前 worker 的容量和能力返回给调度层。
+    # Scheduler 需要知道 max_total_num_tokens、max_running_requests、模型配置和并行状态，才能做 batch 规划。
     def get_worker_info(self):
         return (
             self.max_total_num_tokens,
@@ -477,11 +526,13 @@ class TpModelWorker(BaseTpWorker):
             self.model_runner.token_to_kv_pool.size,
         )
 
-    # 教学注释：判断当前 worker 是否走 diffusion/denoising LLM 路径。
+    # 判断当前 worker 是否启用了 dLLM 算法对象。
+    # 如果返回 true，生成入口会走 _forward_batch_generation_dllm，而不是普通自回归 forward/sampling 路径。
     def is_dllm(self):
         return self.dllm_algorithm is not None
 
-    # 教学注释：dLLM 算法专用生成路径：由 dLLM runner 接管 logits 计算和采样。
+    # dLLM 专用生成路径，不走普通 autoregressive sampling 分支。
+    # 它调用 dLLM runner 产生 logits 和采样结果，再包装成 GenerationBatchResult 返回给调度层。
     def _forward_batch_generation_dllm(
         self, forward_batch: ForwardBatch
     ) -> GenerationBatchResult:
@@ -494,7 +545,10 @@ class TpModelWorker(BaseTpWorker):
             can_run_cuda_graph=can_run_cuda_graph,
         )
 
-    # 教学注释：生成主入口：把 ScheduleBatch 转成 ForwardBatch，调用 ModelRunner 做前向，并在 PP 末级完成采样。
+    # 这是 TpModelWorker 的生成主入口。
+    # 输入是 Scheduler 组织好的 ScheduleBatch；函数先构造 ForwardBatch，再调用 ModelRunner.forward。
+    # 如果当前 PP rank 是最后一级，它会拿到 logits 并执行 sampling；否则只把 hidden states 传给下一段 pipeline。
+    # 这里也是 speculative verify、prefill-only、overlap sampling、dLLM 等分支汇合的位置。
     def forward_batch_generation(
         self,
         batch: Optional[ScheduleBatch],
@@ -505,8 +559,8 @@ class TpModelWorker(BaseTpWorker):
     ) -> GenerationBatchResult:
         # FIXME(lsyin): maybe remove skip_attn_backend_init in forward_batch_generation,
         #               which requires preparing replay to always be in this function
-
         # Get forward batch from schedule batch
+
         if batch is not None:
             # update the consumer index of hicache to the running batch
             self.set_hicache_consumer(batch.hicache_consumer_index)
@@ -519,7 +573,9 @@ class TpModelWorker(BaseTpWorker):
         if self.is_dllm():
             return self._forward_batch_generation_dllm(forward_batch)
 
-        # 教学注释：只有 pipeline parallel 的最后一级拥有最终 logits，因此只有最后一级会采样并返回 token。
+        # 判断当前 pipeline stage 是否是最后一级。
+        # 只有最后一级能看到最终 logits，因此只有它会执行 sampling 并返回 next_token_ids。
+        # 非最后一级只负责计算 hidden states 并把 proxy tensor 传给下一级。
         if self.pp_group.is_last_rank:
             out = self.model_runner.forward(
                 forward_batch,
@@ -535,6 +591,8 @@ class TpModelWorker(BaseTpWorker):
                 indexer_topk_output=out.indexer_topk_output,
             )
 
+            # speculative decoding 的 verify 阶段不一定立即采样。
+            # 这里直接返回 logits/hidden states，让上层验证 draft token 是否被 target 模型接受。
             if is_verify:
                 # Skip sampling; spec_v2 worker fires its own publish post-verify.
                 return batch_result
@@ -545,8 +603,8 @@ class TpModelWorker(BaseTpWorker):
                 and forward_batch.sampling_info.grammars is not None
             ):
 
-                # 教学注释：overlap 模式下可以把采样包装成延迟函数，让调度侧与后续工作重叠。
-                # 教学注释：`sample_batch_func` 是当前文件中的辅助代码块，建议结合调用点阅读它如何服务 TpModelWorker 与 ModelRunner 的主流程。
+                # overlap 模式下的延迟采样闭包。
+                # 外层先返回一个可调用对象，调度侧可以在合适时机执行它，从而把采样和后续调度工作重叠。
                 def sample_batch_func():
                     batch_result.next_token_ids = self.model_runner.sample(
                         logits_output, forward_batch
@@ -587,13 +645,14 @@ class TpModelWorker(BaseTpWorker):
             )
             pp_proxy_tensors, can_run_cuda_graph = out.logits_output, out.can_run_graph
             return GenerationBatchResult(
-                # 教学注释：非 PP 末级不采样，只把 hidden states 代理张量交给下一级 pipeline rank。
                 pp_hidden_states_proxy_tensors=pp_proxy_tensors,
                 can_run_cuda_graph=can_run_cuda_graph,
                 expert_distribution_metrics=out.expert_distribution_metrics,
             )
 
-    # 教学注释：chunked/split prefill 的入口：把一次较大的 prefill 拆成多个 forward 片段执行。
+    # split prefill 会把长 prompt 的 prefill 分成多个小片段执行。
+    # 第一个 split 构造 ForwardBatch，后续 split 复用同一个对象并推进 split_index。
+    # 只有某个 split 产生最终 logits 时才执行 sampling，否则继续等待下一片段。
     def forward_batch_split_prefill(self, batch: ScheduleBatch):
         if batch.split_index == 0:
             forward_batch = ForwardBatch.init_new(batch, self.model_runner)
