@@ -8,6 +8,7 @@
 2. [02-flowcharts.md](./02-flowcharts.md)：用 Mermaid 流程图梳理从进程启动到请求完成的主路径。
 3. [03-annotated-code-walkthrough.md](./03-annotated-code-walkthrough.md)：教学版代码导读，使用关键代码骨架加中文注释解释每一段在做什么。
 4. [04-function-map.md](./04-function-map.md)：按函数索引 Scheduler 的主要入口、状态变化和下一跳。
+5. [05-scheduler-annotated-cn.py](./05-scheduler-annotated-cn.py)：`scheduler.py` 的教学版完整代码副本，插入中文块级注释；仅用于学习对照，不参与运行。
 
 ## 关键源码
 
@@ -31,4 +32,3 @@ flowchart LR
   G --> H["输出到 Tokenizer / Detokenizer"]
   G --> D
 ```
-
