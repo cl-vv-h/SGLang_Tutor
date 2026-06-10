@@ -6,4 +6,4 @@
 
 - [sglang-source-reading](./sglang-source-reading/)：SGLang 源码总览阅读路线。
 - [scheduler-architecture](./scheduler-architecture/)：`Scheduler` 架构、请求调度流程、流程图与带中文注释的代码导读。
-
+- [tp-worker-model-runner](./tp-worker-model-runner/)：`TpModelWorker` 与 `ModelRunner` 的架构、执行流程、函数定位和中文注释版源码副本。
