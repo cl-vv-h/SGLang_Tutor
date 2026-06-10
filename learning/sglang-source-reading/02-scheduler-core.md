@@ -1,10 +1,10 @@
 # 第 2 讲：Scheduler 调度核心
 
-本讲目标：理解 SGLang 的 Scheduler 如何把离散请求变成连续执行的 GPU batch。重点不是背完每个优化分支，而是先抓住三个状态：`waiting_queue`、`last_batch`、`running_batch`。
+本讲目标：理解 SGLang 的 Scheduler 如何把离散请求变成连续执行的 GPU batch。重点不是背完每个优化分支，而是抓住三个状态：`waiting_queue`、`last_batch`、`running_batch`。
 
 ## 一句话总览
 
-Scheduler 每一轮都做同一件事：
+Scheduler 每轮做同一件事：
 
 1. 收新请求。
 2. 把新请求放进 `waiting_queue`。
@@ -14,12 +14,12 @@ Scheduler 每一轮都做同一件事：
 
 ```mermaid
 flowchart TD
-  A["recv_requests"] --> B["process_input_requests"]
+  A["request_receiver.recv_requests"] --> B["process_input_requests"]
   B --> C["waiting_queue"]
   C --> D["get_next_batch_to_run"]
   D --> E{"能组新 prefill batch?"}
-  E -->|"Yes"| F["new prefill ScheduleBatch"]
-  E -->|"No"| G["update running_batch for decode"]
+  E -->|"Yes"| F["get_new_batch_prefill"]
+  E -->|"No"| G["update_running_batch"]
   F --> H["run_batch"]
   G --> H
   H --> I["process_batch_result"]
@@ -27,13 +27,12 @@ flowchart TD
   I --> K["last_batch / running_batch 状态更新"]
 ```
 
-## 三个核心状态
+## 1. 三个核心状态
 
-Scheduler 的运行状态初始化在：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
+| 文件 | 类 / 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.__init__()` | 初始化 scheduler 所需组件。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.init_running_status()` | 初始化 `waiting_queue`、`running_batch`、`last_batch` 等运行状态。 |
 
 核心字段：
 
@@ -53,17 +52,15 @@ stateDiagram-v2
   RunningBatch --> WaitingQueue: retract / preemption
 ```
 
-这个状态机是读 Scheduler 的钥匙。先记住：**新请求先进 `waiting_queue`，prefill 后进入 `running_batch`，之后每轮 decode 一步。**
+## 2. 主循环：普通模式与 overlap 模式
 
-## 主循环：普通模式与 overlap 模式
+| 文件 | 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.run_event_loop()` | 根据 overlap、MLX 等配置选择具体 event loop。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.event_loop_normal()` | 普通循环：收请求、调度、forward、处理结果。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.event_loop_overlap()` | overlap 循环：使用 `result_queue` 让 GPU forward 和 CPU 结果处理重叠。 |
 
-普通调度循环在：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-它的骨架非常直：
+普通模式骨架：
 
 ```python
 recv_reqs = self.request_receiver.recv_requests()
@@ -74,86 +71,36 @@ if batch:
     self.process_batch_result(batch, result)
 ```
 
-Overlap 调度循环在：
+第一遍读源码时可以先看 `event_loop_normal()`，等主链通了再回来看 `event_loop_overlap()`。
 
-```text
-python/sglang/srt/managers/scheduler.py
-```
+## 3. 输入请求如何进入等待队列
 
-普通模式是“处理上一轮结果 -> 跑下一轮 forward”；overlap 模式会把上一轮结果处理和当前轮 GPU forward 做流水重叠，用 `result_queue` 暂存结果。
-
-```mermaid
-sequenceDiagram
-  participant CPU as Scheduler CPU
-  participant GPU as Model Worker / GPU
-
-  CPU->>CPU: schedule batch N
-  CPU->>GPU: launch forward N
-  GPU-->>CPU: result N
-  CPU->>CPU: process result N
-  CPU->>CPU: schedule batch N+1
-```
-
-Overlap 后更像：
-
-```mermaid
-sequenceDiagram
-  participant CPU as Scheduler CPU
-  participant GPU as Model Worker / GPU
-
-  CPU->>GPU: launch forward N
-  CPU->>CPU: schedule batch N+1
-  GPU-->>CPU: result N
-  CPU->>GPU: launch forward N+1
-  CPU->>CPU: process result N
-```
-
-第一遍读源码时可以先看普通模式，等主链通了再回来看 overlap。
-
-## 输入请求如何进入等待队列
-
-输入请求分发在：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-生成请求会被 dispatch 到：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-这里会把 `TokenizedGenerateReqInput` 包成内部 `Req`。`Req` 比前面的对象更接近调度器需要的形态：它包含 input ids、sampling params、priority、stream、LoRA、grammar、多模态信息、finish 状态和 KV cache 管理字段。
-
-真正加入队列在：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
+| 文件 | 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.process_input_requests()` | 从 ZMQ 收到的对象按类型 dispatch，例如生成、embedding、abort、flush cache。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.handle_generate_request()` | 把 `TokenizedGenerateReqInput` 转成内部 `Req`，填充 sampling、priority、LoRA、grammar、多模态字段。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.init_req_max_new_tokens()` | 计算并校验请求可生成 token 数。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler._add_request_to_queue()` | 真正加入 `waiting_queue`，必要时处理 priority / queued limit。 |
 
 ```mermaid
 flowchart LR
-  A["TokenizedGenerateReqInput"] --> B["handle_generate_request"]
-  B --> C["Req"]
-  C --> D["_add_request_to_queue"]
-  D --> E["waiting_queue"]
+  A["TokenizedGenerateReqInput"] --> B["process_input_requests"]
+  B --> C["handle_generate_request"]
+  C --> D["Req"]
+  D --> E["_add_request_to_queue"]
+  E --> F["waiting_queue"]
 ```
 
-## get_next_batch_to_run：调度决策中心
+这一段回答的是用户例子里的问题：**输入请求分发在 `process_input_requests()`；生成请求具体 dispatch 到 `handle_generate_request()`；进入等待队列在 `_add_request_to_queue()`。**
 
-核心函数：
+## 4. `get_next_batch_to_run()`：调度决策中心
 
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-它的优先级可以简化成：
-
-1. 先把上一轮 prefill batch 里未完成的请求合并进 `running_batch`。
-2. 尝试从 `waiting_queue` 组新的 prefill batch。
-3. 如果能组 prefill，就优先跑 prefill。
-4. 如果不能组 prefill，就推进 `running_batch` 做 decode。
+| 文件 | 函数 / 代码段 | 作用 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.get_next_batch_to_run()` | 先合并上一轮 prefill 结果，再尝试新 prefill，最后 fallback 到 decode。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.merge_batch()` | 将 prefill 后未完成的请求合并到 `running_batch`。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.get_new_batch_prefill()` | 尝试从 `waiting_queue` 组 prefill batch。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.update_running_batch()` | 没有新 prefill 时推进 decode batch。 |
 
 ```mermaid
 flowchart TD
@@ -167,33 +114,23 @@ flowchart TD
   F -->|"No"| I["return None / idle"]
 ```
 
-这解释了 continuous batching 的核心：**正在 decode 的请求不会阻塞新请求 prefill；Scheduler 每轮都会尝试插入新的 prefill batch，再回到 decode。**
+这解释了 continuous batching 的核心：正在 decode 的请求不会阻塞新请求 prefill；Scheduler 每轮都会尝试插入新的 prefill batch，再回到 decode。
 
-## Prefill：从 waiting_queue 选请求
+## 5. Prefill：从 `waiting_queue` 选请求
 
-入口：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-真正逻辑在：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-这部分做的事情很多，但可以分成五层：
-
-1. 处理 grammar ready、hierarchical cache、priority preemption 等前置状态。
-2. 如果 `running_batch.batch_is_full` 或没有等待请求，直接不组 prefill。
-3. 创建 `PrefillAdder`，用它检查 token 预算、KV cache 容量、chunked prefill 限制。
-4. 遍历 `waiting_queue`，把能跑的请求放进 `can_run_list`。
-5. 用 `ScheduleBatch.init_new` 构造 batch，并 `prepare_for_extend`。
+| 文件 | 函数 / 类 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.get_new_batch_prefill()` | prefill 入口，处理 grammar ready、队列状态和 wrapper 逻辑。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler._get_new_batch_prefill_raw()` | prefill 选请求的核心：算 prefix、创建 `PrefillAdder`、遍历 `waiting_queue`。 |
+| `python/sglang/srt/managers/schedule_policy.py` | `SchedulePolicy.calc_priority()` | 根据 FCFS、LPM、DFS weight、priority 等策略重排等待队列。 |
+| `python/sglang/srt/managers/schedule_policy.py` | `PrefillAdder.__init__()` | 初始化 token/KV/chunk 预算。 |
+| `python/sglang/srt/managers/schedule_policy.py` | `PrefillAdder.add_one_req()` | 判断单个请求能否进入本轮 prefill。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.init_new()` | 用 `can_run_list` 创建 `ScheduleBatch`。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.prepare_for_extend()` | 设置 `ForwardMode.EXTEND`，分配 prefill/extend KV cache。 |
 
 ```mermaid
 flowchart TD
-  A["waiting_queue"] --> B["policy.calc_priority"]
+  A["waiting_queue"] --> B["SchedulePolicy.calc_priority"]
   B --> C["PrefillAdder"]
   C --> D{"add_one_req(req)"}
   D -->|"CONTINUE"| E["can_run_list append"]
@@ -204,125 +141,41 @@ flowchart TD
   I --> J["ForwardMode.EXTEND"]
 ```
 
-`PrefillAdder` 在：
+`PrefillAdder.add_one_req()` 是资源约束最集中的地方，重点看这些字段如何被消耗：
 
-```text
-python/sglang/srt/managers/schedule_policy.py
-```
+- `rem_total_tokens`
+- `cur_rem_tokens`
+- `rem_input_tokens`
+- `rem_chunk_tokens`
+- `can_run_list`
+- `preempt_list`
 
-它维护几个预算：
+## 6. `ScheduleBatch`：调度器的 batch 容器
 
-- `rem_total_tokens`：总 KV token 预算。
-- `cur_rem_tokens`：当前 batch 可用 token 预算。
-- `rem_input_tokens`：prefill 输入 token 预算，对应 `max_prefill_tokens`。
-- `rem_chunk_tokens`：chunked prefill 的 chunk 预算。
-- `can_run_list`：本轮可以进 prefill 的请求。
-- `preempt_list`：被抢占、需要回队列的请求。
+| 文件 | 类 / 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/schedule_batch.py` | `class Req` | 单个内部请求，保存 `origin_input_ids`、`output_ids`、`prefix_indices`、finish 状态等。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `Req.init_next_round_input()` | prefill 前做 prefix match，计算本轮实际需要处理的 suffix。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `class ScheduleBatch` | Scheduler 层 batch，保存 `reqs`、pool、tree cache、forward mode。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.init_new()` | 从 `Req` 列表构造新的 batch。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.prepare_for_extend()` | prefill/extend 前准备 input ids、seq lens、KV slot。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.prepare_for_decode()` | decode 前为每个 running req 分配下一 token 的 KV slot。 |
 
-核心检查在：
+`ScheduleBatch` 不是模型最终消费的 batch。模型层真正消费的是下一讲会讲到的 `ForwardBatch`。
 
-```text
-python/sglang/srt/managers/schedule_policy.py
-```
+## 7. Decode：推进 `running_batch`
 
-`add_one_req` 会检查：
-
-- prefill delayer 是否允许这轮 prefill。
-- `prefill_max_requests` 是否达到。
-- 新请求的 `extend_input_len + max_new_tokens + page_size` 是否超过剩余 KV 预算。
-- hybrid SWA / chunked prefill 等特殊预算。
-- prefix cache 节点锁定与 host cache load-back。
-
-## ScheduleBatch：调度器的 batch 容器
-
-类定义：
-
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-
-`ScheduleBatch` 是 Scheduler 层的 batch，不是模型层最终 forward 使用的 batch。它保存：
-
-- `reqs`：这一批请求。
-- `req_to_token_pool` / `token_to_kv_pool_allocator` / `tree_cache`：内存和 cache 资源。
-- `forward_mode`：这轮是 `EXTEND`、`DECODE`、`MIXED`、`IDLE` 等。
-- `batch_is_full`：是否认为 running batch 已满，避免重复做昂贵 prefill 检查。
-- `chunked_req` / `decoding_reqs`：chunked prefill 和 mixed batch 辅助字段。
-
-新 prefill batch 由：
-
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-
-构造后调用：
-
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-
-`prepare_for_extend` 会：
-
-1. 设置 `forward_mode = EXTEND`。
-2. 计算每个请求的 `prefix_lens`、`extend_lens`、`seq_lens`。
-3. 为 extend/prefill 分配 KV cache。
-4. 准备 input ids、multimodal inputs、sampling info 等字段。
-
-```mermaid
-flowchart LR
-  A["can_run_list"] --> B["ScheduleBatch.init_new"]
-  B --> C["prepare_for_extend"]
-  C --> D["alloc_for_extend"]
-  D --> E["forward_mode = EXTEND"]
-```
-
-## Decode：推进 running_batch
-
-如果这一轮没有新的 prefill batch，Scheduler 会尝试 decode：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-先调用：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-`update_running_batch` 做三件事：
-
-1. `filter_batch`：移除已经完成或被排除的请求。
-2. `check_decode_mem`：检查下一步 decode 是否有足够 KV cache。
-3. 如果不够，`retract_decode` 把部分请求撤回，释放 KV cache。
-
-内存检查在：
-
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-
-撤回逻辑在：
-
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-
-准备 decode 在：
-
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-
-`prepare_for_decode` 会：
-
-- 设置 `forward_mode = DECODE`。
-- 为每个请求分配一个新 token 的 KV cache 位置。
-- 更新 `seq_lens`、`kv_committed_len`、`kv_allocated_len`。
+| 文件 | 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.update_running_batch()` | 过滤完成请求、检查 decode 内存、必要时 retract。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.filter_batch()` | 移除 finished 或被排除的请求。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.check_decode_mem()` | 检查下一 decode step 是否有足够 KV slot。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.retract_decode()` | 内存不足时撤回部分请求，释放 KV cache，放回等待队列。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.prepare_for_decode()` | 设置 `ForwardMode.DECODE`，为每个请求分配新 token 的 KV slot。 |
 
 ```mermaid
 flowchart TD
-  A["running_batch"] --> B["filter finished reqs"]
+  A["running_batch"] --> B["filter_batch"]
   B --> C{"check_decode_mem"}
   C -->|"Enough"| D["prepare_for_decode"]
   C -->|"OOM risk"| E["retract_decode"]
@@ -330,28 +183,14 @@ flowchart TD
   D --> F["ForwardMode.DECODE"]
 ```
 
-## run_batch：真正发起 forward
+## 8. `run_batch()`：真正发起 forward
 
-入口：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-生成模型路径最终会调用：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-核心是：
-
-```python
-resolve_forward_inputs(batch, self.future_map)
-batch_result = self.model_worker.forward_batch_generation(batch, **kwargs)
-```
-
-`resolve_forward_inputs` 把 Scheduler 阶段准备好的输入解析成 forward 可以消费的 tensor；`model_worker.forward_batch_generation` 进入上一讲的 `TpModelWorker -> ModelRunner` 路径。
+| 文件 | 函数 / 代码段 | 作用 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.run_batch()` | Scheduler 调 worker forward 的总入口。 |
+| `python/sglang/srt/managers/scheduler.py` | `resolve_forward_inputs(batch, self.future_map)` 调用点 | 把前面准备的 future inputs 解析成 forward 可以消费的输入。 |
+| `python/sglang/srt/managers/scheduler.py` | `self.model_worker.forward_batch_generation(batch, **kwargs)` 调用点 | 进入 `TpModelWorker -> ForwardBatch -> ModelRunner` 路径。 |
+| `python/sglang/srt/managers/tp_worker.py` | `TpModelWorker.forward_batch_generation()` | worker 侧真正执行模型 forward 和 sampling。 |
 
 ```mermaid
 flowchart LR
@@ -362,80 +201,24 @@ flowchart LR
   E --> F["GenerationBatchResult"]
 ```
 
-## process_batch_result：把 token 写回 Req
+## 9. `process_batch_result()`：把 token 写回 `Req`
 
-总入口：
+| 文件 | 函数 / 类 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.process_batch_result()` | 根据 batch 类型把结果交给 result processor。 |
+| `python/sglang/srt/managers/scheduler_components/batch_result_processor.py` | `BatchResultProcessor.process_batch_result_prefill()` | 处理 prefill 结果，更新 `Req.output_ids`、finish、cache。 |
+| `python/sglang/srt/managers/scheduler_components/batch_result_processor.py` | `BatchResultProcessor.process_batch_result_decode()` | 处理 decode 结果，追加 token 并判断结束。 |
+| `python/sglang/srt/managers/scheduler_components/batch_result_processor.py` | 输出到 `output_streamer` 的调用点 | 把可输出 token id 交给 Detokenizer。 |
+| `python/sglang/srt/managers/scheduler_components/output_streamer.py` | `OutputStreamer` | 统一处理 token id 输出、streaming、skip special token 等输出前逻辑。 |
 
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-Prefill 结果处理：
-
-```text
-python/sglang/srt/managers/scheduler_components/batch_result_processor.py
-```
-
-Decode 结果处理：
-
-```text
-python/sglang/srt/managers/scheduler_components/batch_result_processor.py
-```
-
-prefill 和 decode 都会更新 `Req.output_ids` 与 finish 状态，但含义略不同：
+prefill 和 decode 都会更新 `Req.output_ids` 与 finish 状态：
 
 - prefill：处理 prompt extend 后采样出的第一个 token。
 - decode：每轮追加一个或多个新 token，然后判断请求是否结束。
 
-decode 结束处会调用：
+## 10. 第一遍读 Scheduler 时可以忽略什么
 
-```text
-python/sglang/srt/managers/scheduler_components/batch_result_processor.py
-```
-
-也就是把当前可输出内容交给 `output_streamer`，继续走 Detokenizer。
-
-## Continuous batching 的核心直觉
-
-传统 batch 推理像这样：
-
-```mermaid
-gantt
-  title 传统静态 batch：短请求等长请求
-  dateFormat X
-  axisFormat %s
-  section Batch
-  Req A :0, 5
-  Req B :0, 12
-  Req C :0, 8
-```
-
-SGLang 的 continuous batching 更像这样：
-
-```mermaid
-gantt
-  title Continuous batching：每轮动态维护 running_batch
-  dateFormat X
-  axisFormat %s
-  section Req A
-  prefill :0, 1
-  decode :1, 5
-  section Req B
-  prefill :0, 1
-  decode :1, 12
-  section Req C
-  prefill :3, 4
-  decode :4, 9
-  section Req D
-  prefill :6, 7
-  decode :7, 11
-```
-
-关键点：新请求不必等所有老请求结束。Scheduler 可以在 decode 过程中插入新请求 prefill，然后把它合并进后续 decode 队伍。
-
-## 第一遍读 Scheduler 时可以忽略什么
-
-为了不被复杂度淹没，第一遍可以先跳过：
+先跳过：
 
 - disaggregation prefill/decode
 - DLLM
@@ -445,59 +228,41 @@ gantt
 - LoRA overlap loading
 - overlap schedule 的 stream 隔离细节
 
-但不要跳过：
+不要跳过：
 
-- `waiting_queue`
-- `running_batch`
-- `last_batch`
-- `get_next_batch_to_run`
-- `get_new_batch_prefill`
-- `update_running_batch`
-- `ScheduleBatch.prepare_for_extend`
-- `ScheduleBatch.prepare_for_decode`
-
-这几个点连起来，就是 Scheduler 的骨架。
+- `Scheduler.process_input_requests()`
+- `Scheduler.handle_generate_request()`
+- `Scheduler._add_request_to_queue()`
+- `Scheduler.get_next_batch_to_run()`
+- `Scheduler.get_new_batch_prefill()` / `_get_new_batch_prefill_raw()`
+- `Scheduler.update_running_batch()`
+- `ScheduleBatch.prepare_for_extend()`
+- `ScheduleBatch.prepare_for_decode()`
+- `Scheduler.run_batch()`
+- `Scheduler.process_batch_result()`
 
 ## 这一讲的阅读任务
 
-请按顺序打开：
-
-```text
-python/sglang/srt/managers/scheduler.py
-```
-```text
-python/sglang/srt/managers/scheduler.py
-```
-```text
-python/sglang/srt/managers/scheduler.py
-```
-```text
-python/sglang/srt/managers/scheduler.py
-```
-```text
-python/sglang/srt/managers/schedule_policy.py
-```
-```text
-python/sglang/srt/managers/schedule_policy.py
-```
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-```text
-python/sglang/srt/managers/schedule_batch.py
-```
-```text
-python/sglang/srt/managers/scheduler_components/batch_result_processor.py
-```
+| 顺序 | 文件 | 函数 / 代码段 |
+|---:|---|---|
+| 1 | `python/sglang/srt/managers/scheduler.py` | `event_loop_normal()` |
+| 2 | `python/sglang/srt/managers/scheduler.py` | `process_input_requests()`、`handle_generate_request()`、`_add_request_to_queue()` |
+| 3 | `python/sglang/srt/managers/scheduler.py` | `get_next_batch_to_run()` |
+| 4 | `python/sglang/srt/managers/scheduler.py` | `get_new_batch_prefill()`、`_get_new_batch_prefill_raw()` |
+| 5 | `python/sglang/srt/managers/schedule_policy.py` | `SchedulePolicy.calc_priority()`、`PrefillAdder.add_one_req()` |
+| 6 | `python/sglang/srt/managers/schedule_batch.py` | `Req.init_next_round_input()`、`ScheduleBatch.prepare_for_extend()` |
+| 7 | `python/sglang/srt/managers/scheduler.py` | `update_running_batch()` |
+| 8 | `python/sglang/srt/managers/schedule_batch.py` | `check_decode_mem()`、`retract_decode()`、`prepare_for_decode()` |
+| 9 | `python/sglang/srt/managers/scheduler.py` | `run_batch()`、`process_batch_result()` |
 
 读完后，用自己的话回答：
 
 - 为什么 Scheduler 会优先尝试新 prefill，再做 decode？
 - `waiting_queue` 里的请求什么时候进入 `running_batch`？
-- `PrefillAdder` 主要在检查哪些资源？
-- `prepare_for_extend` 和 `prepare_for_decode` 的差别是什么？
+- `PrefillAdder.add_one_req()` 主要在检查哪些资源？
+- `prepare_for_extend()` 和 `prepare_for_decode()` 的差别是什么？
 - decode 内存不够时，SGLang 怎么避免直接 OOM？
 
 ## 下一讲预告
 
-下一讲建议读 KV cache 与 Radix Cache。Scheduler 为什么能高效插入新请求，很大一部分原因来自 prefix cache 和 KV cache allocator 的配合。
+下一讲读 KV cache 与 Radix Cache。Scheduler 为什么能高效插入新请求，很大一部分原因来自 prefix cache 和 KV cache allocator 的配合。
