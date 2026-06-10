@@ -20,6 +20,7 @@ flowchart TD
 - [02-scheduler-core.md](./02-scheduler-core.md)：理解 Scheduler 如何排队、组 prefill/decode batch，并支撑 continuous batching。
 - [03-kv-cache-radix-cache.md](./03-kv-cache-radix-cache.md)：理解 KV cache 内存池、Radix prefix cache、HiCache 与 Scheduler 的配合。
 - [04-model-runner-attention.md](./04-model-runner-attention.md)：理解 `ForwardBatch`、`ModelRunner` 前向分发、`RadixAttention` 与 attention backend 如何读写 KV cache。
+- [05-speculative-decoding.md](./05-speculative-decoding.md)：理解 draft worker、target verify、`spec_info`、EAGLE/NGRAM、spec v1/v2 与接受 token 后处理。
 
 ## 怎么使用这些笔记
 
