@@ -2,6 +2,8 @@
 
 说明：本文不是修改后的源码，而是针对 `python/sglang/srt/managers/scheduler.py` 的教学版代码骨架。代码块保留关键控制流，并加入中文注释解释每段逻辑。阅读时建议同时打开原文件，按“文件 + 函数名”定位。
 
+完整的带中文注释代码副本见 [05-scheduler-annotated-cn.py](./05-scheduler-annotated-cn.py)。该文件保留原始 `scheduler.py` 的完整代码结构，并在类、函数和关键状态转换前插入中文注释，仅用于学习对照。
+
 ## 1. 进程入口：run_scheduler_process
 
 定位：`python/sglang/srt/managers/scheduler.py:run_scheduler_process`
