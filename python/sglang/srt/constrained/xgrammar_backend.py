@@ -386,10 +386,10 @@ class XGrammarGrammarBackend(BaseGrammarBackend):
 def demo_test():
     from transformers import AutoConfig, AutoTokenizer
 
-    from sglang.test.test_utils import DEFAULT_MODEL_NAME_FOR_TEST
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
 
-    tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL_NAME_FOR_TEST)
-    hf_config = AutoConfig.from_pretrained(DEFAULT_MODEL_NAME_FOR_TEST)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    hf_config = AutoConfig.from_pretrained(model_name)
 
     # Should use vocab size from model config
     vocab_size = hf_config.vocab_size
