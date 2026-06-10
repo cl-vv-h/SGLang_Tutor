@@ -1,0 +1,9 @@
+# SGLang 教学目录
+
+这里存放面向源码学习的中文教学材料。仓库中的 SGLang 原版代码仅作为教学引用，学习笔记会尽量通过“文件 + 函数 + 关键代码段”的方式定位源码，避免依赖容易漂移的绝对路径。
+
+## 专题目录
+
+- [sglang-source-reading](./sglang-source-reading/)：SGLang 源码总览阅读路线。
+- [scheduler-architecture](./scheduler-architecture/)：`Scheduler` 架构、请求调度流程、流程图与带中文注释的代码导读。
+
