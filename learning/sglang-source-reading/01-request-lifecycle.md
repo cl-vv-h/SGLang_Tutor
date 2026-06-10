@@ -49,7 +49,9 @@ flowchart TD
 
 入口在：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/entrypoints/http_server.py:1506`
+```text
+python/sglang/srt/entrypoints/http_server.py
+```
 
 核心逻辑：
 
@@ -69,7 +71,9 @@ async def openai_v1_chat_completions(
 
 公共入口：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/entrypoints/openai/serving_base.py:73`
+```text
+python/sglang/srt/entrypoints/openai/serving_base.py
+```
 
 `OpenAIServingBase.handle_request` 的职责：
 
@@ -79,7 +83,9 @@ async def openai_v1_chat_completions(
 
 ChatCompletion 的具体转换在：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/entrypoints/openai/serving_chat.py:457`
+```text
+python/sglang/srt/entrypoints/openai/serving_chat.py
+```
 
 这里会做几件非常关键的事：
 
@@ -100,7 +106,9 @@ flowchart TD
 
 主入口：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/tokenizer_manager.py:543`
+```text
+python/sglang/srt/managers/tokenizer_manager.py
+```
 
 `TokenizerManager.generate_request` 做的事可以拆成四步：
 
@@ -111,9 +119,18 @@ flowchart TD
 
 关键位置：
 
-- tokenize 单请求：`/Users/zach/Source/SGLang/python/sglang/srt/managers/tokenizer_manager.py:735`
-- 发送给 Scheduler：`/Users/zach/Source/SGLang/python/sglang/srt/managers/tokenizer_manager.py:1250`
-- 等待单请求响应：`/Users/zach/Source/SGLang/python/sglang/srt/managers/tokenizer_manager.py:1352`
+- tokenize 单请求：
+  ```text
+  python/sglang/srt/managers/tokenizer_manager.py
+  ```
+- 发送给 Scheduler：
+  ```text
+  python/sglang/srt/managers/tokenizer_manager.py
+  ```
+- 等待单请求响应：
+  ```text
+  python/sglang/srt/managers/tokenizer_manager.py
+  ```
 
 这里的心智模型：
 
@@ -137,7 +154,9 @@ sequenceDiagram
 
 主循环：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:1425`
+```text
+python/sglang/srt/managers/scheduler.py
+```
 
 核心循环长这样：
 
@@ -155,11 +174,26 @@ while True:
 
 关键位置：
 
-- 分发输入请求：`/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:1543`
-- 构造内部 `Req`：`/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:1900`
-- 加入等待队列：`/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:2156`
-- 选择下一个 batch：`/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:2404`
-- 跑 batch：`/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:2965`
+- 分发输入请求：
+  ```text
+  python/sglang/srt/managers/scheduler.py
+  ```
+- 构造内部 `Req：
+  ```text
+  python/sglang/srt/managers/scheduler.py
+  ```
+- 加入等待队列：
+  ```text
+  python/sglang/srt/managers/scheduler.py
+  ```
+- 选择下一个 batch：
+  ```text
+  python/sglang/srt/managers/scheduler.py
+  ```
+- 跑 batch：
+  ```text
+  python/sglang/srt/managers/scheduler.py
+  ```
 
 Scheduler 是后续最值得深挖的模块，因为这里藏着：
 
@@ -177,7 +211,9 @@ Scheduler 不直接调用模型，而是通过 worker。
 
 入口：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/tp_worker.py:447`
+```text
+python/sglang/srt/managers/tp_worker.py
+```
 
 `TpModelWorker.forward_batch_generation` 负责：
 
@@ -188,12 +224,20 @@ Scheduler 不直接调用模型，而是通过 worker。
 
 `ModelRunner.forward` 在：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/model_executor/model_runner.py:3235`
+```text
+python/sglang/srt/model_executor/model_runner.py
+```
 
 它会根据 `forward_batch.forward_mode` 分发：
 
-- decode：`/Users/zach/Source/SGLang/python/sglang/srt/model_executor/model_runner.py:3060`
-- extend/prefill：`/Users/zach/Source/SGLang/python/sglang/srt/model_executor/model_runner.py:3109`
+- decode：
+  ```text
+  python/sglang/srt/model_executor/model_runner.py
+  ```
+- extend/prefill：
+  ```text
+  python/sglang/srt/model_executor/model_runner.py
+  ```
 
 ```mermaid
 flowchart TD
@@ -214,7 +258,9 @@ flowchart TD
 
 Scheduler 处理模型结果：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:3167`
+```text
+python/sglang/srt/managers/scheduler.py
+```
 
 decode 结果处理会更新每个 `Req`：
 
@@ -225,20 +271,30 @@ decode 结果处理会更新每个 `Req`：
 
 发送到 Detokenizer：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler_components/output_streamer.py:120`
+```text
+python/sglang/srt/managers/scheduler_components/output_streamer.py
+```
 
 Detokenizer 主循环：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/detokenizer_manager.py:143`
+```text
+python/sglang/srt/managers/detokenizer_manager.py
+```
 
 token ids 转文本：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/detokenizer_manager.py:353`
+```text
+python/sglang/srt/managers/detokenizer_manager.py
+```
 
 最后 TokenizerManager 收回结果：
 
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/tokenizer_manager.py:1738`
-- `/Users/zach/Source/SGLang/python/sglang/srt/managers/tokenizer_manager.py:1753`
+```text
+python/sglang/srt/managers/tokenizer_manager.py
+```
+```text
+python/sglang/srt/managers/tokenizer_manager.py
+```
 
 这里要注意一个设计点：HTTP 请求协程不是一直主动轮询 Scheduler，而是在 `ReqState.event` 上等待。Detokenizer 返回后，`TokenizerManager.handle_loop` 把文本放进 `state.out_list`，然后 `event.set()` 唤醒 HTTP 侧等待协程。
 
@@ -262,14 +318,30 @@ sequenceDiagram
 
 请按顺序打开这些文件，并只关注主链，不要被旁枝参数带跑：
 
-1. `/Users/zach/Source/SGLang/python/sglang/srt/entrypoints/http_server.py:1506`
-2. `/Users/zach/Source/SGLang/python/sglang/srt/entrypoints/openai/serving_base.py:73`
-3. `/Users/zach/Source/SGLang/python/sglang/srt/entrypoints/openai/serving_chat.py:457`
-4. `/Users/zach/Source/SGLang/python/sglang/srt/managers/tokenizer_manager.py:543`
-5. `/Users/zach/Source/SGLang/python/sglang/srt/managers/scheduler.py:1425`
-6. `/Users/zach/Source/SGLang/python/sglang/srt/managers/tp_worker.py:447`
-7. `/Users/zach/Source/SGLang/python/sglang/srt/model_executor/model_runner.py:3235`
-8. `/Users/zach/Source/SGLang/python/sglang/srt/managers/detokenizer_manager.py:143`
+```text
+python/sglang/srt/entrypoints/http_server.py
+```
+```text
+python/sglang/srt/entrypoints/openai/serving_base.py
+```
+```text
+python/sglang/srt/entrypoints/openai/serving_chat.py
+```
+```text
+python/sglang/srt/managers/tokenizer_manager.py
+```
+```text
+python/sglang/srt/managers/scheduler.py
+```
+```text
+python/sglang/srt/managers/tp_worker.py
+```
+```text
+python/sglang/srt/model_executor/model_runner.py
+```
+```text
+python/sglang/srt/managers/detokenizer_manager.py
+```
 
 读完后，你应该能用自己的话回答：
 
