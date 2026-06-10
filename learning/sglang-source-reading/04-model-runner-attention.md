@@ -45,16 +45,16 @@ flowchart TD
 
 ## 1. 关键文件跳转表
 
-| 主题 | 文件 | 重点位置 |
+| 主题 | 文件 | 具体定位 |
 |---|---|---|
-| worker 入口 | `python/sglang/srt/managers/tp_worker.py` | `forward_batch_generation()` |
-| 前向 batch 数据结构 | `python/sglang/srt/model_executor/forward_batch_info.py` | `ForwardMode`、`ForwardBatch.init_new()`、`compute_position()` |
-| 模型执行器 | `python/sglang/srt/model_executor/model_runner.py` | `forward()`、`_forward_raw()`、`forward_decode()`、`forward_extend()`、`sample()` |
-| 前向上下文 | `python/sglang/srt/model_executor/forward_context.py` | `ForwardContext`、`get_attn_backend()` |
-| attention 抽象接口 | `python/sglang/srt/layers/attention/base_attn_backend.py` | `AttentionBackend.forward()` |
-| attention 层入口 | `python/sglang/srt/layers/radix_attention.py` | `RadixAttention.forward()` |
-| 一个易读 backend | `python/sglang/srt/layers/attention/torch_flex_backend.py` | `forward_extend()`、`forward_decode()` |
-| Llama 模型示例 | `python/sglang/srt/models/llama.py` | `LlamaAttention.forward()`、`LlamaModel.forward()` |
+| worker 入口 | `python/sglang/srt/managers/tp_worker.py` | `TpModelWorker.forward_batch_generation()` |
+| 前向 batch 数据结构 | `python/sglang/srt/model_executor/forward_batch_info.py` | `ForwardMode`、`ForwardBatch.init_new()`、`compute_position()`、`compute_position_torch()` |
+| 模型执行器 | `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner.forward()`、`_forward_raw()`、`forward_decode()`、`forward_extend()`、`sample()` |
+| 前向上下文 | `python/sglang/srt/model_executor/forward_context.py` | `ForwardContext`、`forward_context()`、`get_attn_backend()`、`get_token_to_kv_pool()`、`get_req_to_token_pool()` |
+| attention 抽象接口 | `python/sglang/srt/layers/attention/base_attn_backend.py` | `AttentionBackend.forward()`、`forward_decode()`、`forward_extend()` |
+| attention 层入口 | `python/sglang/srt/layers/radix_attention.py` | `RadixAttention.forward()`、`unified_attention_with_output()` |
+| 一个易读 backend | `python/sglang/srt/layers/attention/torch_flex_backend.py` | `TorchFlexAttnBackend.init_forward_metadata()`、`forward_extend()`、`forward_decode()` |
+| Llama 模型示例 | `python/sglang/srt/models/llama.py` | `LlamaForCausalLM.forward()`、`LlamaModel.forward()`、`LlamaAttention.forward()` |
 
 ---
 
@@ -622,36 +622,16 @@ flowchart TD
 
 按下面顺序打开源码，尝试自己跟读一遍：
 
-1. `python/sglang/srt/managers/tp_worker.py`
-   - 找 `forward_batch_generation()`。
-   - 看 `ForwardBatch.init_new()` 在哪里被调用。
-   - 看 `model_runner.forward()` 和 `model_runner.sample()` 的顺序。
-
-2. `python/sglang/srt/model_executor/forward_batch_info.py`
-   - 看 `ForwardMode`。
-   - 看 `ForwardBatch` 的字段。
-   - 看 `init_new()` 里 decode 和 extend 的 position 计算差异。
-
-3. `python/sglang/srt/model_executor/model_runner.py`
-   - 看 `_forward_raw()` 怎么发布 `ForwardContext`。
-   - 看它怎么按 `forward_mode` 调 `forward_decode()` / `forward_extend()`。
-   - 看 `forward_decode()` / `forward_extend()` 里哪里初始化 attention metadata。
-
-4. `python/sglang/srt/models/llama.py`
-   - 看 `LlamaModel.forward()` 怎么遍历 decoder layers。
-   - 看 `LlamaAttention.forward()` 怎么产生 Q/K/V。
-   - 看它怎么调用 `self.attn(q, k, v, forward_batch)`。
-
-5. `python/sglang/srt/layers/radix_attention.py`
-   - 看 `RadixAttention.forward()` 如何调用 `get_attn_backend().forward()`。
-
-6. `python/sglang/srt/layers/attention/base_attn_backend.py`
-   - 看 `AttentionBackend.forward()` 如何按 mode 分发。
-
-7. `python/sglang/srt/layers/attention/torch_flex_backend.py`
-   - 看 `forward_decode()` / `forward_extend()`。
-   - 找 `set_kv_buffer()`。
-   - 找 `req_to_token_pool.req_to_token`。
+| 顺序 | 文件 | 函数 / 代码段 | 阅读重点 |
+|---:|---|---|---|
+| 1 | `python/sglang/srt/managers/tp_worker.py` | `TpModelWorker.forward_batch_generation()` | 找 `ForwardBatch.init_new()` 调用点；看 `model_runner.forward()` 和 `model_runner.sample()` 的顺序。 |
+| 2 | `python/sglang/srt/model_executor/forward_batch_info.py` | `ForwardMode`、`ForwardBatch.init_new()`、`compute_position()` | 看 decode 和 extend 的 position 计算差异，以及 `req_pool_indices`、`seq_lens`、`out_cache_loc` 怎么从 `ScheduleBatch` 来。 |
+| 3 | `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner._forward_raw()` | 看它怎么发布 `ForwardContext`，怎么按 `forward_mode` 调 `forward_decode()` / `forward_extend()`。 |
+| 4 | `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner.forward_decode()`、`ModelRunner.forward_extend()` | 找 `attn_backend.init_forward_metadata(forward_batch)` 和 `model.forward(...)` 的调用位置。 |
+| 5 | `python/sglang/srt/models/llama.py` | `LlamaForCausalLM.forward()`、`LlamaModel.forward()`、`LlamaAttention.forward()` | 看 embedding、decoder layer、Q/K/V、RoPE 和 `self.attn(q, k, v, forward_batch)` 的顺序。 |
+| 6 | `python/sglang/srt/layers/radix_attention.py` | `RadixAttention.forward()` | 看如何调用 `get_attn_backend().forward(...)`。 |
+| 7 | `python/sglang/srt/layers/attention/base_attn_backend.py` | `AttentionBackend.forward()` | 看 attention backend 如何按 `forward_mode` 分发到 `forward_decode()` / `forward_extend()`。 |
+| 8 | `python/sglang/srt/layers/attention/torch_flex_backend.py` | `TorchFlexAttnBackend.forward_decode()`、`forward_extend()` | 找 `token_to_kv_pool.set_kv_buffer()`、`get_key_buffer()`、`get_value_buffer()` 和 `req_to_token_pool.req_to_token`。 |
 
 ---
 

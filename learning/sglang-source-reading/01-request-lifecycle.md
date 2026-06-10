@@ -1,34 +1,27 @@
 # 第 1 讲：一次 ChatCompletion 请求的完整生命周期
 
-本讲目标：理解一个 OpenAI-compatible `/v1/chat/completions` 请求如何进入 SGLang，如何被 tokenized、调度、送入模型前向计算，并最终 detokenize 后返回给客户端。
+本讲目标：理解一个 OpenAI-compatible `/v1/chat/completions` 请求如何进入 SGLang，如何被转换成内部请求、tokenize、调度、送入模型前向计算，并最终 detokenize 后返回客户端。
 
 ## 一句话总览
 
-SGLang 的推理服务可以先理解成三个协作角色：
-
-- `TokenizerManager`：HTTP 侧的请求转换、tokenize、等待结果。
-- `Scheduler`：核心调度器，负责排队、continuous batching、prefill/decode 切换。
-- `DetokenizerManager`：把模型输出 token ids 变成文本，再送回 HTTP 侧。
+SGLang 的生成请求主链可以先看成 8 个关口：
 
 ```mermaid
 flowchart LR
-  Client["Client"] --> HTTP["FastAPI HTTP Server"]
-  HTTP --> OpenAI["OpenAI Serving Adapter"]
-  OpenAI --> TM["TokenizerManager"]
-  TM -->|TokenizedGenerateReqInput| SCH["Scheduler"]
-  SCH -->|ScheduleBatch| TP["TpModelWorker"]
+  Client["Client"] --> HTTP["FastAPI endpoint"]
+  HTTP --> Chat["OpenAIServingChat"]
+  Chat --> TM["TokenizerManager"]
+  TM --> SCH["Scheduler"]
+  SCH --> TP["TpModelWorker"]
   TP --> MR["ModelRunner"]
-  MR --> Model["Model.forward"]
-  Model --> MR
-  MR --> TP
-  TP -->|GenerationBatchResult| SCH
-  SCH -->|BatchTokenIDOutput| DETOK["DetokenizerManager"]
-  DETOK -->|BatchStrOutput| TM
+  MR --> SCH
+  SCH --> DETOK["DetokenizerManager"]
+  DETOK --> TM
   TM --> HTTP
   HTTP --> Client
 ```
 
-## 关键数据结构流
+对应的数据结构变形是：
 
 ```mermaid
 flowchart TD
@@ -40,20 +33,17 @@ flowchart TD
   F --> G["GenerationBatchResult"]
   G --> H["BatchTokenIDOutput"]
   H --> I["BatchStrOutput"]
-  I --> J["OpenAI Chat Response / SSE Chunk"]
+  I --> J["OpenAI response / SSE chunk"]
 ```
-
-读源码时，先盯住这条数据结构变形链。函数很多，但主线其实是这些对象不断被丰富、排队、拆分、合并和返回。
 
 ## 阶段 1：HTTP 入口
 
-入口在：
+| 文件 | 函数 / 代码段 | 作用 |
+|---|---|---|
+| `python/sglang/srt/entrypoints/http_server.py` | `openai_v1_chat_completions()` | FastAPI 的 `/v1/chat/completions` 路由入口。 |
+| `python/sglang/srt/entrypoints/http_server.py` | `raw_request.app.state.openai_serving_chat.handle_request(...)` | 把 HTTP 请求交给 OpenAI chat adapter。 |
 
-```text
-python/sglang/srt/entrypoints/http_server.py
-```
-
-核心逻辑：
+关键代码段：
 
 ```python
 @app.post("/v1/chat/completions", dependencies=[Depends(validate_json_request)])
@@ -65,33 +55,18 @@ async def openai_v1_chat_completions(
     )
 ```
 
-这一层只做一件事：把 FastAPI 收到的 `ChatCompletionRequest` 交给 OpenAI serving adapter。
+这一层基本不理解模型，也不理解调度，只负责把请求交给 `OpenAIServingChat`。
 
 ## 阶段 2：OpenAI 请求转内部请求
 
-公共入口：
+| 文件 | 类 / 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/entrypoints/openai/serving_base.py` | `OpenAIServingBase.handle_request()` | 调 `_validate_request()`、`_convert_to_internal_request()`，再按 `stream` 分到 `_handle_streaming_request()` 或 `_handle_non_streaming_request()`。 |
+| `python/sglang/srt/entrypoints/openai/serving_chat.py` | `OpenAIServingChat._convert_to_internal_request()` | 构造 `GenerateReqInput`，这是进入 SGLang 内部生成引擎的请求对象。 |
+| `python/sglang/srt/entrypoints/openai/serving_chat.py` | `OpenAIServingChat._process_messages()` | 处理 messages、chat template、tools、reasoning parser、多模态输入。 |
+| `python/sglang/srt/entrypoints/openai/serving_chat.py` | `request.to_sampling_params(...)` 调用点 | 把 OpenAI 参数转换成 SGLang sampling params。 |
 
-```text
-python/sglang/srt/entrypoints/openai/serving_base.py
-```
-
-`OpenAIServingBase.handle_request` 的职责：
-
-1. 校验 OpenAI 请求。
-2. 调用 `_convert_to_internal_request`。
-3. 根据 `stream` 决定走 streaming 或 non-streaming。
-
-ChatCompletion 的具体转换在：
-
-```text
-python/sglang/srt/entrypoints/openai/serving_chat.py
-```
-
-这里会做几件非常关键的事：
-
-- `_process_messages`：处理 messages、chat template、tools、reasoning parser、多模态输入。
-- `request.to_sampling_params`：把 OpenAI 参数转换成 SGLang 的采样参数。
-- 构造 `GenerateReqInput`：这是进入 SGLang 内部引擎的第一种核心请求对象。
+心智模型：
 
 ```mermaid
 flowchart TD
@@ -102,37 +77,20 @@ flowchart TD
   D --> E
 ```
 
+读这里时要关注：`ChatCompletionRequest` 不是直接送给 Scheduler，而是先被 adapter 翻译成 `GenerateReqInput`。
+
 ## 阶段 3：TokenizerManager tokenize 并分发
 
-主入口：
+| 文件 | 类 / 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/tokenizer_manager.py` | `TokenizerManager.generate_request()` | 主入口：初始化状态、tokenize、发送请求、等待返回。 |
+| `python/sglang/srt/managers/tokenizer_manager.py` | `TokenizerManager._tokenize_one_request()` | 单请求 tokenize，产出 token ids 和 processor 结果。 |
+| `python/sglang/srt/managers/tokenizer_manager.py` | `TokenizerManager._create_tokenized_object()` | 构造 `TokenizedGenerateReqInput` 或 embedding 类 tokenized object。 |
+| `python/sglang/srt/managers/tokenizer_manager.py` | `TokenizerManager._send_one_request()` | 把 tokenized object 发往 Scheduler。 |
+| `python/sglang/srt/managers/tokenizer_manager.py` | `TokenizerManager._wait_one_response()` | HTTP 协程等待 `ReqState.event`，并逐块 yield 结果。 |
+| `python/sglang/srt/managers/tokenizer_manager.py` | `TokenizerManager.handle_loop()` / `_handle_batch_output()` | 接收 Detokenizer 返回的 `BatchStrOutput`，写入 `rid_to_state`。 |
 
-```text
-python/sglang/srt/managers/tokenizer_manager.py
-```
-
-`TokenizerManager.generate_request` 做的事可以拆成四步：
-
-1. 创建或确认后台 `handle_loop`，用于接收 detokenizer 返回。
-2. normalize 请求参数，初始化 `rid_to_state`。
-3. tokenize 请求，得到 `TokenizedGenerateReqInput`。
-4. 通过 ZMQ 发给 Scheduler，然后等待响应。
-
-关键位置：
-
-- tokenize 单请求：
-  ```text
-  python/sglang/srt/managers/tokenizer_manager.py
-  ```
-- 发送给 Scheduler：
-  ```text
-  python/sglang/srt/managers/tokenizer_manager.py
-  ```
-- 等待单请求响应：
-  ```text
-  python/sglang/srt/managers/tokenizer_manager.py
-  ```
-
-这里的心智模型：
+这里最重要的不是 tokenizer 细节，而是两个边界：
 
 ```mermaid
 sequenceDiagram
@@ -142,161 +100,82 @@ sequenceDiagram
   participant DETOK as DetokenizerManager
 
   HTTP->>TM: GenerateReqInput
-  TM->>TM: tokenize / init ReqState
-  TM->>SCH: TokenizedGenerateReqInput
-  TM->>TM: wait state.event
+  TM->>TM: _tokenize_one_request
+  TM->>TM: _create_tokenized_object
+  TM->>SCH: _send_one_request(TokenizedGenerateReqInput)
+  TM->>TM: _wait_one_response waits ReqState.event
   DETOK-->>TM: BatchStrOutput
-  TM->>TM: append state.out_list / event.set
-  TM-->>HTTP: yield response chunk
+  TM->>TM: _handle_batch_output appends state.out_list
+  TM-->>HTTP: response chunk / final response
 ```
 
 ## 阶段 4：Scheduler 接收、排队、组 batch
 
-主循环：
+| 文件 | 类 / 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.event_loop_normal()` | 普通调度主循环：收请求、处理输入、取 batch、forward、处理结果。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.event_loop_overlap()` | overlap 调度主循环：把结果处理和下一轮 forward 做流水重叠。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.process_input_requests()` | 按请求类型分发到生成、embedding、控制请求等 handler。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.handle_generate_request()` | 把 `TokenizedGenerateReqInput` 包装成内部 `Req`。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler._add_request_to_queue()` | 真正把 `Req` 放进 `waiting_queue`。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.get_next_batch_to_run()` | 调度决策中心：先尝试 prefill，再推进 decode。 |
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.run_batch()` | 调 worker forward，拿到 `GenerationBatchResult`。 |
 
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-核心循环长这样：
+主循环骨架可以简化成：
 
 ```python
-while True:
-    recv_reqs = self.request_receiver.recv_requests()
-    self.process_input_requests(recv_reqs)
-    batch = self.get_next_batch_to_run()
-    if batch:
-        result = self.run_batch(batch)
-        self.process_batch_result(batch, result)
+recv_reqs = self.request_receiver.recv_requests()
+self.process_input_requests(recv_reqs)
+batch = self.get_next_batch_to_run()
+if batch:
+    result = self.run_batch(batch)
+    self.process_batch_result(batch, result)
 ```
 
-这就是 SGLang 推理引擎的中枢。
-
-关键位置：
-
-- 分发输入请求：
-  ```text
-  python/sglang/srt/managers/scheduler.py
-  ```
-- 构造内部 `Req：
-  ```text
-  python/sglang/srt/managers/scheduler.py
-  ```
-- 加入等待队列：
-  ```text
-  python/sglang/srt/managers/scheduler.py
-  ```
-- 选择下一个 batch：
-  ```text
-  python/sglang/srt/managers/scheduler.py
-  ```
-- 跑 batch：
-  ```text
-  python/sglang/srt/managers/scheduler.py
-  ```
-
-Scheduler 是后续最值得深挖的模块，因为这里藏着：
-
-- continuous batching
-- prefill/decode 调度
-- radix cache
-- chunked prefill
-- overlap schedule
-- speculative decoding 结果处理
-- 分布式和 disaggregation 调度
+`Scheduler` 是后续最值得深挖的模块，因为 continuous batching、prefill/decode 切换、radix cache、chunked prefill、overlap schedule 都在这里交汇。
 
 ## 阶段 5：TpModelWorker 与 ModelRunner 前向
 
-Scheduler 不直接调用模型，而是通过 worker。
-
-入口：
-
-```text
-python/sglang/srt/managers/tp_worker.py
-```
-
-`TpModelWorker.forward_batch_generation` 负责：
-
-1. 从 `ScheduleBatch` 构造 `ForwardBatch`。
-2. 调用 `ModelRunner.forward`。
-3. 对 logits 做 sampling，得到下一批 token ids。
-4. 返回 `GenerationBatchResult`。
-
-`ModelRunner.forward` 在：
-
-```text
-python/sglang/srt/model_executor/model_runner.py
-```
-
-它会根据 `forward_batch.forward_mode` 分发：
-
-- decode：
-  ```text
-  python/sglang/srt/model_executor/model_runner.py
-  ```
-- extend/prefill：
-  ```text
-  python/sglang/srt/model_executor/model_runner.py
-  ```
+| 文件 | 类 / 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/tp_worker.py` | `TpModelWorker.forward_batch_generation()` | 从 `ScheduleBatch` 构造 `ForwardBatch`，调用 `ModelRunner.forward()`，再调用 `ModelRunner.sample()`。 |
+| `python/sglang/srt/model_executor/forward_batch_info.py` | `ForwardBatch.init_new()` | 把调度层 batch 转成模型前向需要的 tensor 和 metadata。 |
+| `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner.forward()` | 外层前向入口，包 profiling/debug 等外围逻辑。 |
+| `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner._forward_raw()` | 根据 `ForwardMode` 分发到 CUDA graph、decode、extend、split prefill 等路径。 |
+| `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner.forward_decode()` | decode 路径：初始化 attention metadata 后跑模型。 |
+| `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner.forward_extend()` | extend/prefill 路径：处理一段新 token。 |
+| `python/sglang/srt/model_executor/model_runner.py` | `ModelRunner.sample()` | 从 logits 采样出下一批 token ids。 |
 
 ```mermaid
 flowchart TD
   A["ScheduleBatch"] --> B["ForwardBatch.init_new"]
   B --> C["ModelRunner.forward"]
-  C --> D{"forward_mode"}
-  D -->|"decode"| E["forward_decode"]
-  D -->|"extend / prefill"| F["forward_extend"]
-  D -->|"cuda graph"| G["graph_runner.replay"]
-  E --> H["model.forward"]
-  F --> H
-  G --> I["logits"]
-  H --> I
-  I --> J["sample next_token_ids"]
+  C --> D["_forward_raw"]
+  D --> E{"forward_mode"}
+  E -->|"DECODE"| F["forward_decode"]
+  E -->|"EXTEND / MIXED"| G["forward_extend"]
+  E -->|"CUDA graph"| H["graph_runner.replay"]
+  F --> I["model.forward"]
+  G --> I
+  H --> J["logits"]
+  I --> J
+  J --> K["sample next_token_ids"]
 ```
 
 ## 阶段 6：结果返回和 detokenize
 
-Scheduler 处理模型结果：
+| 文件 | 类 / 函数 | 重点代码段 |
+|---|---|---|
+| `python/sglang/srt/managers/scheduler.py` | `Scheduler.process_batch_result()` | 将 worker 结果交给 `BatchResultProcessor`。 |
+| `python/sglang/srt/managers/scheduler_components/batch_result_processor.py` | `BatchResultProcessor.process_batch_result_prefill()` | 处理 prefill/extend 后采样出的首 token、finish 状态和 cache。 |
+| `python/sglang/srt/managers/scheduler_components/batch_result_processor.py` | `BatchResultProcessor.process_batch_result_decode()` | 处理 decode 每轮追加的 token、finish 状态和输出。 |
+| `python/sglang/srt/managers/scheduler_components/output_streamer.py` | `OutputStreamer` 的 token 输出方法 | 把 `BatchTokenIDOutput` 发送给 Detokenizer。 |
+| `python/sglang/srt/managers/detokenizer_manager.py` | `DetokenizerManager.event_loop()` | Detokenizer 主循环，接收 Scheduler 的 token id 输出。 |
+| `python/sglang/srt/managers/detokenizer_manager.py` | `DetokenizerManager.handle_batch_token_id_out()` | 处理一批 token id 输出。 |
+| `python/sglang/srt/managers/detokenizer_manager.py` | `DetokenizerManager._decode_batch_token_id_output()` | token ids 到文本的核心 decode 逻辑。 |
+| `python/sglang/srt/managers/tokenizer_manager.py` | `TokenizerManager._handle_batch_output()` | 将文本结果写回对应 `ReqState`，唤醒 HTTP 协程。 |
 
-```text
-python/sglang/srt/managers/scheduler.py
-```
-
-decode 结果处理会更新每个 `Req`：
-
-- 追加 `output_ids`
-- 判断是否 finished
-- 更新 grammar/logprob/hidden states
-- 调用 output streamer
-
-发送到 Detokenizer：
-
-```text
-python/sglang/srt/managers/scheduler_components/output_streamer.py
-```
-
-Detokenizer 主循环：
-
-```text
-python/sglang/srt/managers/detokenizer_manager.py
-```
-
-token ids 转文本：
-
-```text
-python/sglang/srt/managers/detokenizer_manager.py
-```
-
-最后 TokenizerManager 收回结果：
-
-```text
-python/sglang/srt/managers/tokenizer_manager.py
-```
-```text
-python/sglang/srt/managers/tokenizer_manager.py
-```
-
-这里要注意一个设计点：HTTP 请求协程不是一直主动轮询 Scheduler，而是在 `ReqState.event` 上等待。Detokenizer 返回后，`TokenizerManager.handle_loop` 把文本放进 `state.out_list`，然后 `event.set()` 唤醒 HTTP 侧等待协程。
+这里的关键设计：HTTP 请求协程不是轮询 Scheduler，而是在 `ReqState.event` 上等待。Detokenizer 返回后，`TokenizerManager._handle_batch_output()` 把文本放进 `state.out_list`，再 `event.set()` 唤醒等待协程。
 
 ```mermaid
 sequenceDiagram
@@ -307,50 +186,36 @@ sequenceDiagram
 
   SCH->>SCH: process_batch_result
   SCH->>DETOK: BatchTokenIDOutput
-  DETOK->>DETOK: decode token ids
+  DETOK->>DETOK: _decode_batch_token_id_output
   DETOK->>TM: BatchStrOutput
-  TM->>TM: state.out_list.append
+  TM->>TM: _handle_batch_output
   TM->>TM: state.event.set
   TM-->>HTTP: response chunk / final response
 ```
 
 ## 这一讲的阅读任务
 
-请按顺序打开这些文件，并只关注主链，不要被旁枝参数带跑：
+按下面顺序跟读，不要只打开文件，要直接跳到对应函数：
 
-```text
-python/sglang/srt/entrypoints/http_server.py
-```
-```text
-python/sglang/srt/entrypoints/openai/serving_base.py
-```
-```text
-python/sglang/srt/entrypoints/openai/serving_chat.py
-```
-```text
-python/sglang/srt/managers/tokenizer_manager.py
-```
-```text
-python/sglang/srt/managers/scheduler.py
-```
-```text
-python/sglang/srt/managers/tp_worker.py
-```
-```text
-python/sglang/srt/model_executor/model_runner.py
-```
-```text
-python/sglang/srt/managers/detokenizer_manager.py
-```
+| 顺序 | 文件 | 函数 / 代码段 |
+|---:|---|---|
+| 1 | `python/sglang/srt/entrypoints/http_server.py` | `openai_v1_chat_completions()` |
+| 2 | `python/sglang/srt/entrypoints/openai/serving_base.py` | `OpenAIServingBase.handle_request()` |
+| 3 | `python/sglang/srt/entrypoints/openai/serving_chat.py` | `OpenAIServingChat._convert_to_internal_request()`、`_process_messages()` |
+| 4 | `python/sglang/srt/managers/tokenizer_manager.py` | `generate_request()`、`_tokenize_one_request()`、`_send_one_request()`、`_wait_one_response()` |
+| 5 | `python/sglang/srt/managers/scheduler.py` | `process_input_requests()`、`handle_generate_request()`、`get_next_batch_to_run()` |
+| 6 | `python/sglang/srt/managers/tp_worker.py` | `TpModelWorker.forward_batch_generation()` |
+| 7 | `python/sglang/srt/model_executor/model_runner.py` | `_forward_raw()`、`forward_decode()`、`forward_extend()`、`sample()` |
+| 8 | `python/sglang/srt/managers/detokenizer_manager.py` | `handle_batch_token_id_out()`、`_decode_batch_token_id_output()` |
 
-读完后，你应该能用自己的话回答：
+读完后，你应该能回答：
 
 - `ChatCompletionRequest` 是在哪里变成 `GenerateReqInput` 的？
-- `GenerateReqInput` 是在哪里变成 token ids 的？
-- Scheduler 的主循环在哪？
+- `GenerateReqInput` 是在哪里变成 `TokenizedGenerateReqInput` 的？
+- `TokenizedGenerateReqInput` 是在哪里变成 `Req` 并进入 `waiting_queue` 的？
 - `ScheduleBatch` 是在哪里变成 `ForwardBatch` 的？
-- token ids 是在哪里变回文本的？
+- token ids 是在哪里变回文本并唤醒 HTTP 协程的？
 
 ## 下一讲预告
 
-下一讲建议深入 Scheduler：我们会拆 `waiting_queue`、`running_batch`、prefill batch、decode batch，以及为什么 SGLang 可以把多个请求连续合批。
+下一讲深入 Scheduler：我们会拆 `waiting_queue`、`running_batch`、prefill batch、decode batch，以及为什么 SGLang 可以把多个请求连续合批。
