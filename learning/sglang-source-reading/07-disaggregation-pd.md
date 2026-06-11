@@ -590,6 +590,377 @@ sequenceDiagram
 
 ---
 
+## 12.1 更细的模块通信视角
+
+上一张时序图是逻辑视角；真正读源码时，需要再把它拆成几类通信：
+
+| 通信类型 | 谁和谁通信 | 传递内容 | 代码入口 |
+|---|---|---|---|
+| 请求入口 IPC | `TokenizerManager -> Decode Scheduler` 或 `TokenizerManager -> Prefill Scheduler` | `TokenizedGenerateReqInput` / `BatchTokenizedGenerateReqInput`，包含 token ids、sampling params、bootstrap fields | `SchedulerRequestReceiver.recv_requests()`、`Scheduler.handle_generate_request()` |
+| Scheduler 内部队列移动 | Scheduler event loop 内部 | `Req`、`DecodeRequest`、`ScheduleBatch` | `handle_batch_generate_request()`、`PrefillBootstrapQueue.add()`、`DecodePreallocQueue.add()` |
+| bootstrap 信息查询 | decode 侧 `KVManager -> prefill bootstrap server` | prefill parallel info、dp rank、tp/pp 拓扑、bootstrap room routing | `CommonKVManager.try_ensure_parallel_info()`、后端 `KVBootstrapServer` |
+| decode 到 prefill 的 metadata 通知 | `KVReceiver -> KVSender / prefill manager` | decode 侧 `kv_indices`、`aux_index`、`state_indices`、`decode_prefix_len` | `BaseKVReceiver.send_metadata()`、`DecodePreallocQueue` 中调用 `kv_receiver.send_metadata(...)` |
+| prefill 到 decode 的 KV 数据传输 | `KVSender -> KVReceiver / decode KV buffer` | page-aligned KV cache blocks、Mamba/SWA/DSA state、aux metadata | `BaseKVSender.send()`、`SchedulerDisaggregationPrefillMixin.send_kv_chunk()` |
+| transfer 状态轮询 | prefill / decode 各自队列轮询 sender/receiver | `KVPoll.Bootstrapping / WaitingForInput / Transferring / Success / Failed` | `poll_and_all_reduce*()`、`DecodeTransferQueue`、`process_disagg_prefill_inflight_queue()` |
+| 输出回流 IPC | `Decode Scheduler -> DetokenizerManager -> TokenizerManager` | `BatchTokenIDOutput`、`BatchStrOutput`、finish reason、logprob | `SchedulerOutputStreamer`、`DetokenizerManager.handle_batch_token_id_out()` |
+
+注意这里有两条路径：
+
+- **控制路径**：请求对象、bootstrap room、metadata、状态轮询。
+- **数据路径**：真正的 KV cache block / state buffer 传输。
+
+PD 分离难读，就是因为这两条路径交织在一起：decode 侧先走控制路径告诉 prefill “我的 KV 位置在哪里”，prefill 侧完成计算后才走数据路径把 KV 写过去。
+
+---
+
+## 12.2 端到端调用流程：从 decode 入口到首个 decode token
+
+下面按“谁调用谁”展开一次最典型的请求。为了便于第一遍阅读，这里先假设：
+
+- 请求从 decode server 入口进入。
+- prefill server 也会收到对应请求或由上层路由到对应 prefill 实例。
+- 无 HiCache restore。
+- 无 PP。
+- 无 optimistic prefill retry。
+- transfer backend 只看抽象，不展开 Mooncake/NIXL 线程细节。
+
+### 阶段 A：Decode server 接收请求并进入 prealloc
+
+```mermaid
+flowchart TD
+  A["TokenizerManager<br/>decode server 主进程"] -->|"TokenizedGenerateReqInput<br/>input_ids / sampling_params / bootstrap_host / bootstrap_room"| B["Decode Scheduler<br/>SchedulerRequestReceiver.recv_requests"]
+  B --> C["Scheduler.handle_generate_request"]
+  C --> D["创建 Req<br/>保存 bootstrap_host / port / room"]
+  D --> E["Scheduler.handle_batch_generate_request"]
+  E --> F["DecodePreallocQueue.add(req)"]
+  F --> G["DecodePreallocQueue._create_receiver_and_enqueue"]
+  G --> H["KVReceiver(mgr, bootstrap_addr, bootstrap_room)"]
+  H --> I["DecodeRequest(req, kv_receiver)"]
+```
+
+这一阶段传递的主要内容：
+
+| 对象 | 关键字段 | 用途 |
+|---|---|---|
+| `TokenizedGenerateReqInput` | `input_ids`、`sampling_params`、`bootstrap_host`、`bootstrap_port`、`bootstrap_room` | 从 tokenizer 侧进入 decode Scheduler 的请求对象。 |
+| `Req` | `origin_input_ids`、`sampling_params`、`bootstrap_*` | Scheduler 内部的请求状态。 |
+| `DecodeRequest` | `req`、`kv_receiver`、`metadata_buffer_index` | decode PD 队列内部对象，把普通 `Req` 和 transfer receiver 绑在一起。 |
+| `KVReceiver` | `bootstrap_addr`、`bootstrap_room` | 后续负责通知 prefill 侧目标 KV 地址，并轮询 transfer。 |
+
+对应源码定位：
+
+- `python/sglang/srt/managers/scheduler_components/request_receiver.py` / `SchedulerRequestReceiver.recv_requests()`
+- `python/sglang/srt/managers/scheduler.py` / `Scheduler.handle_generate_request()`
+- `python/sglang/srt/managers/scheduler.py` / `Scheduler.handle_batch_generate_request()`
+- `python/sglang/srt/disaggregation/decode.py` / `DecodePreallocQueue.add()`
+- `python/sglang/srt/disaggregation/decode.py` / `DecodePreallocQueue._create_receiver_and_enqueue()`
+
+### 阶段 B：Decode server 查询 prefill 信息并预分配目标 KV
+
+```mermaid
+flowchart TD
+  A["DecodePreallocQueue.queue"] --> B{"是否已缓存 prefill_info?"}
+  B -->|"否"| C["kv_manager.try_ensure_parallel_info(bootstrap_addr)"]
+  C --> D["HTTP/bootstrap 查询 prefill server<br/>parallel info / dp size / routing"]
+  D --> E["确定 prefill_dp_rank"]
+  B -->|"是"| E
+  E --> F["KVReceiver.init(prefill_dp_rank)"]
+  F --> G{"decode 侧资源是否足够?"}
+  G -->|"否"| A
+  G -->|"是"| H["分配 req_pool_idx"]
+  H --> I["分配 token_to_kv_pool_allocator 的 KV indices"]
+  I --> J["分配 metadata_buffer_index / aux_index"]
+  J --> K["KVReceiver.send_metadata(kv_indices, aux_index, state_indices, decode_prefix_len)"]
+  K --> L["DecodeTransferQueue.add(decode_req)"]
+```
+
+这一阶段最关键的动作不是传 KV，而是告诉 prefill：
+
+```text
+请把 bootstrap_room = X 的请求，对应的 prompt KV，
+写到 decode 侧这些 kv_indices / aux_index / state_indices 上。
+```
+
+传递内容拆开看：
+
+| 内容 | 从哪来 | 发给谁 | 作用 |
+|---|---|---|---|
+| `prefill_dp_rank` | `CommonKVManager.try_ensure_parallel_info()` 或 room routing | `KVReceiver.init()` | 确定请求应该找哪个 prefill DP rank。 |
+| `kv_indices` | decode 侧 KV allocator | prefill sender | prefill 侧 transfer 的目标位置。 |
+| `aux_index` / `metadata_buffer_index` | `ReqToMetadataIdxAllocator` | prefill sender | 用于写 output token、cached tokens、logprob、bootstrap room 校验等 metadata。 |
+| `state_indices` | Mamba/SWA/DSA 等状态池 | prefill sender | 除普通 KV 之外的模型状态传输目标。 |
+| `decode_prefix_len` | decode prefix match / cache 状态 | prefill sender | 告诉 prefill 哪部分 prefix 已在 decode 侧可复用。 |
+
+源码定位：
+
+- `python/sglang/srt/disaggregation/decode.py` / `DecodePreallocQueue._resolve_prefill_dp_rank()`
+- `python/sglang/srt/disaggregation/common/conn.py` / `CommonKVManager.try_ensure_parallel_info()`
+- `python/sglang/srt/disaggregation/decode.py` / `DecodePreallocQueue` 中调用 `kv_receiver.init(...)`
+- `python/sglang/srt/disaggregation/decode.py` / `DecodePreallocQueue` 中调用 `kv_receiver.send_metadata(...)`
+- `python/sglang/srt/disaggregation/decode.py` / `DecodeTransferQueue.add()`
+
+### 阶段 C：Prefill server 接收请求并创建 sender
+
+```mermaid
+flowchart TD
+  A["TokenizerManager / router<br/>prefill request"] -->|"TokenizedGenerateReqInput<br/>同一 bootstrap_room"| B["Prefill Scheduler.recv_requests"]
+  B --> C["Scheduler.handle_generate_request"]
+  C --> D["创建 Req<br/>保存 bootstrap fields"]
+  D --> E["Scheduler.handle_batch_generate_request"]
+  E --> F["PrefillBootstrapQueue.add(req, num_kv_heads)"]
+  F --> G["PrefillBootstrapQueue.create_sender(req)"]
+  G --> H["KVSender(mgr, bootstrap_addr, bootstrap_room, dest_tp_ranks, pp_rank)"]
+  H --> I["KVSender.init(num_pages, metadata_buffer_index)"]
+  I --> J["req.pending_bootstrap = True"]
+```
+
+prefill 侧和 decode 侧都持有同一个 `bootstrap_room`。它们不是通过 Python 对象共享状态，而是通过 bootstrap server / transfer backend 把 room 映射到对应 sender/receiver 状态。
+
+`PrefillBootstrapQueue.create_sender()` 传给 sender 的信息：
+
+| 参数 | 含义 |
+|---|---|
+| `mgr=self.kv_manager` | 当前 prefill rank 的 KV manager，知道本 rank KV buffer 指针。 |
+| `bootstrap_addr=f"{req.bootstrap_host}:{self.bootstrap_port}"` | decode 或 bootstrap 对端地址。 |
+| `bootstrap_room=req.bootstrap_room` | 请求级 transfer room。 |
+| `dest_tp_ranks=[self.tp_rank]` | 目标 TP rank。 |
+| `pp_rank=self.pp_rank` | PP 场景下当前 prefill stage。 |
+
+源码定位：
+
+- `python/sglang/srt/disaggregation/prefill.py` / `PrefillBootstrapQueue.add()`
+- `python/sglang/srt/disaggregation/prefill.py` / `PrefillBootstrapQueue.create_sender()`
+- `python/sglang/srt/disaggregation/prefill.py` / `PrefillBootstrapQueue._process_req()`
+
+### 阶段 D：Prefill event loop 等 bootstrap 完成，然后跑 prefill forward
+
+```mermaid
+flowchart TD
+  A["event_loop_normal_disagg_prefill"] --> B["recv_requests"]
+  B --> C["process_input_requests"]
+  C --> D["disagg_prefill_bootstrap_queue.pop_bootstrapped()"]
+  D --> E["进入 waiting_queue"]
+  E --> F["get_next_disagg_prefill_batch_to_run"]
+  F --> G["get_new_batch_prefill / ScheduleBatch"]
+  G --> H["run_batch(batch)"]
+  H --> I["TpModelWorker.forward_batch_generation"]
+  I --> J["ModelRunner.forward_extend"]
+  J --> K["prefill 侧 KV cache 写入完成"]
+```
+
+这一阶段是普通 prefill forward 和 PD 控制面的交汇点：
+
+- `pop_bootstrapped()` 只把 sender/receiver 握手完成的请求放进 waiting queue。
+- `get_next_disagg_prefill_batch_to_run()` 仍然复用 Scheduler 的 prefill batch 构造。
+- `run_batch()` 仍然进入 `TpModelWorker -> ModelRunner`。
+- 模型 forward 写入的是 prefill server 本地 KV cache。
+
+源码定位：
+
+- `python/sglang/srt/disaggregation/prefill.py` / `SchedulerDisaggregationPrefillMixin.event_loop_normal_disagg_prefill()`
+- `python/sglang/srt/disaggregation/prefill.py` / `SchedulerDisaggregationPrefillMixin.get_next_disagg_prefill_batch_to_run()`
+- `python/sglang/srt/managers/tp_worker.py` / `TpModelWorker.forward_batch_generation()`
+- `python/sglang/srt/model_executor/model_runner.py` / `ModelRunner.forward_extend()`
+
+### 阶段 E：Prefill forward 结束后发送 KV 和 metadata
+
+```mermaid
+flowchart TD
+  A["process_batch_result_disagg_prefill(batch, result)"] --> B["遍历 batch.reqs"]
+  B --> C["req.output_ids.append(next_token_id)"]
+  C --> D["maybe_cache_unfinished_req(req, tree_cache)"]
+  D --> E["写 logprob / topk / hidden states 到 req 或 metadata"]
+  E --> F["send_kv_chunk(req, last_chunk=True)"]
+  F --> G["kv_to_page_indices(req KV indices)"]
+  G --> H["req.disagg_kv_sender.send(page_indices, state_indices)"]
+  H --> I["req 进入 disagg_prefill_inflight_queue"]
+```
+
+这一阶段传递的内容分两类：
+
+| 类型 | 内容 | 目的 |
+|---|---|---|
+| KV 数据 | `page_indices` 对应的 K/V cache block | 让 decode 侧得到 prompt KV。 |
+| 辅助 metadata | `next_token_id`、`cached_tokens`、logprob、top-k、hidden states、`bootstrap_room` | 让 decode 侧恢复请求状态，并校验 metadata 没串 room。 |
+
+`send_kv_chunk()` 会处理 page 对齐、state indices、是否应该发送当前 chunk 等细节。对于 chunked prefill，它可能不是只调用一次；对于普通 prefill，通常最后一个 chunk 会 `last_chunk=True`。
+
+源码定位：
+
+- `python/sglang/srt/disaggregation/prefill.py` / `SchedulerDisaggregationPrefillMixin.process_batch_result_disagg_prefill()`
+- `python/sglang/srt/disaggregation/prefill.py` / `SchedulerDisaggregationPrefillMixin.send_kv_chunk()`
+- `python/sglang/srt/disaggregation/base/conn.py` / `BaseKVSender.send()`
+
+### 阶段 F：Prefill 侧 inflight 队列轮询 transfer 完成
+
+```mermaid
+flowchart TD
+  A["disagg_prefill_inflight_queue"] --> B["process_disagg_prefill_inflight_queue"]
+  B --> C["poll_and_all_reduce_attn_cp_tp_group(sender list)"]
+  C --> D{"KVPoll"}
+  D -->|"Transferring / WaitingForInput"| A
+  D -->|"Success"| E["释放 prefill 侧资源 / stream prefill 完成状态"]
+  D -->|"Failed"| F["sender.failure_exception / abort / cleanup"]
+```
+
+为什么要 `all_reduce`？
+
+在 TP、attention TP、CP 等多 rank 场景下，一个请求的 transfer 状态必须在相关 rank 上一致。否则某些 rank 以为请求完成，另一些 rank 仍在等待，就会造成队列分歧或 collective 卡住。
+
+源码定位：
+
+- `python/sglang/srt/disaggregation/prefill.py` / `SchedulerDisaggregationPrefillMixin.process_disagg_prefill_inflight_queue()`
+- `python/sglang/srt/disaggregation/utils.py` / `poll_and_all_reduce_attn_cp_tp_group()`
+
+### 阶段 G：Decode 侧 transfer queue 确认成功并 commit 到 Req
+
+```mermaid
+flowchart TD
+  A["DecodeTransferQueue.queue"] --> B["_poll_with_metadata_gate"]
+  B --> C["receiver.poll / HiCache gated receiver"]
+  C --> D{"KVPoll.Success?"}
+  D -->|"否"| A
+  D -->|"是"| E["_commit_transfer_to_req(decode_req)"]
+  E --> F["metadata_buffers.get_buf(metadata_buffer_index)"]
+  F --> G["校验 output_bootstrap_room == req.bootstrap_room"]
+  G --> H["req.output_ids.append(output_id)"]
+  H --> I["写 cached_tokens / logprob / topk / hidden_states"]
+  I --> J["kv_receiver.clear()"]
+  J --> K["req 进入 decode waiting queue"]
+```
+
+`_commit_transfer_to_req()` 是 decode 侧很关键的函数。它不是只看 KV 是否到了，还要把 prefill 侧生成的请求状态合并回 decode 侧 `Req`。
+
+commit 的主要内容：
+
+| 内容 | 从哪里来 | 写到哪里 |
+|---|---|---|
+| `output_id` | metadata buffer | `decode_req.req.output_ids` |
+| `cached_tokens` | metadata buffer | `req.cached_tokens`、`req.already_computed` |
+| `output_token_logprobs_*` | metadata buffer | `req.logprob` |
+| `output_topk_*` | metadata buffer | speculative decoding 相关字段 |
+| `output_hidden_states` | metadata buffer | `req.hidden_states_tensor` |
+| `output_bootstrap_room` | metadata buffer | 用于校验是否发生 metadata buffer 串写 |
+
+源码定位：
+
+- `python/sglang/srt/disaggregation/decode.py` / `DecodeTransferQueue._poll_with_metadata_gate()`
+- `python/sglang/srt/disaggregation/decode.py` / `DecodeTransferQueue._commit_transfer_to_req()`
+
+### 阶段 H：Decode 侧构造 prebuilt batch，进入正常 decode loop
+
+```mermaid
+flowchart TD
+  A["transfer success 的 Req"] --> B["decode waiting queue"]
+  B --> C["构造 PrebuiltExtendBatch / prepare_for_prebuilt"]
+  C --> D["合并到 running_batch"]
+  D --> E["ScheduleBatch.prepare_for_decode"]
+  E --> F["TpModelWorker.forward_batch_generation"]
+  F --> G["ModelRunner.forward_decode"]
+  G --> H["Sampler.sample"]
+  H --> I["SchedulerOutputStreamer -> DetokenizerManager"]
+```
+
+这里“prebuilt extend”容易误解：decode 侧不是重新跑 prompt prefill，而是把已经 transfer 完成的 KV 和请求 metadata 接回 Scheduler 的 batch 结构中。之后请求就像普通 running request 一样，每轮 decode 一个 token。
+
+源码定位：
+
+- `python/sglang/srt/disaggregation/decode.py` / `SchedulerDisaggregationDecodeMixin`
+- `python/sglang/srt/disaggregation/decode_schedule_batch_mixin.py` / `ScheduleBatchDisaggregationDecodeMixin`
+- `python/sglang/srt/managers/schedule_batch.py` / `ScheduleBatch.prepare_for_decode()`
+- `python/sglang/srt/model_executor/model_runner.py` / `ModelRunner.forward_decode()`
+
+---
+
+## 12.3 两个 server 的 event loop 对照
+
+### Prefill server event loop
+
+```mermaid
+flowchart TD
+  A["event_loop_normal_disagg_prefill"] --> B["recv_requests"]
+  B --> C["process_input_requests"]
+  C --> D["pop_bootstrapped -> waiting_queue"]
+  D --> E["get_next_disagg_prefill_batch_to_run"]
+  E --> F{"batch?"}
+  F -->|"有"| G["run_batch"]
+  G --> H["process_batch_result_disagg_prefill"]
+  H --> I["send_kv_chunk / inflight_queue"]
+  F -->|"无"| J["on_idle"]
+  I --> K["process_disagg_prefill_inflight_queue"]
+  J --> K
+  K --> A
+```
+
+### Decode server event loop
+
+```mermaid
+flowchart TD
+  A["event_loop_normal_disagg_decode"] --> B["recv_requests"]
+  B --> C["process_input_requests"]
+  C --> D["DecodePreallocQueue<br/>resolve prefill info + alloc KV + send_metadata"]
+  D --> E["DecodeTransferQueue<br/>poll receiver + commit metadata"]
+  E --> F["resolved reqs -> waiting/prebuilt"]
+  F --> G["get_next_batch_to_run"]
+  G --> H{"batch?"}
+  H -->|"有"| I["run_batch<br/>decode forward"]
+  I --> J["process_batch_result<br/>stream token"]
+  H -->|"无"| K["on_idle"]
+  J --> A
+  K --> A
+```
+
+两个 loop 的本质差异：
+
+| 对照项 | Prefill server | Decode server |
+|---|---|---|
+| 请求进入后的第一站 | `PrefillBootstrapQueue` | `DecodePreallocQueue` |
+| 什么时候能跑模型 | bootstrap 完成后 | transfer 成功并 commit 后 |
+| 模型 forward 模式 | prefill / extend | decode |
+| forward 后做什么 | 发送 KV，进入 inflight queue | 采样 next token，输出给用户 |
+| 队列中轮询谁 | `KVSender.poll()` | `KVReceiver.poll()` |
+
+---
+
+## 12.4 传递内容总表
+
+| 阶段 | 发送方 | 接收方 | 载体 / 对象 | 关键字段 / 内容 | 目的 |
+|---|---|---|---|---|---|
+| 请求进入 decode | `TokenizerManager` | `Decode Scheduler` | `TokenizedGenerateReqInput` | token ids、sampling params、rid、bootstrap fields | 创建 decode 侧 `Req`。 |
+| 请求进入 prefill | `TokenizerManager` / router | `Prefill Scheduler` | `TokenizedGenerateReqInput` | 同一 prompt、同一 `bootstrap_room` | 创建 prefill 侧 `Req`。 |
+| prefill 信息查询 | `Decode KVManager` | `Prefill bootstrap server` | HTTP / backend control request | prefill dp size、parallel info、routing info | 确定 receiver 应该连哪个 prefill rank。 |
+| receiver 初始化 | `DecodePreallocQueue` | `KVReceiver` | 方法调用 | `prefill_dp_rank` | 让 receiver 绑定正确 prefill 对端。 |
+| decode 侧 metadata 通知 | `KVReceiver` | `KVSender` / prefill backend | backend metadata 消息 | `kv_indices`、`aux_index`、`state_indices`、`decode_prefix_len` | 告诉 prefill KV 要写到哪里。 |
+| prefill forward | `Prefill Scheduler` | `ModelRunner` | `ScheduleBatch -> ForwardBatch` | input ids、positions、cache loc | 计算 prompt KV。 |
+| KV 数据传输 | `KVSender` | `KVReceiver` / decode KV buffer | backend 数据传输 | page indices 对应 KV block、state buffer | 把 prefill 侧 KV 写到 decode 侧。 |
+| metadata commit | `DecodeTransferQueue` | decode `Req` | `MetadataBuffers.get_buf()` | output token、cached tokens、logprob、topk、hidden states、bootstrap room | 恢复请求状态，确认 transfer 属于正确请求。 |
+| decode 输出 | `Decode Scheduler` | `DetokenizerManager` | `BatchTokenIDOutput` | token ids、finish reason、logprob | 返回用户可读文本前的 token 输出。 |
+
+---
+
+## 12.5 源码跟读清单：按调用顺序走一遍
+
+如果你要在 IDE 里按调用链阅读，建议按下面顺序点开：
+
+| 顺序 | 调用点 | 读什么 |
+|---:|---|---|
+| 1 | `SchedulerRequestReceiver.recv_requests()` | 看 tokenized 请求如何进入 decode/prefill Scheduler。 |
+| 2 | `Scheduler.handle_generate_request()` | 看 `bootstrap_host/port/room` 如何写入 `Req`。 |
+| 3 | `Scheduler.handle_batch_generate_request()` | 看 `DisaggregationMode.PREFILL/DECODE` 如何分流。 |
+| 4 | `DecodePreallocQueue.add()` | 看 decode 侧如何创建 `DecodeRequest` 和 `KVReceiver`。 |
+| 5 | `DecodePreallocQueue._resolve_prefill_dp_rank()` | 看如何根据 prefill info / bootstrap room 选择 prefill DP rank。 |
+| 6 | `DecodePreallocQueue` 中 `kv_receiver.send_metadata(...)` | 看 decode 侧把哪些目标 KV 信息发给 prefill。 |
+| 7 | `PrefillBootstrapQueue.add()` | 看 prefill 侧如何创建 `KVSender`。 |
+| 8 | `event_loop_normal_disagg_prefill()` | 看 prefill loop 如何等待 bootstrap 完成后再组 batch。 |
+| 9 | `process_batch_result_disagg_prefill()` | 看 prefill forward 后如何写 metadata、调用 `send_kv_chunk()`。 |
+| 10 | `send_kv_chunk()` | 看 page indices / state indices 如何交给 `KVSender.send()`。 |
+| 11 | `DecodeTransferQueue._poll_with_metadata_gate()` | 看 decode 侧如何判断 transfer 是否真的可 commit。 |
+| 12 | `DecodeTransferQueue._commit_transfer_to_req()` | 看 metadata 如何合并回 decode 侧 `Req`。 |
+| 13 | `ScheduleBatchDisaggregationDecodeMixin` | 看 transfer 成功后的请求如何变成 prebuilt batch。 |
+| 14 | `ModelRunner.forward_decode()` | 看请求回到普通 decode forward。 |
+
+---
+
 ## 13. 失败、超时和重试
 
 PD 分离把一次请求拆成两个 server 的协作，因此失败场景比普通模式多。
