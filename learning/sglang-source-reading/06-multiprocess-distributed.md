@@ -378,6 +378,484 @@ flowchart TD
 
 ---
 
+## 11.1 先统一术语：进程、GPU、rank、group 到底是什么
+
+读 SGLang 分布式代码时，最容易混淆的是这四个词：
+
+| 概念 | 在 SGLang 中大致对应什么 | 是否一一对应 | 说明 |
+|---|---|---|---|
+| OS 进程 | `Scheduler` 子进程、`DataParallelController` 子进程、`DetokenizerManager` 子进程、主进程中的 `TokenizerManager` | 不完全一一对应 | 模型计算 rank 通常是一个 Scheduler 子进程；Tokenizer/Detokenizer 不一定绑定 GPU。 |
+| GPU / device | `gpu_id` / `local_rank` | 通常一个模型 rank 绑定一个 GPU | `Engine._launch_scheduler_processes()` 计算 `gpu_id`，传给 `run_scheduler_process()`、`TpModelWorker`、`ModelRunner`。 |
+| global rank | torch distributed world 内的 rank | 一个模型计算进程一个 global rank | 在 `ModelRunner.init_torch_distributed()` 中，rank 计算为 `tp_size * pp_rank + tp_rank`。 |
+| logical rank | `tp_rank`、`pp_rank`、`dp_rank`、`attn_cp_rank`、`moe_ep_rank` 等 | 一个进程同时拥有多个 logical rank | 同一个进程/GPU 会在 TP、PP、DP attention、MoE EP 等多个维度中分别有自己的 rank。 |
+| process group | `get_tp_group()`、`get_pp_group()`、`get_attn_tp_group()` 等 | 一个进程可加入多个 group | group 是 collective 的边界；不同并行策略使用不同 group 通信。 |
+
+一句话：
+
+> 一个模型计算进程通常绑定一张 GPU，并在 torch distributed world 里拥有一个 global rank；但这个进程同时属于多个逻辑 group，所以它会有 `tp_rank`、`pp_rank`、`attn_tp_rank`、`attn_cp_rank`、`moe_ep_rank`、`moe_dp_rank` 等多个身份。
+
+---
+
+## 11.2 SGLang 一共有哪几种并行
+
+下面这张表按“切分对象”来区分不同并行。这样比只背缩写更稳。
+
+| 并行类型 | 缩写 | 切分对象 | 是否复制完整请求 | 是否复制完整模型 | 主要类 / 函数 | 典型通信 |
+|---|---|---|---|---|---|---|
+| Tensor Parallel | TP | 单层权重、attention heads、MLP hidden dim | 是，同一个请求给 TP 组内所有 rank | 否，每个 rank 持有权重分片 | `TpModelWorker`、`ModelRunner.init_torch_distributed()`、`initialize_model_parallel()`、`get_tp_group()` | all-reduce、all-gather、broadcast object |
+| Pipeline Parallel | PP | transformer layers | 请求沿 stage 流动 | 否，每个 PP stage 持有部分层 | `SchedulerPPMixin`、`PPProxyTensors`、`TpModelWorker.forward_batch_generation()` | stage 间 send/recv hidden states、p2p object |
+| Data Parallel | DP | 请求流量 / worker group | 否，不同请求路由到不同 DP group | 是，每个 DP group 有一份模型并行副本 | `DataParallelController`、`launch_tensor_parallel_group()`、`round_robin_scheduler()` | controller 到各 DP group 的 ZMQ / TCP 路由 |
+| DP Attention | Attention DP | attention 层 token 维度和 DP 维度 | 各 DP rank 有本地 batch，但部分 MLP/attention 需同步 | 通常在 TP group 内重解释 rank | `compute_dp_attention_world_info()`、`initialize_dp_attention()`、`SchedulerDPAttnAdapter` | all-gather / all-reduce / idle batch 同步 |
+| Context Parallel | CP / ATTN CP | 长上下文 token 片段 | 同一请求的上下文可被切分 | 模型权重仍按 TP/PP/EP 规则 | `attn_cp_size`、`get_attn_cp_group()`、`ForwardBatch` metadata | attention context 相关 gather/scatter |
+| Expert Parallel | EP / MoE EP | MoE experts | token 会路由到不同 expert rank | dense 层未必切，expert 被切 | `moe_ep_rank`、`get_moe_ep_group()`、`ModelRunner.update_expert_location()` | token dispatch/combine、expert all-to-all |
+| MoE Data Parallel | MoE DP | expert 副本 / expert 数据并行维度 | expert 维度上的数据并行 | 部分 expert 或 expert group 复制 | `moe_dp_rank`、`get_moe_dp_group()`、`moe_dp_size` | expert 侧 reduce / gather |
+| Expert Load Balancing | EPLB | expert 放置和负载 | 不直接切请求 | 动态调整 expert location | `eplb`、`ModelRunner.update_expert_location()`、`maybe_recover_ep_ranks()` | expert metadata broadcast |
+| Prefill/Decode Disaggregation | PD | 部署角色：prefill worker / decode worker | 请求生命周期被拆成 prefill 与 decode | 取决于部署，通常各角色有各自模型 worker | `SchedulerDisaggregationPrefillMixin`、`SchedulerDisaggregationDecodeMixin`、KV sender/receiver | KV transfer |
+
+注意：
+
+- **TP / PP / EP 是模型内部切分。** 它们让多个 GPU 合作计算一个模型。
+- **DP 是服务实例级复制。** 它让多个 worker group 分摊不同请求。
+- **DP attention 不是普通 DP。** 它是 attention/MLP 维度上的混合并行，会让同一个 TP group 内的 rank 被重新解释成 attention DP、attention CP、attention TP。
+- **PD disaggregation 不是传统模型并行。** 它是把 prefill 和 decode 部署角色拆开，核心数据流是 KV cache transfer。
+
+---
+
+## 11.3 rank 的层级：从 world rank 到 TP / PP / Attention / MoE
+
+`ModelRunner.init_torch_distributed()` 中初始化 torch distributed 时，global rank 是：
+
+```text
+global_rank = tp_size * pp_rank + tp_rank
+world_size  = tp_size * pp_size
+```
+
+这意味着在一个 DP group 内，SGLang 的模型计算 world 可以先看成二维矩阵：
+
+```text
+                 tp_rank
+              0    1    2    3
+pp_rank 0    r0   r1   r2   r3
+pp_rank 1    r4   r5   r6   r7
+```
+
+如果 `tp_size=4`、`pp_size=2`，则：
+
+- `pp_rank=0,tp_rank=0` 的 global rank 是 `0`
+- `pp_rank=0,tp_rank=3` 的 global rank 是 `3`
+- `pp_rank=1,tp_rank=0` 的 global rank 是 `4`
+- `pp_rank=1,tp_rank=3` 的 global rank 是 `7`
+
+`initialize_model_parallel()` 会基于这个 world 创建不同 group：
+
+```mermaid
+flowchart TD
+  W["WORLD<br/>tp_size * pp_size ranks"] --> TP["TP groups<br/>同一个 PP stage 内的连续 tp ranks"]
+  W --> PP["PP groups<br/>同一个 tp_rank 跨不同 PP stage"]
+  TP --> ATTNDP["Attention DP 维度"]
+  TP --> ATTNCP["Attention CP groups"]
+  TP --> ATTNTP["Attention TP groups"]
+  TP --> MOEDP["MoE DP groups"]
+  TP --> MOEEP["MoE EP groups"]
+  TP --> MOETP["MoE TP 剩余维度"]
+```
+
+### TP 与 PP group 怎么看
+
+以 8 个 rank、`tp_size=2`、`pp_size=4` 为例，`initialize_model_parallel()` 注释中的 group 是：
+
+| group 类型 | group 列表 | 含义 |
+|---|---|---|
+| TP group | `[g0,g1]`、`[g2,g3]`、`[g4,g5]`、`[g6,g7]` | 每个 PP stage 内，两个 TP rank 合作算该 stage 的层。 |
+| PP group | `[g0,g2,g4,g6]`、`[g1,g3,g5,g7]` | 固定同一个 TP 分片编号，跨 PP stage 传 hidden states。 |
+
+换句话说：
+
+- TP group 横向切同一 stage 的层内矩阵。
+- PP group 纵向串起不同 stage 的层。
+
+### Attention rank 怎么从 tp_rank 拆出来
+
+`_compute_parallelism_ranks()` 与 `compute_dp_attention_world_info()` 使用同一个层级思想：
+
+```text
+Attention hierarchy:
+tp_rank = (attn_dp_rank * attn_cp_size + attn_cp_rank) * attn_tp_size + attn_tp_rank
+
+attn_tp_size = tp_size / attn_dp_size / attn_cp_size
+attn_dp_size = dp_size if enable_dp_attention else 1
+```
+
+如果 `tp_size=8`、`enable_dp_attention=True`、`dp_size=2`、`attn_cp_size=2`：
+
+```text
+attn_tp_size = 8 / 2 / 2 = 2
+
+tp_rank 0 -> attn_dp_rank=0, attn_cp_rank=0, attn_tp_rank=0
+tp_rank 1 -> attn_dp_rank=0, attn_cp_rank=0, attn_tp_rank=1
+tp_rank 2 -> attn_dp_rank=0, attn_cp_rank=1, attn_tp_rank=0
+tp_rank 3 -> attn_dp_rank=0, attn_cp_rank=1, attn_tp_rank=1
+tp_rank 4 -> attn_dp_rank=1, attn_cp_rank=0, attn_tp_rank=0
+tp_rank 5 -> attn_dp_rank=1, attn_cp_rank=0, attn_tp_rank=1
+tp_rank 6 -> attn_dp_rank=1, attn_cp_rank=1, attn_tp_rank=0
+tp_rank 7 -> attn_dp_rank=1, attn_cp_rank=1, attn_tp_rank=1
+```
+
+对应关系图：
+
+```mermaid
+flowchart LR
+  TP0["tp_rank 0"] --> A00["attn_dp 0 / cp 0 / attn_tp 0"]
+  TP1["tp_rank 1"] --> A01["attn_dp 0 / cp 0 / attn_tp 1"]
+  TP2["tp_rank 2"] --> A10["attn_dp 0 / cp 1 / attn_tp 0"]
+  TP3["tp_rank 3"] --> A11["attn_dp 0 / cp 1 / attn_tp 1"]
+  TP4["tp_rank 4"] --> B00["attn_dp 1 / cp 0 / attn_tp 0"]
+  TP5["tp_rank 5"] --> B01["attn_dp 1 / cp 0 / attn_tp 1"]
+  TP6["tp_rank 6"] --> B10["attn_dp 1 / cp 1 / attn_tp 0"]
+  TP7["tp_rank 7"] --> B11["attn_dp 1 / cp 1 / attn_tp 1"]
+```
+
+这也是为什么 DP attention 下不能把 `tp_rank` 直接当作“TP 内第几张卡”。它会再拆成 attention DP、attention CP、attention TP 三个维度。
+
+### MoE rank 怎么从 tp_rank 拆出来
+
+MoE 的层级是：
+
+```text
+MoE hierarchy:
+Global(TP) -> MOE_DP -> EP -> MOE_TP
+
+moe_dp_rank = tp_rank // (tp_size / moe_dp_size)
+moe_ep_rank = tp_rank % (tp_size / moe_dp_size) // (tp_size / moe_dp_size / ep_size)
+moe_tp_size = tp_size / moe_dp_size / ep_size
+```
+
+如果 `tp_size=8`、`moe_dp_size=2`、`ep_size=2`：
+
+```text
+moe_tp_size = 8 / 2 / 2 = 2
+
+tp_rank 0 -> moe_dp_rank=0, moe_ep_rank=0, moe_tp_rank=0
+tp_rank 1 -> moe_dp_rank=0, moe_ep_rank=0, moe_tp_rank=1
+tp_rank 2 -> moe_dp_rank=0, moe_ep_rank=1, moe_tp_rank=0
+tp_rank 3 -> moe_dp_rank=0, moe_ep_rank=1, moe_tp_rank=1
+tp_rank 4 -> moe_dp_rank=1, moe_ep_rank=0, moe_tp_rank=0
+tp_rank 5 -> moe_dp_rank=1, moe_ep_rank=0, moe_tp_rank=1
+tp_rank 6 -> moe_dp_rank=1, moe_ep_rank=1, moe_tp_rank=0
+tp_rank 7 -> moe_dp_rank=1, moe_ep_rank=1, moe_tp_rank=1
+```
+
+可以把 dense 层和 MoE 层理解成对同一个 TP 维度的两种解释：
+
+```mermaid
+flowchart TB
+  TP["tp_rank 0..7"] --> Dense["Dense / Attention 解释<br/>attn_dp + attn_cp + attn_tp"]
+  TP --> MoE["MoE 解释<br/>moe_dp + moe_ep + moe_tp"]
+  Dense --> DenseComm["attention all-gather / all-reduce / CP 通信"]
+  MoE --> MoEComm["expert dispatch / combine / EP 通信"]
+```
+
+---
+
+## 11.4 进程、GPU 与 rank 的实际映射
+
+标准 `dp_size == 1` 时，`Engine._launch_scheduler_processes()` 双层循环启动 Scheduler：
+
+```text
+for pp_rank in pp_rank_range:
+  for tp_rank in tp_rank_range:
+    gpu_id = base_gpu_id
+           + ((pp_rank % pp_size_per_node) * tp_size_per_node)
+           + (tp_rank % tp_size_per_node) * gpu_id_step
+    attn_cp_rank, moe_dp_rank, moe_ep_rank = _compute_parallelism_ranks(server_args, tp_rank)
+    mp.Process(target=run_scheduler_process, args=(..., gpu_id, tp_rank, ..., pp_rank, dp_rank=None))
+```
+
+因此一个模型计算子进程启动时已经知道：
+
+| 参数 | 从哪里来 | 进入哪些类 | 用途 |
+|---|---|---|---|
+| `gpu_id` | `Engine._launch_scheduler_processes()` | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前进程绑定哪张 GPU。 |
+| `tp_rank` | loop 变量 | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前 rank 在 TP 维度的位置。 |
+| `pp_rank` | loop 变量 | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前 rank 属于哪个 pipeline stage。 |
+| `attn_cp_rank` | `_compute_parallelism_ranks()` | `TpModelWorker`、`ModelRunner` | attention context parallel 的 rank。 |
+| `moe_dp_rank` | `_compute_parallelism_ranks()` | `TpModelWorker`、`ModelRunner` | MoE data parallel 的 rank。 |
+| `moe_ep_rank` | `_compute_parallelism_ranks()` | `TpModelWorker`、`ModelRunner` | expert parallel 的 rank。 |
+| `dp_rank` | 普通模式为 `None`，DP controller 模式下指定 | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前 worker group 属于哪个 DP 副本。 |
+
+这些参数的传递链路是：
+
+```mermaid
+flowchart LR
+  Engine["_launch_scheduler_processes<br/>计算 gpu_id / tp_rank / pp_rank"] --> Run["run_scheduler_process"]
+  Run --> Scheduler["Scheduler.__init__"]
+  Scheduler --> Worker["TpModelWorker.__init__"]
+  Worker --> Runner["ModelRunner.__init__"]
+  Runner --> Dist["ModelRunner.init_torch_distributed"]
+  Dist --> Groups["initialize_model_parallel<br/>创建 TP/PP/ATTN/MoE groups"]
+```
+
+### 单机 TP=4、PP=1 的直观映射
+
+```text
+进程数: 4 个 Scheduler 子进程
+GPU 数: 4 张 GPU
+world_size: 4
+
+process 0 -> gpu 0 -> pp_rank 0, tp_rank 0 -> global_rank 0
+process 1 -> gpu 1 -> pp_rank 0, tp_rank 1 -> global_rank 1
+process 2 -> gpu 2 -> pp_rank 0, tp_rank 2 -> global_rank 2
+process 3 -> gpu 3 -> pp_rank 0, tp_rank 3 -> global_rank 3
+```
+
+请求关系：
+
+- `tp_rank=0` 的 Scheduler leader 从 TokenizerManager 收请求。
+- 4 个 TP rank 通过 `tp_cpu_group` 广播 Python 请求对象。
+- 4 个 `ModelRunner` 分别在自己的 GPU 上执行权重分片。
+- 必要时通过 TP group 做 all-reduce / all-gather。
+
+### 单机 TP=2、PP=2 的直观映射
+
+```text
+进程数: 4 个 Scheduler 子进程
+GPU 数: 4 张 GPU
+world_size: 4
+
+process 0 -> gpu 0 -> pp_rank 0, tp_rank 0 -> global_rank 0
+process 1 -> gpu 1 -> pp_rank 0, tp_rank 1 -> global_rank 1
+process 2 -> gpu 2 -> pp_rank 1, tp_rank 0 -> global_rank 2
+process 3 -> gpu 3 -> pp_rank 1, tp_rank 1 -> global_rank 3
+```
+
+group 关系：
+
+```text
+TP groups: [rank0, rank1], [rank2, rank3]
+PP groups: [rank0, rank2], [rank1, rank3]
+```
+
+执行关系：
+
+- PP0 的两个 TP rank 计算前半部分层。
+- PP1 的两个 TP rank 计算后半部分层。
+- PP0 输出 `PPProxyTensors`，通过 PP group 传给 PP1。
+- 只有 PP 最后一级能得到最终 logits 并采样。
+
+### DP=2、TP=2 的直观映射
+
+普通 DP 会多一层 `DataParallelController`。每个 DP rank 是一套 TP group：
+
+```text
+DP rank 0:
+  process 0 -> gpu 0 -> tp_rank 0
+  process 1 -> gpu 1 -> tp_rank 1
+
+DP rank 1:
+  process 2 -> gpu 2 -> tp_rank 0
+  process 3 -> gpu 3 -> tp_rank 1
+```
+
+```mermaid
+flowchart TD
+  T["TokenizerManager"] --> C["DataParallelController"]
+  C -->|"request A"| DP0["DP rank 0<br/>TP group: gpu0 + gpu1"]
+  C -->|"request B"| DP1["DP rank 1<br/>TP group: gpu2 + gpu3"]
+  DP0 --> D["DetokenizerManager"]
+  DP1 --> D
+```
+
+这里要特别注意：
+
+- DP 不是让 request A 同时给 DP0 和 DP1 算。
+- DP 是 controller 把不同请求路由到不同模型副本。
+- 每个 DP group 内部仍然可以有 TP/PP/EP。
+
+---
+
+## 11.5 各并行策略和 SGLang 类的对应关系
+
+| 并行策略 | 创建/计算 rank 的位置 | 保存 rank 的类 | 实际使用 rank 的类/模块 | 你读源码时应关注的对象 |
+|---|---|---|---|---|
+| TP | `Engine._launch_scheduler_processes()`、`_compute_parallelism_ranks()`、`ModelRunner.init_torch_distributed()` | `Scheduler`、`TpModelWorker`、`ModelRunner` | `distributed.communication_op`、TP linear layers、attention backend、sampler token sync | `tp_rank`、`get_tp_group()`、`tensor_model_parallel_all_reduce()` |
+| PP | `_calculate_rank_ranges()`、`initialize_model_parallel()` | `Scheduler`、`TpModelWorker`、`ModelRunner` | `SchedulerPPMixin`、`PPProxyTensors`、`TpModelWorker.forward_batch_generation()` | `pp_rank`、`pp_group.is_last_rank`、`pp_proxy_tensors` |
+| DP | `DataParallelController.launch_tensor_parallel_group()` | `DataParallelController`、`Scheduler`、`TpModelWorker`、`ModelRunner` | DP controller routing、worker status、load collector | `dp_rank`、每个 DP group 的 scheduler ports |
+| DP attention | `compute_dp_attention_world_info()`、`initialize_dp_attention()` | `ModelRunner`、dp attention globals | `SchedulerDPAttnAdapter`、`ForwardBatch.global_num_tokens_*`、MLP sync | `attn_dp_rank`、`attn_tp_rank`、idle batch |
+| CP / ATTN CP | `_compute_parallelism_ranks()`、`initialize_model_parallel()` | `TpModelWorker`、`ModelRunner` | attention backend、`ForwardBatch` metadata | `attn_cp_rank`、`get_attn_cp_group()` |
+| EP / MoE EP | `_compute_parallelism_ranks()`、`initialize_model_parallel()` | `TpModelWorker`、`ModelRunner` | MoE layers、EPLB、expert location updater | `moe_ep_rank`、`ep_size`、expert location |
+| MoE DP | `_compute_parallelism_ranks()`、`initialize_model_parallel()` | `TpModelWorker`、`ModelRunner` | MoE token dispatch/combine、expert routing | `moe_dp_rank`、`moe_dp_size` |
+
+从类的角度看：
+
+```mermaid
+flowchart TB
+  Engine["Engine<br/>负责启动进程和计算 gpu_id/tp/pp 范围"] --> Scheduler["Scheduler<br/>保存 rank 并执行调度循环"]
+  Scheduler --> TpWorker["TpModelWorker<br/>把 rank 传入 ModelRunner"]
+  TpWorker --> ModelRunner["ModelRunner<br/>初始化 torch distributed 和各类 group"]
+  ModelRunner --> ParallelState["parallel_state.initialize_model_parallel<br/>创建 TP/PP/ATTN/MoE groups"]
+  ModelRunner --> Layers["模型层 / attention backend / MoE layer<br/>实际使用 group 做 collective"]
+  Scheduler --> Receiver["SchedulerRequestReceiver<br/>根据 rank leader 规则收请求和广播"]
+  Scheduler --> DPAttn["SchedulerDPAttnAdapter<br/>DP attention 下同步 batch 形状"]
+  Engine --> DPController["DataParallelController<br/>dp_size > 1 时负责路由和启动每个 DP group"]
+```
+
+---
+
+## 11.6 不同并行下，请求在 rank 之间怎么流动
+
+### TP：同一个请求复制到组内所有 rank
+
+```mermaid
+sequenceDiagram
+  participant T as TokenizerManager
+  participant S0 as Scheduler tp_rank=0
+  participant S1 as Scheduler tp_rank=1
+  participant W0 as ModelRunner rank0
+  participant W1 as ModelRunner rank1
+
+  T->>S0: TokenizedGenerateReqInput
+  S0->>S1: broadcast_pyobj(recv_reqs)
+  S0->>S0: 构造相同 ScheduleBatch
+  S1->>S1: 构造相同 ScheduleBatch
+  S0->>W0: ForwardBatch，本 rank 权重分片
+  S1->>W1: ForwardBatch，本 rank 权重分片
+  W0-->>W1: TP collective
+  W1-->>W0: TP collective
+  W0-->>S0: logits / token result leader path
+```
+
+### PP：请求和 hidden states 沿 stage 流动
+
+```mermaid
+sequenceDiagram
+  participant T as TokenizerManager
+  participant P0 as PP0 Scheduler / Worker
+  participant P1 as PP1 Scheduler / Worker
+
+  T->>P0: recv_reqs
+  P0->>P1: point_to_point_pyobj(recv_reqs)
+  P0->>P0: forward 前半层
+  P0->>P1: PPProxyTensors(hidden states)
+  P1->>P1: forward 后半层 + logits
+  P1-->>P0: 必要的调度/结果同步
+```
+
+### DP：不同请求路由到不同副本
+
+```mermaid
+sequenceDiagram
+  participant T as TokenizerManager
+  participant C as DataParallelController
+  participant D0 as DP0 Scheduler group
+  participant D1 as DP1 Scheduler group
+
+  T->>C: request A
+  T->>C: request B
+  C->>D0: route request A
+  C->>D1: route request B
+  D0-->>T: output A
+  D1-->>T: output B
+```
+
+### DP attention：各 DP rank 可能有不同本地 batch，但需要同步形状
+
+```mermaid
+sequenceDiagram
+  participant D0 as attn_dp_rank 0
+  participant D1 as attn_dp_rank 1
+  participant A as SchedulerDPAttnAdapter
+  participant M as ModelRunner
+
+  D0->>A: local batch num_tokens=128
+  D1->>A: local batch num_tokens=0
+  A->>A: all_gather global_num_tokens
+  A->>D1: 构造 idle batch
+  D0->>M: 正常 forward
+  D1->>M: idle forward 参与 collective
+```
+
+### EP：token 根据 expert 路由到不同 rank
+
+```mermaid
+flowchart LR
+  Tokens["MoE layer input tokens"] --> Router["router / top-k gate"]
+  Router --> E0["expert group rank 0"]
+  Router --> E1["expert group rank 1"]
+  Router --> E2["expert group rank 2"]
+  Router --> E3["expert group rank 3"]
+  E0 --> Combine["combine outputs"]
+  E1 --> Combine
+  E2 --> Combine
+  E3 --> Combine
+```
+
+EP 和 TP 的直觉差异：
+
+- TP 是每个 token 的 dense 矩阵计算被拆到多个 rank。
+- EP 是不同 token 被路由到不同 expert rank，expert 计算后再 combine。
+
+---
+
+## 11.7 多节点时 rank 如何落到节点和 GPU
+
+`_calculate_rank_ranges()` 会根据 `nnodes`、`node_rank`、`tp_size`、`pp_size` 决定当前节点启动哪些 `pp_rank` 和 `tp_rank`。
+
+核心思想：
+
+```text
+pp_size_per_node = max(pp_size // nnodes, 1)
+nnodes_per_pp_rank = max(nnodes // pp_size, 1)
+tp_size_per_node = tp_size // nnodes_per_pp_rank
+```
+
+这段逻辑服务两个场景：
+
+1. **PP stage 跨节点放置。**
+   如果 `pp_size >= nnodes`，每个节点可能负责一个或多个 PP stage。
+
+2. **TP group 跨节点放置。**
+   如果 `nnodes > pp_size`，一个 PP stage 可能跨多个节点组成 TP group。
+
+简化例子：
+
+| 配置 | 节点上的 rank 分布直觉 |
+|---|---|
+| `nnodes=1,tp_size=8,pp_size=1` | 单节点 8 个 TP rank。 |
+| `nnodes=2,tp_size=8,pp_size=1` | 一个 TP group 跨 2 节点，每节点 4 个 TP rank。 |
+| `nnodes=2,tp_size=4,pp_size=2` | 每个节点可负责一个 PP stage，每个 stage 内 4 个 TP rank 的一部分或全部，取决于 `tp_size_per_node`。 |
+| `nnodes=4,tp_size=8,pp_size=2` | 每个 PP stage 跨 2 个节点组成 TP group。 |
+
+多节点时还要记住第 17 节的结论：
+
+- `node_rank == 0`：运行 HTTP、TokenizerManager、DetokenizerManager，以及本节点 Scheduler ranks。
+- `node_rank > 0`：只运行本节点 Scheduler ranks 和 dummy health check。
+
+所以“哪个节点接用户请求”和“哪个节点参与模型计算”不是同一件事。用户请求从 node 0 进入，但模型计算 rank 可以分布在所有节点。
+
+---
+
+## 11.8 一张总表：并行维度、进程、GPU、类、通信
+
+| 维度 | 是否增加 Scheduler 进程数 | 是否增加 GPU 数 | 一个请求是否进入多个 rank | 主要通信对象 | 主要代码入口 |
+|---|---:|---:|---|---|---|
+| `tp_size` | 是 | 是 | 是，同一 TP group 内所有 rank | `tp_group`、`tp_cpu_group` | `_launch_scheduler_processes()`、`initialize_model_parallel()` |
+| `pp_size` | 是 | 是 | 是，但按 stage 流动 | `pp_group`、`PPProxyTensors` | `_calculate_rank_ranges()`、`SchedulerPPMixin` |
+| `dp_size` | 是，通常由 DP controller 启动多个 group | 是 | 否，请求被路由到一个 DP group | controller sockets、worker status | `DataParallelController` |
+| `enable_dp_attention` | 不一定单独增加进程，重解释 TP 内 rank | 通常依赖已有 TP/DP 配置 | 部分同步，可能产生 idle batch | attention DP group、MLP sync info | `compute_dp_attention_world_info()`、`SchedulerDPAttnAdapter` |
+| `attn_cp_size` | 不一定单独增加进程，要求 TP 维度可拆 | 使用 TP group 内 rank | 是，同一上下文被切分 | `attn_cp_group` | `_compute_parallelism_ranks()`、`initialize_model_parallel()` |
+| `ep_size` | 不一定单独增加进程，使用 TP 内 rank | 使用 TP group 内 rank | token 被路由到 expert rank | `moe_ep_group` | `_compute_parallelism_ranks()`、MoE layers |
+| `moe_dp_size` | 不一定单独增加进程，使用 TP 内 rank | 使用 TP group 内 rank | expert 维度数据并行 | `moe_dp_group` | `_compute_parallelism_ranks()`、MoE layers |
+
+判断一个并行配置时，可以按这个顺序问：
+
+1. 它是否复制一整套模型服务来分摊请求？如果是，优先看 DP。
+2. 它是否把同一个模型层切到多 GPU？如果是，优先看 TP。
+3. 它是否把不同 transformer layers 放到不同 GPU？如果是，优先看 PP。
+4. 它是否只影响 attention 的 token/context 组织？如果是，看 DP attention / CP。
+5. 它是否只影响 MoE expert 的放置和路由？如果是，看 EP / MoE DP / EPLB。
+
+---
+
 ## 12. DataParallelController：DP 模式下的请求路由器
 
 当 `server_args.dp_size > 1` 时，标准 Engine 不再直接启动所有 Scheduler，而是先启动：
@@ -712,4 +1190,3 @@ flowchart TD
 - KV cache 如何从 prefill worker 传到 decode worker？
 - Mooncake / NIXL / ZMQ 等 transfer backend 在代码里如何接入？
 - PD disaggregation 与 Scheduler 主循环、KV cache 生命周期有什么关系？
-
