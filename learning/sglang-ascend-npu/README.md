@@ -410,14 +410,14 @@ Fallback：
 1. [00-background.md](./00-background.md)：Ascend NPU 背景知识，梳理硬件、CANN、torch_npu、HCCL、KV cache、attention、graph、PD 等前置概念。
 2. [01-environment-and-install.md](./01-environment-and-install.md)：GNU/Linux + Ascend NPU 服务器上的安装、环境检查、Docker/源码部署和最小服务跑通。
 3. [02-ascend-npu-integration-map.md](./02-ascend-npu-integration-map.md)：Ascend NPU 全量源码接入点、初始化流程、调用关系和知识图谱。
-4. `03-launch-and-minimal-serving.md`：单卡服务启动、请求验证、日志解读。
-5. `04-npu-backend-args.md`：`set_default_server_args()` 逐行讲解。
-6. `05-attention-kv-cache.md`：Ascend attention、KV cache、HiCache。
-7. `06-npu-graph-compilation.md`：`NPUGraph`、piecewise graph、shape 与 replay。
-8. `07-distributed-hccl-tp.md`：TP、HCCL、communicator、ZBAL。
-9. `08-ascend-pd-disaggregation.md`：Ascend PD 分离与 KV transfer。
-10. `09-lora-moe-feature-branches.md`：Ascend LoRA、MoE stream、fallback。
-11. `10-benchmark-debugging.md`：压测方法、日志定位、性能问题排查。
+4. [03-launch-and-minimal-serving.md](./03-launch-and-minimal-serving.md)：单卡服务启动、请求验证、日志解读。
+5. [04-npu-backend-args.md](./04-npu-backend-args.md)：`set_default_server_args()` 逐行讲解。
+6. [05-attention-kv-cache.md](./05-attention-kv-cache.md)：Ascend attention、KV cache、HiCache。
+7. [06-npu-graph-compilation.md](./06-npu-graph-compilation.md)：`NPUGraph`、piecewise graph、shape 与 replay。
+8. [07-distributed-hccl-tp.md](./07-distributed-hccl-tp.md)：TP、HCCL、communicator、ZBAL。
+9. [08-ascend-pd-disaggregation.md](./08-ascend-pd-disaggregation.md)：Ascend PD 分离与 KV transfer。
+10. [09-lora-moe-feature-branches.md](./09-lora-moe-feature-branches.md)：Ascend LoRA、MoE stream、fallback。
+11. [10-benchmark-debugging.md](./10-benchmark-debugging.md)：压测方法、日志定位、性能问题排查。
 
 ## 第一轮阅读任务
 
