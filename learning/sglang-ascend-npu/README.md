@@ -408,14 +408,15 @@ Fallback：
 本目录后续建议按下面顺序继续扩展：
 
 1. `01-environment-and-install.md`：Ascend 环境、依赖、安装和冒烟测试。
-2. `02-launch-and-minimal-serving.md`：单卡服务启动、请求验证、日志解读。
-3. `03-npu-backend-args.md`：`set_default_server_args()` 逐行讲解。
-4. `04-attention-kv-cache.md`：Ascend attention、KV cache、HiCache。
-5. `05-npu-graph-compilation.md`：`NPUGraph`、piecewise graph、shape 与 replay。
-6. `06-distributed-hccl-tp.md`：TP、HCCL、communicator、ZBAL。
-7. `07-ascend-pd-disaggregation.md`：Ascend PD 分离与 KV transfer。
-8. `08-lora-moe-feature-branches.md`：Ascend LoRA、MoE stream、fallback。
-9. `09-benchmark-debugging.md`：压测方法、日志定位、性能问题排查。
+2. [02-ascend-npu-integration-map.md](./02-ascend-npu-integration-map.md)：Ascend NPU 全量源码接入点、初始化流程、调用关系和知识图谱。
+3. `03-launch-and-minimal-serving.md`：单卡服务启动、请求验证、日志解读。
+4. `04-npu-backend-args.md`：`set_default_server_args()` 逐行讲解。
+5. `05-attention-kv-cache.md`：Ascend attention、KV cache、HiCache。
+6. `06-npu-graph-compilation.md`：`NPUGraph`、piecewise graph、shape 与 replay。
+7. `07-distributed-hccl-tp.md`：TP、HCCL、communicator、ZBAL。
+8. `08-ascend-pd-disaggregation.md`：Ascend PD 分离与 KV transfer。
+9. `09-lora-moe-feature-branches.md`：Ascend LoRA、MoE stream、fallback。
+10. `10-benchmark-debugging.md`：压测方法、日志定位、性能问题排查。
 
 ## 第一轮阅读任务
 
