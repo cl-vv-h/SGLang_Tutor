@@ -29,7 +29,7 @@
 - 本讲里的 `export` 只应该在当前 shell、启动脚本或容器 `-e` 参数里使用；它们会影响当前 shell 及其子进程，关闭终端后自然失效。
 - `/home/{myspace}/sglang_npu_env.sh` 是个人手动加载文件，不要自动写入 `/etc/profile`、`/etc/environment`、`/etc/bash.bashrc` 等全局 profile。
 - 不要使用 `sudo pip install`，不要修改系统 Python，不要把包安装到系统 site-packages。
-- 不要执行 `conda config --system`，不要改全局 pip 配置；缓存目录使用 `PIP_CACHE_DIR=${SGL_CACHE}/pip` 固定到个人目录。
+- 不要执行 `conda config --system`，不要改全局 pip 配置；缓存目录使用 `PIP_CACHE_DIR=${SGLANG_CACHE}/pip` 固定到个人目录。
 - 不要把模型、wheel、日志、缓存长期写到 `/tmp`、`/usr/local`、`/opt`、`/root`、`/var` 等共享或系统目录。
 - Docker 示例里的 `-e` 环境变量只影响该容器；容器名和端口是全机共享资源，需要带上个人标识并避开他人正在使用的端口。
 - 后台服务只使用 `systemctl --user`，不要使用 `sudo systemctl` 创建系统级服务。
@@ -39,24 +39,24 @@
 
 ```bash
 export USER_SPACE=/home/{myspace}
-export SGL_WORKSPACE=${USER_SPACE}/sglang-npu-workspace
-export SGL_REPO=${USER_SPACE}/SGLangTutorial
-export SGL_MODELS=${SGL_WORKSPACE}/models
-export SGL_CACHE=${SGL_WORKSPACE}/cache
-export SGL_LOGS=${SGL_WORKSPACE}/logs
-export SGL_WHEELS=${SGL_WORKSPACE}/wheels
-export SGL_SCRIPTS=${SGL_WORKSPACE}/scripts
-export SGL_CONDA_ROOT=${SGL_WORKSPACE}/conda
-export SGL_VENV=${SGL_WORKSPACE}/venvs/sglang_npu
+export SGLANG_WORKSPACE=${USER_SPACE}/sglang-npu-workspace
+export SGLANG_REPO=${USER_SPACE}/SGLangTutorial
+export SGLANG_MODELS=${SGLANG_WORKSPACE}/models
+export SGLANG_CACHE=${SGLANG_WORKSPACE}/cache
+export SGLANG_LOGS=${SGLANG_WORKSPACE}/logs
+export SGLANG_WHEELS=${SGLANG_WORKSPACE}/wheels
+export SGLANG_SCRIPTS=${SGLANG_WORKSPACE}/scripts
+export SGLANG_CONDA_ROOT=${SGLANG_WORKSPACE}/conda
+export SGLANG_VENV=${SGLANG_WORKSPACE}/venvs/sglang_npu
 
 mkdir -p \
-  "$SGL_MODELS" \
-  "$SGL_CACHE" \
-  "$SGL_LOGS" \
-  "$SGL_WHEELS" \
-  "$SGL_SCRIPTS" \
-  "$SGL_CONDA_ROOT" \
-  "$(dirname "$SGL_VENV")"
+  "$SGLANG_MODELS" \
+  "$SGLANG_CACHE" \
+  "$SGLANG_LOGS" \
+  "$SGLANG_WHEELS" \
+  "$SGLANG_SCRIPTS" \
+  "$SGLANG_CONDA_ROOT" \
+  "$(dirname "$SGLANG_VENV")"
 ```
 
 建议把这些变量写入一个个人手动加载文件，例如：
@@ -64,23 +64,23 @@ mkdir -p \
 ```bash
 cat > ${USER_SPACE}/sglang_npu_env.sh <<'EOF'
 export USER_SPACE=/home/{myspace}
-export SGL_WORKSPACE=${USER_SPACE}/sglang-npu-workspace
-export SGL_REPO=${USER_SPACE}/SGLangTutorial
-export SGL_MODELS=${SGL_WORKSPACE}/models
-export SGL_CACHE=${SGL_WORKSPACE}/cache
-export SGL_LOGS=${SGL_WORKSPACE}/logs
-export SGL_WHEELS=${SGL_WORKSPACE}/wheels
-export SGL_SCRIPTS=${SGL_WORKSPACE}/scripts
-export SGL_CONDA_ROOT=${SGL_WORKSPACE}/conda
-export SGL_VENV=${SGL_WORKSPACE}/venvs/sglang_npu
+export SGLANG_WORKSPACE=${USER_SPACE}/sglang-npu-workspace
+export SGLANG_REPO=${USER_SPACE}/SGLangTutorial
+export SGLANG_MODELS=${SGLANG_WORKSPACE}/models
+export SGLANG_CACHE=${SGLANG_WORKSPACE}/cache
+export SGLANG_LOGS=${SGLANG_WORKSPACE}/logs
+export SGLANG_WHEELS=${SGLANG_WORKSPACE}/wheels
+export SGLANG_SCRIPTS=${SGLANG_WORKSPACE}/scripts
+export SGLANG_CONDA_ROOT=${SGLANG_WORKSPACE}/conda
+export SGLANG_VENV=${SGLANG_WORKSPACE}/venvs/sglang_npu
 
-export HF_HOME=${SGL_CACHE}/huggingface
+export HF_HOME=${SGLANG_CACHE}/huggingface
 export TRANSFORMERS_CACHE=${HF_HOME}
 export HUGGINGFACE_HUB_CACHE=${HF_HOME}/hub
-export TORCH_HOME=${SGL_CACHE}/torch
-export XDG_CACHE_HOME=${SGL_CACHE}/xdg
-export PIP_CACHE_DIR=${SGL_CACHE}/pip
-export CONDA_PKGS_DIRS=${SGL_CONDA_ROOT}/pkgs
+export TORCH_HOME=${SGLANG_CACHE}/torch
+export XDG_CACHE_HOME=${SGLANG_CACHE}/xdg
+export PIP_CACHE_DIR=${SGLANG_CACHE}/pip
+export CONDA_PKGS_DIRS=${SGLANG_CONDA_ROOT}/pkgs
 export SGLANG_SET_CPU_AFFINITY=1
 EOF
 ```
@@ -89,12 +89,22 @@ EOF
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-mkdir -p "$SGL_MODELS" "$SGL_CACHE" "$SGL_LOGS" "$SGL_WHEELS" "$SGL_SCRIPTS" "$SGL_CONDA_ROOT"
+mkdir -p "$SGLANG_MODELS" "$SGLANG_CACHE" "$SGLANG_LOGS" "$SGLANG_WHEELS" "$SGLANG_SCRIPTS" "$SGLANG_CONDA_ROOT"
 ```
 
-这条 `source` 只影响当前 shell 和它启动的子进程。想清理时，关闭这个终端最简单；如果必须在同一个 shell 中清理，可以 `unset USER_SPACE SGL_WORKSPACE SGL_REPO SGL_MODELS SGL_CACHE SGL_LOGS SGL_WHEELS SGL_SCRIPTS SGL_CONDA_ROOT SGL_VENV HF_HOME TRANSFORMERS_CACHE HUGGINGFACE_HUB_CACHE TORCH_HOME XDG_CACHE_HOME PIP_CACHE_DIR CONDA_PKGS_DIRS SGLANG_SET_CPU_AFFINITY ASCEND_RT_VISIBLE_DEVICES`。
+这条 `source` 只影响当前 shell 和它启动的子进程。想清理时，关闭这个终端最简单；如果必须在同一个 shell 中清理，可以 `unset USER_SPACE SGLANG_WORKSPACE SGLANG_REPO SGLANG_MODELS SGLANG_CACHE SGLANG_LOGS SGLANG_WHEELS SGLANG_SCRIPTS SGLANG_CONDA_ROOT SGLANG_VENV HF_HOME TRANSFORMERS_CACHE HUGGINGFACE_HUB_CACHE TORCH_HOME XDG_CACHE_HOME PIP_CACHE_DIR CONDA_PKGS_DIRS SGLANG_SET_CPU_AFFINITY ASCEND_RT_VISIBLE_DEVICES`。
 
 注意：普通 Docker 的镜像层默认由 Docker daemon 存在系统目录，例如 `/var/lib/docker`。如果你要求“镜像层本身也必须保存在 `/home/{myspace}`”，需要使用 rootless Docker，或者请管理员统一把 Docker `data-root` 配到合适位置。不要在多人服务器上自行改系统 Docker daemon。否则，Docker 路径能保证模型、缓存、日志、脚本等业务文件在 `/home/{myspace}`，但 `docker pull` 的镜像层不完全受普通用户控制。
+
+## Warning 对照
+
+如果你在启动时看到下面这些 warning，优先按表格处理：
+
+| Warning | 含义 | 教程中的处理 |
+|---|---|---|
+| `Environment variable SGL_* is deprecated, please use SGLANG_*` | 旧版教程或个人脚本里仍使用 `SGL_MODELS`、`SGL_CACHE` 等旧变量名。 | 本讲统一改为 `SGLANG_MODELS`、`SGLANG_CACHE`、`SGLANG_WORKSPACE` 等；检查自己的 `sglang_npu_env.sh` 和启动脚本。 |
+| `'python -m sglang.launch_server' is still supported, but 'sglang serve' is the recommended entrypoint` | 旧启动入口仍可用，但官方推荐 CLI 入口。 | 本讲所有服务启动命令统一使用 `sglang serve`。 |
+| `Triton is not supported on current platform, roll back to CPU` | 某些 FLA/Triton 辅助路径在当前 Ascend 平台不可用，代码会回退；它不等同于 NPU 服务启动失败。 | 先确认 `--device npu`、`--attention-backend ascend`、`torch.npu.is_available()` 和 `sgl_kernel_npu`；如果性能异常，再检查 `triton-ascend`、kernel wheel 和当前模型是否走到了非 Ascend 优化路径。 |
 
 ## 推荐路径选择
 
@@ -124,7 +134,7 @@ flowchart LR
   A["宿主机检查<br/>npu-smi/CANN"] --> B["选择隔离方式"]
   B --> C["准备依赖<br/>torch_npu/sgl_kernel_npu"]
   C --> D["准备模型目录"]
-  D --> E["启动 launch_server"]
+  D --> E["启动 sglang serve"]
   E --> F["健康检查"]
   F --> G["chat completions 请求"]
   G --> H["记录日志与排错"]
@@ -166,13 +176,13 @@ echo $ASCEND_TOOLKIT_HOME
 source /home/{myspace}/sglang_npu_env.sh
 
 mkdir -p \
-  "$SGL_MODELS" \
-  "$SGL_CACHE" \
-  "$SGL_LOGS" \
-  "$SGL_WHEELS" \
-  "$SGL_SCRIPTS" \
-  "$SGL_CONDA_ROOT" \
-  "$(dirname "$SGL_VENV")"
+  "$SGLANG_MODELS" \
+  "$SGLANG_CACHE" \
+  "$SGLANG_LOGS" \
+  "$SGLANG_WHEELS" \
+  "$SGLANG_SCRIPTS" \
+  "$SGLANG_CONDA_ROOT" \
+  "$(dirname "$SGLANG_VENV")"
 ```
 
 如果是多人服务器，建议使用自己的用户目录或项目目录，不要把临时文件写到系统 Python、`/usr/local` 或全局 site-packages。
@@ -191,8 +201,8 @@ mkdir -p \
 source /home/{myspace}/sglang_npu_env.sh
 cd "$USER_SPACE"
 
-git clone <your-repo-url> "$SGL_REPO"
-cd "$SGL_REPO"
+git clone <your-repo-url> "$SGLANG_REPO"
+cd "$SGLANG_REPO"
 git status
 ```
 
@@ -200,7 +210,7 @@ git status
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-cd "$SGL_REPO"
+cd "$SGLANG_REPO"
 git pull
 ```
 
@@ -258,13 +268,13 @@ docker pull docker.io/lmsysorg/sglang:main-cann8.5.0-910b
 ```bash
 export IMAGE=docker.io/lmsysorg/sglang:main-cann8.5.0-910b
 source /home/{myspace}/sglang_npu_env.sh
-SGL_USER_TAG=$(basename "$USER_SPACE")
-mkdir -p "$SGL_WORKSPACE"/{models,cache,logs,wheels,scripts}
+USER_TAG=$(basename "$USER_SPACE")
+mkdir -p "$SGLANG_WORKSPACE"/{models,cache,logs,wheels,scripts}
 
 # 容器名是全机唯一资源，建议带上个人空间名，避免和其他用户冲突。
 # Docker -e 变量只影响当前容器，不会写入宿主机环境。
 docker run -it --rm \
-  --name "sglang-npu-dev-${SGL_USER_TAG}" \
+  --name "sglang-npu-dev-${USER_TAG}" \
   --privileged \
   --network=host \
   --ipc=host \
@@ -284,7 +294,7 @@ docker run -it --rm \
   -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
   -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
   -v /var/queue_schedule:/var/queue_schedule \
-  -v "$SGL_WORKSPACE":/workspace/sglang-npu \
+  -v "$SGLANG_WORKSPACE":/workspace/sglang-npu \
   -e HF_TOKEN="${HF_TOKEN}" \
   -e ASCEND_RT_VISIBLE_DEVICES=0 \
   -e HF_HOME=/workspace/sglang-npu/cache/huggingface \
@@ -325,7 +335,7 @@ PY
 export SGLANG_SET_CPU_AFFINITY=1
 export ASCEND_RT_VISIBLE_DEVICES=0
 
-python3 -m sglang.launch_server \
+sglang serve \
   --model-path /workspace/sglang-npu/models/Qwen2.5-7B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \
@@ -359,7 +369,7 @@ docker run -d \
   -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro \
   -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
   -v /var/queue_schedule:/var/queue_schedule \
-  -v "$SGL_WORKSPACE":/workspace/sglang-npu \
+  -v "$SGLANG_WORKSPACE":/workspace/sglang-npu \
   -e ASCEND_RT_VISIBLE_DEVICES=0 \
   -e SGLANG_SET_CPU_AFFINITY=1 \
   -e HF_HOME=/workspace/sglang-npu/cache/huggingface \
@@ -369,7 +379,7 @@ docker run -d \
   -e XDG_CACHE_HOME=/workspace/sglang-npu/cache/xdg \
   -e PIP_CACHE_DIR=/workspace/sglang-npu/cache/pip \
   "$IMAGE" \
-  python3 -m sglang.launch_server \
+  sglang serve \
     --model-path /workspace/sglang-npu/models/Qwen2.5-7B-Instruct \
     --host 0.0.0.0 \
     --port 8000 \
@@ -402,8 +412,8 @@ docker rm "sglang-npu-server-$(basename "$USER_SPACE")"
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-conda create -p "$SGL_CONDA_ROOT/envs/sglang_npu" python=3.11 -y
-conda activate "$SGL_CONDA_ROOT/envs/sglang_npu"
+conda create -p "$SGLANG_CONDA_ROOT/envs/sglang_npu" python=3.11 -y
+conda activate "$SGLANG_CONDA_ROOT/envs/sglang_npu"
 python --version
 ```
 
@@ -411,7 +421,7 @@ python --version
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-export MAMBA_ROOT_PREFIX=${SGL_CONDA_ROOT}/micromamba
+export MAMBA_ROOT_PREFIX=${SGLANG_CONDA_ROOT}/micromamba
 micromamba create -p "$MAMBA_ROOT_PREFIX/envs/sglang_npu" python=3.11 -y
 micromamba activate "$MAMBA_ROOT_PREFIX/envs/sglang_npu"
 ```
@@ -429,14 +439,14 @@ mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
 cat > "$CONDA_PREFIX/etc/conda/activate.d/ascend.sh" <<'EOF'
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 export USER_SPACE=/home/{myspace}
-export SGL_WORKSPACE=${USER_SPACE}/sglang-npu-workspace
-export SGL_CACHE=${SGL_WORKSPACE}/cache
-export HF_HOME=${SGL_CACHE}/huggingface
+export SGLANG_WORKSPACE=${USER_SPACE}/sglang-npu-workspace
+export SGLANG_CACHE=${SGLANG_WORKSPACE}/cache
+export HF_HOME=${SGLANG_CACHE}/huggingface
 export TRANSFORMERS_CACHE=${HF_HOME}
 export HUGGINGFACE_HUB_CACHE=${HF_HOME}/hub
-export TORCH_HOME=${SGL_CACHE}/torch
-export XDG_CACHE_HOME=${SGL_CACHE}/xdg
-export PIP_CACHE_DIR=${SGL_CACHE}/pip
+export TORCH_HOME=${SGLANG_CACHE}/torch
+export XDG_CACHE_HOME=${SGLANG_CACHE}/xdg
+export PIP_CACHE_DIR=${SGLANG_CACHE}/pip
 export SGLANG_SET_CPU_AFFINITY=1
 EOF
 ```
@@ -513,8 +523,8 @@ PY
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-python3.11 -m venv "$SGL_VENV"
-source "$SGL_VENV/bin/activate"
+python3.11 -m venv "$SGLANG_VENV"
+source "$SGLANG_VENV/bin/activate"
 python --version
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 ```
@@ -546,24 +556,24 @@ venv 的缺点是 Python 版本依赖系统已安装的 `python3.11`。如果系
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-mkdir -p "$SGL_WHEELS"
+mkdir -p "$SGLANG_WHEELS"
 
 pip download torch==2.8.0 torchvision==0.23.0 \
   --index-url https://download.pytorch.org/whl/cpu \
-  -d "$SGL_WHEELS"
+  -d "$SGLANG_WHEELS"
 
 pip download torch_npu==2.8.0 triton-ascend memfabric-hybrid==1.0.5 \
-  -d "$SGL_WHEELS"
+  -d "$SGLANG_WHEELS"
 ```
 
-`sgl_kernel_npu` 可能需要从官方发布页、内部制品库或源码构建得到 wheel，把它也放入 `$SGL_WHEELS`。
+`sgl_kernel_npu` 可能需要从官方发布页、内部制品库或源码构建得到 wheel，把它也放入 `$SGLANG_WHEELS`。
 
 ### 5.2 离线安装
 
 把 `wheels/` 拷贝到服务器：
 
 ```bash
-pip install --no-index --find-links "$SGL_WHEELS" \
+pip install --no-index --find-links "$SGLANG_WHEELS" \
   torch==2.8.0 torchvision==0.23.0 torch_npu==2.8.0 triton-ascend memfabric-hybrid==1.0.5
 ```
 
@@ -572,7 +582,7 @@ pip install --no-index --find-links "$SGL_WHEELS" \
 ```bash
 cd /home/{myspace}/SGLangTutorial
 cp python/pyproject_npu.toml python/pyproject.toml
-pip install --no-index --find-links "$SGL_WHEELS" -e "python[all_npu]"
+pip install --no-index --find-links "$SGLANG_WHEELS" -e "python[all_npu]"
 ```
 
 ## 6. 模型准备
@@ -581,29 +591,29 @@ pip install --no-index --find-links "$SGL_WHEELS" -e "python[all_npu]"
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-mkdir -p "$SGL_MODELS"
+mkdir -p "$SGLANG_MODELS"
 ```
 
 如果能联网：
 
 ```bash
-export HF_HOME=$SGL_CACHE/huggingface
+export HF_HOME=$SGLANG_CACHE/huggingface
 export HF_TOKEN=<your_token_if_needed>
 
 huggingface-cli download Qwen/Qwen2.5-7B-Instruct \
-  --local-dir "$SGL_MODELS/Qwen2.5-7B-Instruct"
+  --local-dir "$SGLANG_MODELS/Qwen2.5-7B-Instruct"
 ```
 
 如果不能联网：
 
 - 在可联网机器下载模型。
-- 用 `rsync`、对象存储或内网制品库拷贝到 `$SGL_MODELS`。
+- 用 `rsync`、对象存储或内网制品库拷贝到 `$SGLANG_MODELS`。
 - 保留 tokenizer、config、safetensors 等完整文件。
 
 检查：
 
 ```bash
-ls "$SGL_MODELS/Qwen2.5-7B-Instruct"
+ls "$SGLANG_MODELS/Qwen2.5-7B-Instruct"
 ```
 
 ## 7. 编写可复用启动脚本
@@ -612,33 +622,33 @@ ls "$SGL_MODELS/Qwen2.5-7B-Instruct"
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-cat > "$SGL_SCRIPTS/run_sglang_npu_single.sh" <<'EOF'
+cat > "$SGLANG_SCRIPTS/run_sglang_npu_single.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 
 export USER_SPACE=${USER_SPACE:-/home/{myspace}}
-export SGL_WORKSPACE=${SGL_WORKSPACE:-${USER_SPACE}/sglang-npu-workspace}
-export SGL_CACHE=${SGL_CACHE:-${SGL_WORKSPACE}/cache}
-export SGL_MODELS=${SGL_MODELS:-${SGL_WORKSPACE}/models}
-export SGL_LOGS=${SGL_LOGS:-${SGL_WORKSPACE}/logs}
+export SGLANG_WORKSPACE=${SGLANG_WORKSPACE:-${USER_SPACE}/sglang-npu-workspace}
+export SGLANG_CACHE=${SGLANG_CACHE:-${SGLANG_WORKSPACE}/cache}
+export SGLANG_MODELS=${SGLANG_MODELS:-${SGLANG_WORKSPACE}/models}
+export SGLANG_LOGS=${SGLANG_LOGS:-${SGLANG_WORKSPACE}/logs}
 export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0}
 export SGLANG_SET_CPU_AFFINITY=${SGLANG_SET_CPU_AFFINITY:-1}
-export HF_HOME=${HF_HOME:-${SGL_CACHE}/huggingface}
+export HF_HOME=${HF_HOME:-${SGLANG_CACHE}/huggingface}
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-${HF_HOME}}
 export HUGGINGFACE_HUB_CACHE=${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}
-export TORCH_HOME=${TORCH_HOME:-${SGL_CACHE}/torch}
-export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${SGL_CACHE}/xdg}
-export PIP_CACHE_DIR=${PIP_CACHE_DIR:-${SGL_CACHE}/pip}
+export TORCH_HOME=${TORCH_HOME:-${SGLANG_CACHE}/torch}
+export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${SGLANG_CACHE}/xdg}
+export PIP_CACHE_DIR=${PIP_CACHE_DIR:-${SGLANG_CACHE}/pip}
 
-MODEL_PATH=${MODEL_PATH:-${SGL_MODELS}/Qwen2.5-7B-Instruct}
+MODEL_PATH=${MODEL_PATH:-${SGLANG_MODELS}/Qwen2.5-7B-Instruct}
 HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-8000}
-LOG_DIR=${LOG_DIR:-${SGL_LOGS}}
+LOG_DIR=${LOG_DIR:-${SGLANG_LOGS}}
 mkdir -p "$LOG_DIR"
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path "$MODEL_PATH" \
   --host "$HOST" \
   --port "$PORT" \
@@ -649,16 +659,16 @@ python -m sglang.launch_server \
   2>&1 | tee "$LOG_DIR/sglang-npu-single-${PORT}.log"
 EOF
 
-chmod +x "$SGL_SCRIPTS/run_sglang_npu_single.sh"
+chmod +x "$SGLANG_SCRIPTS/run_sglang_npu_single.sh"
 ```
 
 启动：
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-MODEL_PATH="$SGL_MODELS/Qwen2.5-7B-Instruct" \
+MODEL_PATH="$SGLANG_MODELS/Qwen2.5-7B-Instruct" \
 PORT=8000 \
-"$SGL_SCRIPTS/run_sglang_npu_single.sh"
+"$SGLANG_SCRIPTS/run_sglang_npu_single.sh"
 ```
 
 ## 8. 使用 systemd 用户服务可选
@@ -677,15 +687,15 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=$SGL_WORKSPACE
-Environment=MODEL_PATH=$SGL_MODELS/Qwen2.5-7B-Instruct
+WorkingDirectory=$SGLANG_WORKSPACE
+Environment=MODEL_PATH=$SGLANG_MODELS/Qwen2.5-7B-Instruct
 Environment=PORT=8000
 Environment=USER_SPACE=$USER_SPACE
-Environment=SGL_WORKSPACE=$SGL_WORKSPACE
-Environment=SGL_CACHE=$SGL_CACHE
-Environment=SGL_MODELS=$SGL_MODELS
-Environment=SGL_LOGS=$SGL_LOGS
-ExecStart=$SGL_SCRIPTS/run_sglang_npu_single.sh
+Environment=SGLANG_WORKSPACE=$SGLANG_WORKSPACE
+Environment=SGLANG_CACHE=$SGLANG_CACHE
+Environment=SGLANG_MODELS=$SGLANG_MODELS
+Environment=SGLANG_LOGS=$SGLANG_LOGS
+ExecStart=$SGLANG_SCRIPTS/run_sglang_npu_single.sh
 Restart=on-failure
 RestartSec=5
 
@@ -770,6 +780,7 @@ Capture npu graph end
 | conda 环境里 `torch.npu.is_available()` 为 False | 没 source CANN 或版本不匹配 | `source set_env.sh`，检查 torch/torch_npu/CANN。 |
 | `import sgl_kernel_npu` 失败 | NPU kernel 包没装 | 安装匹配版本 wheel 或使用官方 Docker。 |
 | 启动卡在 graph capture | graph 相关问题 | 先加 `--disable-cuda-graph` 跑通。 |
+| `Triton is not supported on current platform` | 当前平台不支持某些 Triton 路径，触发 CPU fallback | 如果服务能正常使用且日志确认 `attention_backend=ascend`，可先记录为性能风险；若吞吐异常，检查 `triton-ascend`、`sgl_kernel_npu` 和模型算子路径。 |
 | 端口被占用 | 8000 已有服务 | 优先换成自己的 `--port`；不要停止无法确认归属的旧服务。 |
 | 模型下载很慢 | 服务器无公网 | 离线下载模型和 wheel。 |
 
@@ -778,8 +789,8 @@ Capture npu graph end
 绕开 graph：
 
 ```bash
-python -m sglang.launch_server \
-  --model-path "$SGL_MODELS/Qwen2.5-7B-Instruct" \
+sglang serve \
+  --model-path "$SGLANG_MODELS/Qwen2.5-7B-Instruct" \
   --host 0.0.0.0 \
   --port 8000 \
   --device npu \

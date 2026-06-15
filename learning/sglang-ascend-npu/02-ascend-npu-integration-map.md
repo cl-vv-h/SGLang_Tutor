@@ -114,7 +114,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-  participant CLI as launch_server / Engine
+  participant CLI as sglang serve / Engine
   participant SA as ServerArgs
   participant U as npu/utils.py
   participant MR as ModelRunner

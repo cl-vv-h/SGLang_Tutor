@@ -62,7 +62,7 @@ LoRA 后端的关键数据：
 启动示例：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/base-model \
   --device npu \
   --attention-backend ascend \
