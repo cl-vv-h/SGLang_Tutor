@@ -327,7 +327,154 @@ print("sgl_kernel_npu ok")
 PY
 ```
 
-### 2.3 直接用容器启动服务
+### 2.3 在容器内从 GitHub 重新安装 SGLang
+
+官方 Docker 镜像里通常已经带有一份可运行的 SGLang 环境，适合快速验证 NPU、CANN、torch_npu 和 kernel 是否匹配。但如果你的目标是学习源码、验证某个分支、修改 SGLang 代码，建议把镜像只当作 Ascend/CANN/Python 基础环境，在容器里重新从 GitHub 拉取 SGLang 并安装到你自己的挂载目录。
+
+推荐目录约定如下：
+
+```text
+/workspace/sglang-npu/
+  src/sglang/                 # 从 GitHub 拉取的 SGLang 源码
+  venvs/sglang-source-dev/    # 可选：容器内个人 venv
+  cache/
+  models/
+  logs/
+```
+
+进入前面 `sglang-npu-dev-${USER_TAG}` 调试容器后，先准备源码目录：
+
+```bash
+cd /workspace/sglang-npu
+mkdir -p src venvs cache logs wheels
+
+git clone https://github.com/sgl-project/sglang.git src/sglang
+cd src/sglang
+
+# 可选：切换到你要学习或验证的分支、tag、commit。
+# git checkout <branch-or-tag-or-commit>
+git status
+```
+
+如果你的服务器无法直接访问 GitHub，可以在可联网机器上 clone 后用 `rsync`、对象存储或内网制品库同步到 `/home/{myspace}/sglang-npu-workspace/src/sglang`。因为该目录已经挂载到容器里的 `/workspace/sglang-npu/src/sglang`，容器内不需要再写入系统目录。
+
+接下来有两种安装方式。
+
+**方式 A：复用镜像依赖，只覆盖 SGLang 源码**
+
+这种方式最快，仍然使用镜像中已经匹配好的 `torch`、`torch_npu`、CANN 相关依赖和 kernel wheel，但 SGLang Python 包会指向你刚从 GitHub 拉取的源码：
+
+```bash
+cd /workspace/sglang-npu/src/sglang
+
+# NPU 分支通常使用 NPU 版 pyproject。
+cp python/pyproject_npu.toml python/pyproject.toml
+
+python3 -m pip install --upgrade pip setuptools wheel
+python3 -m pip install -e "python[all_npu]"
+```
+
+验证当前导入的 SGLang 是否来自你的源码目录：
+
+```bash
+python3 - <<'PY'
+import sglang
+import sglang.srt
+print("sglang:", sglang.__file__)
+print("srt:", sglang.srt.__file__)
+PY
+```
+
+输出路径应该包含 `/workspace/sglang-npu/src/sglang/python/sglang`。如果仍然指向镜像内置路径，说明 editable install 没有生效，可以检查 `pip show sglang`：
+
+```bash
+python3 -m pip show sglang
+python3 -m pip list | grep -E 'sglang|torch|torch-npu|torch_npu|triton'
+```
+
+**方式 B：在容器内创建独立 venv 后从源码安装**
+
+这种方式更干净，适合你不想污染镜像内 Python site-packages，或需要在同一个容器里反复切换不同 SGLang 分支。venv 放在 `/workspace/sglang-npu/venvs`，仍然是你的个人挂载目录：
+
+```bash
+cd /workspace/sglang-npu
+python3 -m venv venvs/sglang-source-dev
+source venvs/sglang-source-dev/bin/activate
+
+python -m pip install --upgrade pip setuptools wheel
+```
+
+如果镜像内已经有与当前 CANN 匹配的 `torch`、`torch_npu`、`triton-ascend`、`sgl_kernel_npu`，但普通 venv 看不到它们，可以改用依赖镜像 site-packages 的 venv：
+
+```bash
+deactivate 2>/dev/null || true
+rm -rf /workspace/sglang-npu/venvs/sglang-source-dev
+python3 -m venv --system-site-packages /workspace/sglang-npu/venvs/sglang-source-dev
+source /workspace/sglang-npu/venvs/sglang-source-dev/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+```
+
+如果你希望 venv 完全独立，则需要按前面版本表重新安装匹配的依赖：
+
+```bash
+python -m pip install torch==2.8.0 torchvision==0.23.0 \
+  --index-url https://download.pytorch.org/whl/cpu
+python -m pip install torch_npu==2.8.0
+python -m pip install triton-ascend memfabric-hybrid==1.0.5
+
+# sgl_kernel_npu 通常需要使用官方发布 wheel、镜像内 wheel、内部制品库或源码构建产物。
+# python -m pip install /workspace/sglang-npu/wheels/<sgl_kernel_npu-*.whl>
+```
+
+然后安装 GitHub 源码：
+
+```bash
+cd /workspace/sglang-npu/src/sglang
+cp python/pyproject_npu.toml python/pyproject.toml
+python -m pip install -e "python[all_npu]"
+```
+
+最后做一次完整验证：
+
+```bash
+python - <<'PY'
+import torch
+import torch_npu
+import sglang
+import sgl_kernel_npu
+print("torch:", torch.__version__)
+print("torch_npu:", torch_npu.__version__)
+print("npu available:", torch.npu.is_available())
+print("sglang:", sglang.__file__)
+print("sgl_kernel_npu ok")
+PY
+sglang serve --help | head
+```
+
+从源码环境启动服务时，先确保当前 shell 已经进入对应环境和源码目录：
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
+source /workspace/sglang-npu/venvs/sglang-source-dev/bin/activate 2>/dev/null || true
+cd /workspace/sglang-npu/src/sglang
+
+export SGLANG_SET_CPU_AFFINITY=1
+export ASCEND_RT_VISIBLE_DEVICES=0
+
+sglang serve \
+  --model-path /workspace/sglang-npu/models/Qwen2.5-7B-Instruct \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --device npu \
+  --attention-backend ascend \
+  --base-gpu-id 0 \
+  --tp-size 1 \
+  2>&1 | tee /workspace/sglang-npu/logs/sglang-source-dev-8000.log
+```
+
+> 如果你使用的是方式 A，没有创建 venv，可以跳过 `source /workspace/sglang-npu/venvs/sglang-source-dev/bin/activate`。关键是 `sglang.__file__` 必须指向 `/workspace/sglang-npu/src/sglang/python/sglang`，否则你仍在使用镜像内置 SGLang。
+
+### 2.4 直接用容器内置 SGLang 启动服务
 
 如果模型已经挂载到 `/workspace/sglang-npu/models/Qwen2.5-7B-Instruct`：
 
@@ -346,7 +493,7 @@ sglang serve \
   2>&1 | tee /workspace/sglang-npu/logs/sglang-npu-single.log
 ```
 
-### 2.4 一条命令后台启动容器服务
+### 2.5 一条命令后台启动容器服务
 
 如果已经验证容器可以正常看到 NPU，可以用后台模式启动：
 
