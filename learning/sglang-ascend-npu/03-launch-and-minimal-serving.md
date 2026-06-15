@@ -20,6 +20,21 @@
 /home/{myspace}
 ```
 
+## 不影响他人环境的原则
+
+这台服务器如果是多人共用机器，本讲所有步骤都必须遵守一个边界：只影响你自己的用户空间、你自己启动的 shell、你自己的虚拟环境、你自己的容器或 `systemctl --user` 用户服务。
+
+具体来说：
+
+- 本讲里的 `export` 只应该在当前 shell、启动脚本或容器 `-e` 参数里使用；它们会影响当前 shell 及其子进程，关闭终端后自然失效。
+- `/home/{myspace}/sglang_npu_env.sh` 是个人手动加载文件，不要自动写入 `/etc/profile`、`/etc/environment`、`/etc/bash.bashrc` 等全局 profile。
+- 不要使用 `sudo pip install`，不要修改系统 Python，不要把包安装到系统 site-packages。
+- 不要执行 `conda config --system`，不要改全局 pip 配置；缓存目录使用 `PIP_CACHE_DIR=${SGL_CACHE}/pip` 固定到个人目录。
+- 不要把模型、wheel、日志、缓存长期写到 `/tmp`、`/usr/local`、`/opt`、`/root`、`/var` 等共享或系统目录。
+- Docker 示例里的 `-e` 环境变量只影响该容器；容器名和端口是全机共享资源，需要带上个人标识并避开他人正在使用的端口。
+- 后台服务只使用 `systemctl --user`，不要使用 `sudo systemctl` 创建系统级服务。
+- 如果 Docker 镜像层也必须落在个人目录，使用 rootless Docker，或请管理员统一配置；普通用户不要自行修改系统 Docker daemon。
+
 后续命令统一使用下面这些变量。请把 `{myspace}` 替换成你自己的 Linux 用户或个人空间名：
 
 ```bash
@@ -44,7 +59,7 @@ mkdir -p \
   "$(dirname "$SGL_VENV")"
 ```
 
-建议把这些变量写入一个个人启动文件，例如：
+建议把这些变量写入一个个人手动加载文件，例如：
 
 ```bash
 cat > ${USER_SPACE}/sglang_npu_env.sh <<'EOF'
@@ -70,14 +85,16 @@ export SGLANG_SET_CPU_AFFINITY=1
 EOF
 ```
 
-之后每次登录先执行：
+之后每次只在需要运行 SGLang 的终端里执行，不要把它追加到全局 profile 或多人共享的 shell 初始化文件：
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
 mkdir -p "$SGL_MODELS" "$SGL_CACHE" "$SGL_LOGS" "$SGL_WHEELS" "$SGL_SCRIPTS" "$SGL_CONDA_ROOT"
 ```
 
-注意：普通 Docker 的镜像层默认由 Docker daemon 存在系统目录，例如 `/var/lib/docker`。如果你要求“镜像层本身也必须保存在 `/home/{myspace}`”，需要使用 rootless Docker，或者请管理员把 Docker `data-root` 配到你的个人目录。否则，Docker 路径能保证模型、缓存、日志、脚本等业务文件在 `/home/{myspace}`，但 `docker pull` 的镜像层不完全受普通用户控制。
+这条 `source` 只影响当前 shell 和它启动的子进程。想清理时，关闭这个终端最简单；如果必须在同一个 shell 中清理，可以 `unset USER_SPACE SGL_WORKSPACE SGL_REPO SGL_MODELS SGL_CACHE SGL_LOGS SGL_WHEELS SGL_SCRIPTS SGL_CONDA_ROOT SGL_VENV HF_HOME TRANSFORMERS_CACHE HUGGINGFACE_HUB_CACHE TORCH_HOME XDG_CACHE_HOME PIP_CACHE_DIR CONDA_PKGS_DIRS SGLANG_SET_CPU_AFFINITY ASCEND_RT_VISIBLE_DEVICES`。
+
+注意：普通 Docker 的镜像层默认由 Docker daemon 存在系统目录，例如 `/var/lib/docker`。如果你要求“镜像层本身也必须保存在 `/home/{myspace}`”，需要使用 rootless Docker，或者请管理员统一把 Docker `data-root` 配到合适位置。不要在多人服务器上自行改系统 Docker daemon。否则，Docker 路径能保证模型、缓存、日志、脚本等业务文件在 `/home/{myspace}`，但 `docker pull` 的镜像层不完全受普通用户控制。
 
 ## 推荐路径选择
 
@@ -224,7 +241,7 @@ v0.5.6-cann8.5.0-910b
 docker pull docker.io/lmsysorg/sglang:main-cann8.5.0-910b
 ```
 
-如果必须让 Docker 镜像层也落在 `/home/{myspace}`，不要直接使用系统 Docker daemon。优先使用 rootless Docker，或请管理员配置类似：
+如果必须让 Docker 镜像层也落在 `/home/{myspace}`，不要自己修改系统 Docker daemon。优先使用 rootless Docker，或请管理员评估后统一配置类似：
 
 ```json
 {
@@ -232,7 +249,7 @@ docker pull docker.io/lmsysorg/sglang:main-cann8.5.0-910b
 }
 ```
 
-这一步通常需要管理员权限。本教程后续 Docker 命令只保证挂载出来的模型、缓存和日志都在 `/home/{myspace}`。
+这一步通常需要管理员权限，而且会影响整台机器的 Docker 行为。本教程后续 Docker 命令只保证挂载出来的模型、缓存和日志都在 `/home/{myspace}`。
 
 ### 2.2 进入调试容器
 
@@ -241,10 +258,13 @@ docker pull docker.io/lmsysorg/sglang:main-cann8.5.0-910b
 ```bash
 export IMAGE=docker.io/lmsysorg/sglang:main-cann8.5.0-910b
 source /home/{myspace}/sglang_npu_env.sh
+SGL_USER_TAG=$(basename "$USER_SPACE")
 mkdir -p "$SGL_WORKSPACE"/{models,cache,logs,wheels,scripts}
 
+# 容器名是全机唯一资源，建议带上个人空间名，避免和其他用户冲突。
+# Docker -e 变量只影响当前容器，不会写入宿主机环境。
 docker run -it --rm \
-  --name sglang-npu-dev \
+  --name "sglang-npu-dev-${SGL_USER_TAG}" \
   --privileged \
   --network=host \
   --ipc=host \
@@ -321,8 +341,11 @@ python3 -m sglang.launch_server \
 如果已经验证容器可以正常看到 NPU，可以用后台模式启动：
 
 ```bash
+export IMAGE=docker.io/lmsysorg/sglang:main-cann8.5.0-910b
+source /home/{myspace}/sglang_npu_env.sh
+
 docker run -d \
-  --name sglang-npu-server \
+  --name "sglang-npu-server-$(basename "$USER_SPACE")" \
   --restart unless-stopped \
   --privileged \
   --network=host \
@@ -359,14 +382,16 @@ docker run -d \
 查看日志：
 
 ```bash
-docker logs -f sglang-npu-server
+source /home/{myspace}/sglang_npu_env.sh
+docker logs -f "sglang-npu-server-$(basename "$USER_SPACE")"
 ```
 
 停止服务：
 
 ```bash
-docker stop sglang-npu-server
-docker rm sglang-npu-server
+source /home/{myspace}/sglang_npu_env.sh
+docker stop "sglang-npu-server-$(basename "$USER_SPACE")"
+docker rm "sglang-npu-server-$(basename "$USER_SPACE")"
 ```
 
 ## 3. 路径 B：conda / micromamba 隔离安装
@@ -416,6 +441,8 @@ export SGLANG_SET_CPU_AFFINITY=1
 EOF
 ```
 
+这个脚本只写入当前 conda 环境的 `$CONDA_PREFIX/etc/conda/activate.d/`，只在激活这个环境时生效，不会影响其他 conda 环境、其他用户或系统 shell。不要把同样内容写入 `/etc/profile` 或共享的 `~/.bashrc`。
+
 ### 3.2 安装依赖
 
 当前官方示例：
@@ -432,6 +459,8 @@ pip install torch==${PYTORCH_VERSION} torchvision==${TORCHVISION_VERSION} \
 pip install torch_npu==${TORCH_NPU_VERSION}
 pip install triton-ascend
 ```
+
+这里的 `pip` 必须来自已激活的 conda/micromamba 环境；不要加 `sudo`，也不要在未激活环境时安装，避免写入系统 Python。
 
 如果要使用 PD disaggregation：
 
@@ -634,7 +663,7 @@ PORT=8000 \
 
 ## 8. 使用 systemd 用户服务可选
 
-如果你想在不写入系统服务的情况下让服务后台运行，可以使用 user-level systemd。
+如果你想在不写入系统服务的情况下让服务后台运行，可以使用 user-level systemd。这里所有命令都必须带 `--user`，服务文件只放在 `/home/{myspace}/.config/systemd/user/`，不要使用 `sudo systemctl` 创建系统级服务。
 
 创建用户服务：
 
@@ -741,7 +770,7 @@ Capture npu graph end
 | conda 环境里 `torch.npu.is_available()` 为 False | 没 source CANN 或版本不匹配 | `source set_env.sh`，检查 torch/torch_npu/CANN。 |
 | `import sgl_kernel_npu` 失败 | NPU kernel 包没装 | 安装匹配版本 wheel 或使用官方 Docker。 |
 | 启动卡在 graph capture | graph 相关问题 | 先加 `--disable-cuda-graph` 跑通。 |
-| 端口被占用 | 8000 已有服务 | 换 `--port` 或停止旧服务。 |
+| 端口被占用 | 8000 已有服务 | 优先换成自己的 `--port`；不要停止无法确认归属的旧服务。 |
 | 模型下载很慢 | 服务器无公网 | 离线下载模型和 wheel。 |
 
 ## 12. 最小排错命令
@@ -777,6 +806,7 @@ lsof -i :8000
 ## 13. 最小跑通验收标准
 
 - 不修改系统 Python。
+- 不写入 `/etc/profile`、`/etc/environment`、系统 Docker daemon 或系统级 systemd 服务。
 - Docker、conda 或 venv 至少一种隔离方式可用。
 - `torch.npu.is_available()` 为 `True`。
 - `import sglang` 和 `import sgl_kernel_npu` 成功。
