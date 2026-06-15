@@ -77,6 +77,7 @@ export SGLANG_VENV=${SGLANG_WORKSPACE}/venvs/sglang_npu
 export HF_HOME=${SGLANG_CACHE}/huggingface
 export TRANSFORMERS_CACHE=${HF_HOME}
 export HUGGINGFACE_HUB_CACHE=${HF_HOME}/hub
+export MODELSCOPE_CACHE=${SGLANG_CACHE}/modelscope
 export TORCH_HOME=${SGLANG_CACHE}/torch
 export XDG_CACHE_HOME=${SGLANG_CACHE}/xdg
 export PIP_CACHE_DIR=${SGLANG_CACHE}/pip
@@ -92,7 +93,7 @@ source /home/{myspace}/sglang_npu_env.sh
 mkdir -p "$SGLANG_MODELS" "$SGLANG_CACHE" "$SGLANG_LOGS" "$SGLANG_WHEELS" "$SGLANG_SCRIPTS" "$SGLANG_CONDA_ROOT"
 ```
 
-这条 `source` 只影响当前 shell 和它启动的子进程。想清理时，关闭这个终端最简单；如果必须在同一个 shell 中清理，可以 `unset USER_SPACE SGLANG_WORKSPACE SGLANG_REPO SGLANG_MODELS SGLANG_CACHE SGLANG_LOGS SGLANG_WHEELS SGLANG_SCRIPTS SGLANG_CONDA_ROOT SGLANG_VENV HF_HOME TRANSFORMERS_CACHE HUGGINGFACE_HUB_CACHE TORCH_HOME XDG_CACHE_HOME PIP_CACHE_DIR CONDA_PKGS_DIRS SGLANG_SET_CPU_AFFINITY ASCEND_RT_VISIBLE_DEVICES`。
+这条 `source` 只影响当前 shell 和它启动的子进程。想清理时，关闭这个终端最简单；如果必须在同一个 shell 中清理，可以 `unset USER_SPACE SGLANG_WORKSPACE SGLANG_REPO SGLANG_MODELS SGLANG_CACHE SGLANG_LOGS SGLANG_WHEELS SGLANG_SCRIPTS SGLANG_CONDA_ROOT SGLANG_VENV HF_HOME TRANSFORMERS_CACHE HUGGINGFACE_HUB_CACHE MODELSCOPE_CACHE TORCH_HOME XDG_CACHE_HOME PIP_CACHE_DIR CONDA_PKGS_DIRS SGLANG_SET_CPU_AFFINITY ASCEND_RT_VISIBLE_DEVICES`。
 
 注意：普通 Docker 的镜像层默认由 Docker daemon 存在系统目录，例如 `/var/lib/docker`。如果你要求“镜像层本身也必须保存在 `/home/{myspace}`”，需要使用 rootless Docker，或者请管理员统一把 Docker `data-root` 配到合适位置。不要在多人服务器上自行改系统 Docker daemon。否则，Docker 路径能保证模型、缓存、日志、脚本等业务文件在 `/home/{myspace}`，但 `docker pull` 的镜像层不完全受普通用户控制。
 
@@ -300,6 +301,7 @@ docker run -it --rm \
   -e HF_HOME=/workspace/sglang-npu/cache/huggingface \
   -e TRANSFORMERS_CACHE=/workspace/sglang-npu/cache/huggingface \
   -e HUGGINGFACE_HUB_CACHE=/workspace/sglang-npu/cache/huggingface/hub \
+  -e MODELSCOPE_CACHE=/workspace/sglang-npu/cache/modelscope \
   -e TORCH_HOME=/workspace/sglang-npu/cache/torch \
   -e XDG_CACHE_HOME=/workspace/sglang-npu/cache/xdg \
   -e PIP_CACHE_DIR=/workspace/sglang-npu/cache/pip \
@@ -522,6 +524,7 @@ docker run -d \
   -e HF_HOME=/workspace/sglang-npu/cache/huggingface \
   -e TRANSFORMERS_CACHE=/workspace/sglang-npu/cache/huggingface \
   -e HUGGINGFACE_HUB_CACHE=/workspace/sglang-npu/cache/huggingface/hub \
+  -e MODELSCOPE_CACHE=/workspace/sglang-npu/cache/modelscope \
   -e TORCH_HOME=/workspace/sglang-npu/cache/torch \
   -e XDG_CACHE_HOME=/workspace/sglang-npu/cache/xdg \
   -e PIP_CACHE_DIR=/workspace/sglang-npu/cache/pip \
@@ -591,6 +594,7 @@ export SGLANG_CACHE=${SGLANG_WORKSPACE}/cache
 export HF_HOME=${SGLANG_CACHE}/huggingface
 export TRANSFORMERS_CACHE=${HF_HOME}
 export HUGGINGFACE_HUB_CACHE=${HF_HOME}/hub
+export MODELSCOPE_CACHE=${SGLANG_CACHE}/modelscope
 export TORCH_HOME=${SGLANG_CACHE}/torch
 export XDG_CACHE_HOME=${SGLANG_CACHE}/xdg
 export PIP_CACHE_DIR=${SGLANG_CACHE}/pip
@@ -734,14 +738,75 @@ pip install --no-index --find-links "$SGLANG_WHEELS" -e "python[all_npu]"
 
 ## 6. 模型准备
 
-建议把模型放在独立目录：
+建议把模型放在独立目录，并把 ModelScope、Hugging Face、Transformers 缓存都放到个人缓存目录：
 
 ```bash
 source /home/{myspace}/sglang_npu_env.sh
-mkdir -p "$SGLANG_MODELS"
+mkdir -p "$SGLANG_MODELS" "$MODELSCOPE_CACHE" "$HF_HOME"
 ```
 
-如果能联网：
+### 6.1 使用 ModelScope 下载模型
+
+国内或内网环境通常优先使用 ModelScope。先在当前 Docker 容器、conda 环境或 venv 中安装 ModelScope CLI：
+
+```bash
+python -m pip install -U modelscope
+modelscope --help | head
+```
+
+下载 Qwen2.5-7B-Instruct 到本讲约定的个人模型目录：
+
+```bash
+source /home/{myspace}/sglang_npu_env.sh
+mkdir -p "$SGLANG_MODELS" "$MODELSCOPE_CACHE"
+
+modelscope download \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --local_dir "$SGLANG_MODELS/Qwen2.5-7B-Instruct"
+```
+
+如果当前 ModelScope CLI 版本不支持 `--local_dir`，可以使用 Python API：
+
+```bash
+python - <<'PY'
+import os
+from modelscope import snapshot_download
+
+model_id = "Qwen/Qwen2.5-7B-Instruct"
+target_dir = os.path.join(os.environ["SGLANG_MODELS"], "Qwen2.5-7B-Instruct")
+cache_dir = os.environ["MODELSCOPE_CACHE"]
+
+snapshot_download(
+    model_id,
+    local_dir=target_dir,
+    cache_dir=cache_dir,
+)
+print(target_dir)
+PY
+```
+
+如果模型需要登录权限，先在当前用户环境登录，token 会落在你的个人用户配置或当前环境中，不要写入共享脚本：
+
+```bash
+modelscope login --token <your_modelscope_token>
+```
+
+ModelScope 下载完成后，SGLang 启动时直接使用本地目录：
+
+```bash
+sglang serve \
+  --model-path "$SGLANG_MODELS/Qwen2.5-7B-Instruct" \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --device npu \
+  --attention-backend ascend \
+  --base-gpu-id 0 \
+  --tp-size 1
+```
+
+### 6.2 使用 Hugging Face 下载模型
+
+如果你所在网络访问 Hugging Face 更方便，也可以使用 Hugging Face CLI：
 
 ```bash
 export HF_HOME=$SGLANG_CACHE/huggingface
@@ -751,16 +816,21 @@ huggingface-cli download Qwen/Qwen2.5-7B-Instruct \
   --local-dir "$SGLANG_MODELS/Qwen2.5-7B-Instruct"
 ```
 
-如果不能联网：
+### 6.3 离线或内网拷贝模型
+
+如果服务器不能直接联网：
 
 - 在可联网机器下载模型。
 - 用 `rsync`、对象存储或内网制品库拷贝到 `$SGLANG_MODELS`。
 - 保留 tokenizer、config、safetensors 等完整文件。
 
-检查：
+### 6.4 检查模型目录
+
+无论使用 ModelScope、Hugging Face 还是离线拷贝，都要确认目录里包含模型配置、tokenizer 和权重文件：
 
 ```bash
 ls "$SGLANG_MODELS/Qwen2.5-7B-Instruct"
+find "$SGLANG_MODELS/Qwen2.5-7B-Instruct" -maxdepth 1 -type f | sort | head -30
 ```
 
 ## 7. 编写可复用启动脚本
@@ -785,6 +855,7 @@ export SGLANG_SET_CPU_AFFINITY=${SGLANG_SET_CPU_AFFINITY:-1}
 export HF_HOME=${HF_HOME:-${SGLANG_CACHE}/huggingface}
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-${HF_HOME}}
 export HUGGINGFACE_HUB_CACHE=${HUGGINGFACE_HUB_CACHE:-${HF_HOME}/hub}
+export MODELSCOPE_CACHE=${MODELSCOPE_CACHE:-${SGLANG_CACHE}/modelscope}
 export TORCH_HOME=${TORCH_HOME:-${SGLANG_CACHE}/torch}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${SGLANG_CACHE}/xdg}
 export PIP_CACHE_DIR=${PIP_CACHE_DIR:-${SGLANG_CACHE}/pip}
