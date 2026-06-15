@@ -261,7 +261,7 @@ pip install -e "python[all_npu]"
 
 ```bash
 python -m sglang.check_env
-python -m sglang.launch_server --help | head
+sglang serve --help | head
 ```
 
 ## 4. 系统性能设置
@@ -317,7 +317,7 @@ cat /proc/sys/vm/swappiness
 export SGLANG_SET_CPU_AFFINITY=1
 export HF_TOKEN=<your_hf_token_if_needed>
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path meta-llama/Llama-3.1-8B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \
@@ -330,7 +330,7 @@ python -m sglang.launch_server \
 如果模型已经在本地：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \
@@ -391,7 +391,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```bash
 export SGLANG_SET_CPU_AFFINITY=1
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-32B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \
@@ -420,7 +420,7 @@ export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
 # Atlas 800I A2 且需要 RDMA 传 KV 时再启用：
 # export ASCEND_MF_TRANSFER_PROTOCOL="device_rdma"
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend ascend \
@@ -439,7 +439,7 @@ Decode server：
 export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
 # export ASCEND_MF_TRANSFER_PROTOCOL="device_rdma"
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend ascend \
@@ -480,7 +480,7 @@ curl http://127.0.0.1:6688/v1/chat/completions \
 多模态 NPU 路径会多一些参数。示例：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen3-VL-30B-A3B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \
@@ -560,7 +560,7 @@ decode_attention_backend=ascend
 临时缩小变量：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/small-model \
   --device npu \
   --attention-backend ascend \
@@ -639,7 +639,7 @@ pip install -e "python[all_npu]"
 ```bash
 export SGLANG_SET_CPU_AFFINITY=1
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \

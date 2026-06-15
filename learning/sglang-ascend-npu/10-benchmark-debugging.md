@@ -159,7 +159,7 @@ python/sglang/multimodal_gen/runtime/utils/profiler.py
 关闭 graph：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --device npu \
   --attention-backend ascend \
@@ -170,7 +170,7 @@ python -m sglang.launch_server \
 打开 graph：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --device npu \
   --attention-backend ascend \

@@ -98,7 +98,7 @@ mindmap
 ```mermaid
 flowchart TB
   subgraph UserLayer["用户入口"]
-    CLI["sglang CLI / python -m sglang.launch_server"]
+    CLI["sglang CLI / sglang serve"]
     API["HTTP / OpenAI compatible API"]
   end
 
@@ -160,7 +160,7 @@ sequenceDiagram
   SGL->>SGL: is_npu() 识别设备
   SGL->>NPU: init_npu_backend()
   SGL->>SGL: set_default_server_args()
-  Dev->>SGL: 启动 launch_server
+  Dev->>SGL: 启动 sglang serve
   Client->>SGL: /v1/chat/completions
   SGL->>SGL: TokenizerManager -> Scheduler -> ModelRunner
   SGL->>NPU: ascend attention / NPUGraph / torch.ops.npu

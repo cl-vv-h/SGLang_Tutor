@@ -100,7 +100,7 @@ Prefill：
 export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
 export ASCEND_RT_VISIBLE_DEVICES=0
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --device npu \
   --attention-backend ascend \
@@ -119,7 +119,7 @@ Decode：
 export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
 export ASCEND_RT_VISIBLE_DEVICES=1
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --device npu \
   --attention-backend ascend \

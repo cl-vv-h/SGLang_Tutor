@@ -184,7 +184,7 @@ npu_format_cast(tensor, acl_format=NPUACLFormat.ACL_FORMAT_FRACTAL_NZ)
 单卡：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --device npu \
   --attention-backend ascend \
@@ -197,7 +197,7 @@ python -m sglang.launch_server \
 定位问题：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-7B-Instruct \
   --device npu \
   --attention-backend ascend \
@@ -208,7 +208,7 @@ python -m sglang.launch_server \
 多卡：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-32B-Instruct \
   --device npu \
   --attention-backend ascend \

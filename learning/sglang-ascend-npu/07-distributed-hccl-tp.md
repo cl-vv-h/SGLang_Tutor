@@ -6,7 +6,7 @@
 
 ```mermaid
 flowchart TD
-  A["launch_server --tp-size N"] --> B["ModelRunner.init_torch_distributed"]
+  A["sglang serve --tp-size N"] --> B["ModelRunner.init_torch_distributed"]
   B --> C["get_default_distributed_backend(device=npu)"]
   C --> D["HCCL or ZBAL"]
   D --> E["init_distributed_environment"]
@@ -55,7 +55,7 @@ zbal
 export SGLANG_SET_CPU_AFFINITY=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/Qwen2.5-32B-Instruct \
   --host 0.0.0.0 \
   --port 8000 \
@@ -70,7 +70,7 @@ python -m sglang.launch_server \
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-python -m sglang.launch_server \
+sglang serve \
   --model-path /data/models/large-model \
   --device npu \
   --attention-backend ascend \
