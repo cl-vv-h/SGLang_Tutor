@@ -10,7 +10,7 @@
 | 2 | [Schedule_Optimization](./Schedule_Optimization/) | Continuous batching、Chunked Prefill、调度权衡 | [README.md](./Schedule_Optimization/README.md) |
 | 3 | [KV_Cache_Memory](./KV_Cache_Memory/) | KV Cache 布局、分页、prefix cache、显存估算 | [README.md](./KV_Cache_Memory/README.md) |
 | 4 | [Attention_Kernel](./Attention_Kernel/) | FlashAttention 与 FlashDecoding 的教学版实现 | [README.md](./Attention_Kernel/README.md) |
-| 5 | [Execution_Graph](./Execution_Graph/) | 从计算图概念到 CUDA/NPU Graph、torch.compile、静态形状复用 | [01-what-is-graph.md](./Execution_Graph/01-what-is-graph.md) |
+| 5 | [Execution_Graph](./Execution_Graph/) | 从计算图概念到 CUDA/NPU Graph、torch.compile、静态形状复用和 replay 数据流 | [01-what-is-graph.md](./Execution_Graph/01-what-is-graph.md)、[02-graph-execution-dataflow.md](./Execution_Graph/02-graph-execution-dataflow.md) |
 | 6 | [Parallel_Strategy](./Parallel_Strategy/) | DP、TP、PP、SP/CP、EP 推理并行策略 | [README.md](./Parallel_Strategy/README.md) |
 | 7 | [KV_Transfer](./KV_Transfer/) | PD 分离、KV sender/receiver、远程 KV cache | [README.md](./KV_Transfer/README.md) |
 | 8 | [Speculative_Decoding](./Speculative_Decoding/) | Draft/Target、verify、accept token、EAGLE/NGRAM | [README.md](./Speculative_Decoding/README.md) |

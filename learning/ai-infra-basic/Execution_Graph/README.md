@@ -7,8 +7,9 @@
 | 文件 | 内容 |
 |---|---|
 | [01-what-is-graph.md](./01-what-is-graph.md) | 从“计算图是什么”讲到 SGLang 中 CUDA/NPU/CPU Graph 的 capture/replay 实现 |
+| [02-graph-execution-dataflow.md](./02-graph-execution-dataflow.md) | 详细拆解 graph replay 时哪些数据进入 graph、如何调度、数据如何在 buffer/KV cache/output 之间流转 |
 
-如果你刚开始看 SGLang 里的 `graph_runner`、`cuda_graph`、`piecewise_cuda_graph`，建议先读 [01-what-is-graph.md](./01-what-is-graph.md)，再回来看下面这份速查。
+如果你刚开始看 SGLang 里的 `graph_runner`、`cuda_graph`、`piecewise_cuda_graph`，建议先读 [01-what-is-graph.md](./01-what-is-graph.md)。如果已经知道 graph 是什么，但不清楚 graph 里到底跑了哪些数据，继续读 [02-graph-execution-dataflow.md](./02-graph-execution-dataflow.md)。
 
 ## 为什么需要 Execution Graph
 
