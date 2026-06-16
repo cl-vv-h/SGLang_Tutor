@@ -66,6 +66,37 @@ flowchart TD
 
 ---
 
+## 1.1 CodeGraph 校准：PD 的中心在队列和 KVManager
+
+CodeGraph 对 `python/sglang/srt/disaggregation` 的结构分析提醒我们：PD 分离不是只改 `Scheduler`，还大量依赖 transfer backend、bootstrap connection 和 decode 侧队列。
+
+| 节点 | 位置 | CodeGraph 信号 | 阅读意义 |
+|---|---|---:|---|
+| `MooncakeKVManager` | `python/sglang/srt/disaggregation/common/conn.py` / `MooncakeKVManager` | links_out 31 | KV transfer backend 的主要实现之一，理解 sender/receiver 建立连接时要读。 |
+| `NixlKVManager` | `python/sglang/srt/disaggregation/common/conn.py` / `NixlKVManager` | links_out 30 | 另一套重要 transfer backend，与部署和网络传输强相关。 |
+| `DecodePreallocQueue` | `python/sglang/srt/disaggregation/decode.py` / `DecodePreallocQueue` | links_out 5 | decode server 先占住目标 KV slot 的核心队列。 |
+| `DecodeTransferQueue` | `python/sglang/srt/disaggregation/decode.py` / `DecodeTransferQueue` | links_out 5 | decode server 等待 prefill KV 传输完成的核心队列。 |
+| `SchedulerDisaggregationPrefillMixin` | `python/sglang/srt/disaggregation/prefill.py` / `SchedulerDisaggregationPrefillMixin` | links_out 3 | prefill server 对 Scheduler 主循环和 batch 生命周期的改写点。 |
+| `KVCacheEvent` / `EventBatch` | `python/sglang/srt/disaggregation/kv_events.py` | links_out 5 / 4 | router 做 KV-aware routing 时会消费这类事件。 |
+
+因此这一讲的阅读顺序可以更精确地拆成两条：
+
+```text
+Decode 侧:
+SchedulerDisaggregationDecodeMixin
+-> DecodePreallocQueue
+-> DecodeTransferQueue
+-> DecodeReqToTokenPool
+-> normal decode running_batch
+
+Prefill / transfer 侧:
+SchedulerDisaggregationPrefillMixin
+-> CommonKVSender / CommonKVReceiver
+-> MooncakeKVManager 或 NixlKVManager
+-> KV transfer completion
+-> KVCacheEvent publishing
+```
+
 ## 2. PD 分离解决什么问题
 
 LLM serving 里 prefill 和 decode 的计算形态很不一样：

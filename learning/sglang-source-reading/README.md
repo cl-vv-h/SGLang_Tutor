@@ -41,6 +41,7 @@ flowchart TD
 
 ## 当前源码索引状态
 
-- 当前工作区没有保留 `.codegraph/codegraph.db`。
-- 第 9 讲中的 `sgl-router` 架构图是基于 `experimental/sgl-router/src` 的模块声明、类型索引和主调用链静态整理出的 CodeGraph 式视图。
-- 如果后续本机安装 CodeGraph CLI/MCP，可以重新对 `python/`、`rust/` 和 `experimental/sgl-router/` 建立完整 knowledge graph。
+- 当前已用本地 CodeGraph 对 `python/sglang/srt/managers`、`python/sglang/srt/model_executor`、`python/sglang/srt/disaggregation`、`python/sglang/srt/lora`、`python/sglang/srt/layers/moe` 生成结构索引。
+- CodeGraph 与生成的 HTML/CSV 均保存在本地忽略目录 `codegraph_out/`，只作为教学校准材料，不提交到远端仓库。
+- PyPI 版本 CodeGraph 对 Rust 支持有限，因此 `experimental/sgl-router` 使用静态 Rust 声明索引辅助校准；第 9 讲中的 `sgl-router` 架构图已经结合该索引调整。
+- 后续阅读时，可以把第 0 讲中的“CodeGraph 校准后的源码中心”当成总导航，再进入各讲的细节流程。

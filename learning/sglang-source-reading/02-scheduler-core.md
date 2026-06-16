@@ -27,6 +27,33 @@ flowchart TD
   I --> K["last_batch / running_batch 状态更新"]
 ```
 
+## 0. CodeGraph 校准：Scheduler 周围真正拥挤的节点
+
+本讲的主角 `Scheduler` 在 CodeGraph 输出中是 `managers` 包里出边最多的类。它不是单纯的“队列调度器”，而是把 request receiver、prefix cache、batch、worker、result processor、streamer、控制面命令都串起来的运行时枢纽。
+
+| 节点 | 位置 | CodeGraph 信号 | 阅读优先级 |
+|---|---|---:|---|
+| `Scheduler` | `python/sglang/srt/managers/scheduler.py` / `Scheduler` | links_out 111 | 第一优先级，先读主循环和 batch 生命周期。 |
+| `PrefillAdder` | `python/sglang/srt/managers/schedule_policy.py` / `PrefillAdder` | links_out 27 | 读 prefill 组批时必须看，它负责预算和 prefix match 结果的落地。 |
+| `SchedulePolicy` | `python/sglang/srt/managers/schedule_policy.py` / `SchedulePolicy` | links_out 23 / links_in 11 | 理解 waiting queue 中请求排序、优先级和可调度性。 |
+| `Req` | `python/sglang/srt/managers/schedule_batch.py` / `Req` | links_in 15 | Scheduler 所有状态变更最终都会写到单个请求对象上。 |
+| `ScheduleBatch` | `python/sglang/srt/managers/schedule_batch.py` / `ScheduleBatch` | links_out 9 / links_in 9 | Scheduler 与 `TpModelWorker` 的边界对象。 |
+| `SchedulerBatchResultProcessor` | `python/sglang/srt/scheduler_components/batch_result_processor.py` / `SchedulerBatchResultProcessor` | module links_out 8 | forward 结束后的状态回写、finish 判断和输出准备。 |
+
+因此这一讲可以按下面的代码骨架阅读：
+
+```text
+Scheduler.event_loop_normal()
+-> Scheduler.process_input_requests()
+-> Scheduler.get_next_batch_to_run()
+-> Scheduler.get_new_batch_prefill()
+-> SchedulePolicy / PrefillAdder
+-> ScheduleBatch.prepare_for_extend() 或 prepare_for_decode()
+-> Scheduler.run_batch()
+-> Scheduler.process_batch_result()
+-> SchedulerBatchResultProcessor
+```
+
 ## 1. 三个核心状态
 
 | 文件 | 类 / 函数 | 重点代码段 |

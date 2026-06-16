@@ -229,6 +229,92 @@ flowchart TB
 4. `ModelRunner -> AttentionBackend / GraphRunner / LogitsProcessor / Sampler`：模型执行后的性能与采样链路。
 5. `SchedulerBatchResultProcessor -> SchedulerOutputStreamer -> DetokenizerManager`：模型输出回到流式文本的链路。
 
+## CodeGraph 校准后的源码中心
+
+本节根据本地 CodeGraph 输出校准阅读重点。CodeGraph 生成物保存在本地忽略目录 `codegraph_out/`，教学文档只保留稳定结论，不依赖这些中间文件。
+
+### managers：请求生命周期的控制中心
+
+CodeGraph 显示，`python/sglang/srt/managers` 中出边最多、最值得优先阅读的节点是：
+
+| 节点 | 位置 | CodeGraph 信号 | 教学含义 |
+|---|---|---:|---|
+| `Scheduler` | `python/sglang/srt/managers/scheduler.py` / `Scheduler` | links_out 111 | 调度总控，连接请求接收、batch 构造、cache、worker、结果处理和控制面。 |
+| `TokenizerManager` | `python/sglang/srt/managers/tokenizer_manager.py` / `TokenizerManager` | links_out 55 | serving 层与 scheduler 层之间的入口，把原始请求变成 tokenized 请求。 |
+| `TokenizerControlMixin` | `python/sglang/srt/managers/tokenizer_control_mixin.py` / `TokenizerControlMixin` | links_out 35 | flush、abort、update weights、LoRA load/unload 等控制面入口。 |
+| `PrefillAdder` | `python/sglang/srt/managers/schedule_policy.py` / `PrefillAdder` | links_out 27 | prefill 组批时的预算检查、prefix 匹配与请求选择。 |
+| `SchedulePolicy` | `python/sglang/srt/managers/schedule_policy.py` / `SchedulePolicy` | links_out 23 / links_in 11 | 调度策略入口，决定 waiting queue 中哪些请求能进入本轮 prefill。 |
+| `Req` | `python/sglang/srt/managers/schedule_batch.py` / `Req` | links_in 15 | 单请求运行态，被 Scheduler、Batch、cache、结果处理器共同读写。 |
+| `ScheduleBatch` | `python/sglang/srt/managers/schedule_batch.py` / `ScheduleBatch` | links_out 9 / links_in 9 | Scheduler 与 TpWorker 的边界对象，一批请求在一次 forward 前的调度态。 |
+
+所以读 `managers` 不应该按文件名平铺，而应该按下面这条链：
+
+```text
+TokenizerManager
+-> Scheduler.process_input_requests()
+-> Scheduler.get_next_batch_to_run()
+-> SchedulePolicy / PrefillAdder
+-> ScheduleBatch
+-> TpModelWorker
+-> SchedulerBatchResultProcessor / SchedulerOutputStreamer
+```
+
+### model_executor：模型执行的三层核心
+
+`python/sglang/srt/model_executor` 的 CodeGraph 中，中心节点非常集中：
+
+| 节点 | 位置 | CodeGraph 信号 | 教学含义 |
+|---|---|---:|---|
+| `ModelRunner` | `python/sglang/srt/model_executor/model_runner.py` / `ModelRunner` | links_out 42 | 模型执行总控，负责 forward 分发、采样、graph runner、attention backend 与 LoRA 接入。 |
+| `CudaGraphRunner` | `python/sglang/srt/model_executor/cuda_graph_runner.py` / `CudaGraphRunner` | links_out 40 | decode 性能关键路径，负责固定 shape 的 CUDA graph capture/replay。 |
+| `ForwardMode` | `python/sglang/srt/model_executor/forward_batch_info.py` / `ForwardMode` | links_in 48 | decode、extend、mixed、idle 等执行模式的分发依据。 |
+| `ForwardBatch` | `python/sglang/srt/model_executor/forward_batch_info.py` / `ForwardBatch` | links_out 11 / links_in 7 | 把 `ScheduleBatch` 转成模型前向张量和 metadata。 |
+| `forward_context()` | `python/sglang/srt/model_executor/forward_context.py` / `forward_context()` | links_in 24 | 把当前 batch 的 attention backend、KV pool、forward mode 暴露给模型层。 |
+
+这说明第 4 讲的阅读顺序应以 `ForwardMode -> ForwardBatch -> ModelRunner -> GraphRunner -> ForwardContext` 为骨架，而不是直接跳进具体模型文件。
+
+### disaggregation：PD 分离的真实中心不只在 Scheduler mixin
+
+PD 章节原本容易只盯 `prefill.py` 和 `decode.py`，CodeGraph 显示还必须把 KV transfer backend 和多模态 encode 路径纳入视野：
+
+| 节点 | 位置 | CodeGraph 信号 | 教学含义 |
+|---|---|---:|---|
+| `MooncakeKVManager` | `python/sglang/srt/disaggregation/common/conn.py` / `MooncakeKVManager` | links_out 31 | PD KV 传输 backend 之一，负责 sender/receiver 连接和注册。 |
+| `NixlKVManager` | `python/sglang/srt/disaggregation/common/conn.py` / `NixlKVManager` | links_out 30 | 另一套 KV 传输 backend，和部署环境、传输协议强相关。 |
+| `SchedulerDisaggregationPrefillMixin` | `python/sglang/srt/disaggregation/prefill.py` / `SchedulerDisaggregationPrefillMixin` | links_out 3 | Prefill server 对 Scheduler 生命周期的改写点。 |
+| `DecodePreallocQueue` | `python/sglang/srt/disaggregation/decode.py` / `DecodePreallocQueue` | links_out 5 | Decode server 预分配 KV slot 的关键队列。 |
+| `DecodeTransferQueue` | `python/sglang/srt/disaggregation/decode.py` / `DecodeTransferQueue` | links_out 5 | Decode server 等待 KV transfer 完成的关键队列。 |
+| `MMEncoder` | `python/sglang/srt/disaggregation/mini_lb/encode_server.py` / `MMEncoder` | links_out 46 | 多模态 encoder 分离路径的中心，不属于普通文本 PD 主线，但会出现在 disaggregation 包里。 |
+
+因此第 7 讲的主线仍然是 `DecodePreallocQueue -> Prefill forward -> KVManager sender/receiver -> DecodeTransferQueue`，但阅读 `common/conn.py` 的优先级应该提升。
+
+### LoRA：内存池是比 manager 更底层的中心
+
+CodeGraph 中 `LoRAMemoryPool` 的出边高于 `LoRAManager`，说明 LoRA serving 不只是“加载 adapter”，更重要的是“有限 GPU slot 如何复用”。
+
+| 节点 | 位置 | CodeGraph 信号 | 教学含义 |
+|---|---|---:|---|
+| `LoRAMemoryPool` | `python/sglang/srt/lora/mem_pool.py` / `LoRAMemoryPool` | links_out 46 | adapter 权重在 GPU/CPU slot 间复用的核心资源管理器。 |
+| `LoRAManager` | `python/sglang/srt/lora/lora_manager.py` / `LoRAManager` | links_out 19 | 对外提供 load/unload、prepare batch、adapter 生命周期管理。 |
+| `ChunkedSgmvLoRABackend` | `python/sglang/srt/lora/chunked_backend.py` / `ChunkedSgmvLoRABackend` | links_out 9 | LoRA kernel backend 之一，影响实际 forward 性能。 |
+| `TritonLoRABackend` | `python/sglang/srt/lora/triton_backend.py` / `TritonLoRABackend` | links_out 8 | Triton 实现的 LoRA 执行后端。 |
+
+第 8 讲阅读时可以先读 `LoRAManager` 理解生命周期，再回到 `LoRAMemoryPool` 理解为什么 adapter 不能无限驻留 GPU。
+
+### MoE / Router：TopK 是模型内路由的入口
+
+对 `python/sglang/srt/layers/moe` 的 CodeGraph 输出显示，MoE 相关的中心节点不是只有 router kernel：
+
+| 节点 | 位置 | CodeGraph 信号 | 教学含义 |
+|---|---|---:|---|
+| `TopK` | `python/sglang/srt/layers/moe/topk.py` / `TopK` | links_out 43 | MoE token -> expert 选择的 Python 入口，连接 top-k、renormalize、expert map 和 routed experts 捕获。 |
+| `FusedMoE` | `python/sglang/srt/layers/moe/layer.py` / `FusedMoE` | links_out 26 | expert 执行层，消费 router/top-k 的结果。 |
+| `MoeA2ABackend` | `python/sglang/srt/layers/moe/utils.py` / `MoeA2ABackend` | links_in 37 | EP all-to-all backend 类型，是 DeepEP/Mooncake/NIXL/Mori 等 dispatcher 的共同抽象。 |
+| `MoeRunnerBackend` | `python/sglang/srt/layers/moe/utils.py` / `MoeRunnerBackend` | links_in 54 | MoE runner backend 枚举，影响 fused moe kernel/runner 选择。 |
+| `_post_process_topk_ids()` | `python/sglang/srt/layers/moe/topk.py` / `_post_process_topk_ids()` | links_out 11 | top-k 后处理入口，处理 expert remap、EPLB、DeepEP 和 routed experts 捕获。 |
+
+所以第 9 讲里的 MoE router 部分应理解成：`TopK` 先产生或整理路由结果，`FusedMoE` 再执行 experts，EP/DeepEP 等后端决定这些 expert 如何跨 GPU 通信。
+
 ## 关键类知识图谱
 
 ### 1. 入口与请求对象

@@ -11,7 +11,7 @@
 - **MoE expert router**：模型内部把 token 路由到 top-k experts。
 - **routed experts 捕获链路**：把 MoE router 选中的专家 ID 返回给用户做观测和调试。
 
-本讲已经把上游 `experimental/sgl-router` 源码补入当前教学仓库，并基于这部分代码重新梳理 router 的真实架构。当前环境没有可执行的 `codegraph` 命令，因此下面的“CodeGraph 视角”是通过源码模块声明、类型索引和主调用链静态整理出来的结构图；阅读时可以把它当作代码图谱来用。
+本讲已经把上游 `experimental/sgl-router` 源码补入当前教学仓库，并基于这部分代码重新梳理 router 的真实架构。本地 CodeGraph 的 Python 分析结果已经用于校准 Router 与 Scheduler、PD、MoE 的关系；但 PyPI 版本 CodeGraph 对 Rust 支持有限，所以 `sgl-router` 本身采用 Rust 源码声明索引与主调用链静态整理。下面的“CodeGraph 视角”可以当作 router 的代码图谱来读。
 
 ---
 

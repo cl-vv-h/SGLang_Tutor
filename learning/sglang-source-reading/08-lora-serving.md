@@ -79,6 +79,34 @@ flowchart TD
 
 ---
 
+## 1.1 CodeGraph 校准：LoRA 的底层中心是内存池
+
+CodeGraph 对 `python/sglang/srt/lora` 的结构分析显示，`LoRAMemoryPool` 的出边高于 `LoRAManager`。这说明阅读 LoRA serving 时，不能只理解“如何 load/unload adapter”，还要理解 adapter 权重如何占用和释放有限 GPU slot。
+
+| 节点 | 位置 | CodeGraph 信号 | 阅读意义 |
+|---|---|---:|---|
+| `LoRAMemoryPool` | `python/sglang/srt/lora/mem_pool.py` / `LoRAMemoryPool` | links_out 46 | LoRA 权重的 slot 分配、复用、迁移和释放中心。 |
+| `LoRAManager` | `python/sglang/srt/lora/lora_manager.py` / `LoRAManager` | links_out 19 | adapter 生命周期、batch 准备、加载卸载控制入口。 |
+| `ChunkedSgmvLoRABackend` | `python/sglang/srt/lora/chunked_backend.py` / `ChunkedSgmvLoRABackend` | links_out 9 | 分块 SGMV LoRA 计算后端。 |
+| `TritonLoRABackend` | `python/sglang/srt/lora/triton_backend.py` / `TritonLoRABackend` | links_out 8 | Triton LoRA kernel 后端。 |
+| `LoRAAdapter` | `python/sglang/srt/lora/lora.py` / `LoRAAdapter` | links_out 3 | 单个 adapter 的权重与元数据对象。 |
+
+这一讲可以按两层来读：
+
+```text
+控制面:
+TokenizerControlMixin / HTTP control
+-> LoRARegistry
+-> LoRAManager.load_lora_adapter() / unload_lora_adapter()
+
+执行面:
+ScheduleBatch / ForwardBatch
+-> LoRAManager.prepare_lora_batch()
+-> LoRAMemoryPool
+-> LoRABatchInfo
+-> TritonLoRABackend 或 ChunkedSgmvLoRABackend
+```
+
 ## 2. LoRA 在 SGLang 中到底解决什么问题
 
 LoRA serving 的目标是：**不复制 base model，只在同一个服务实例上为不同请求套用不同 adapter**。

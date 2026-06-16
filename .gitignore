@@ -13,6 +13,7 @@ venv/
 
 # Local artifacts
 *.zip
+.codegraph/
 codegraph_out/
 
 # OS/editor noise

@@ -58,6 +58,34 @@ flowchart TD
 
 ---
 
+## 1.1 CodeGraph 校准：先读执行骨架，再读具体模型
+
+CodeGraph 对 `python/sglang/srt/model_executor` 的结构分析显示，执行层的中心并不分散，核心节点集中在 `ModelRunner`、`ForwardBatch`、`ForwardMode` 和 graph runner 上。
+
+| 节点 | 位置 | CodeGraph 信号 | 说明 |
+|---|---|---:|---|
+| `ModelRunner` | `python/sglang/srt/model_executor/model_runner.py` / `ModelRunner` | links_out 42 | 模型执行总控，连接模型加载、attention backend、graph runner、采样、LoRA 和 metrics。 |
+| `ForwardMode` | `python/sglang/srt/model_executor/forward_batch_info.py` / `ForwardMode` | links_in 48 | decode / extend / mixed / idle 的分发依据，很多分支都先判断它。 |
+| `ForwardBatch` | `python/sglang/srt/model_executor/forward_batch_info.py` / `ForwardBatch` | links_out 11 / links_in 7 | 把 `ScheduleBatch` 转成模型 forward 所需的张量、位置、KV slot 和采样信息。 |
+| `CudaGraphRunner` | `python/sglang/srt/model_executor/cuda_graph_runner.py` / `CudaGraphRunner` | links_out 40 | decode 性能关键，负责 capture/replay 固定形状 graph。 |
+| `PiecewiseCudaGraphRunner` | `python/sglang/srt/model_executor/piecewise_cuda_graph_runner.py` / `PiecewiseCudaGraphRunner` | links_out 32 | 更细粒度地捕获局部图，适合动态性更强的场景。 |
+| `forward_context()` | `python/sglang/srt/model_executor/forward_context.py` / `forward_context()` | links_in 24 | 模型层通过它拿到当前 forward 的 KV pool、attention backend 和 metadata。 |
+
+所以本讲推荐的阅读顺序是：
+
+```text
+TpModelWorker.forward_batch_generation()
+-> ForwardBatch.init_new()
+-> ForwardMode
+-> ModelRunner.forward()
+-> ModelRunner._forward_raw()
+-> CudaGraphRunner / eager model.forward
+-> forward_context()
+-> RadixAttention.forward()
+-> AttentionBackend.forward_decode() 或 forward_extend()
+-> ModelRunner.sample()
+```
+
 ## 2. 为什么需要 `ForwardBatch`
 
 在 SGLang 里有一个非常重要的分层：
