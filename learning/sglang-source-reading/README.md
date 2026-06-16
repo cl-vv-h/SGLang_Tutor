@@ -41,6 +41,6 @@ flowchart TD
 
 ## 当前源码索引状态
 
-- CodeGraph 数据库：`.codegraph/codegraph.db`
-- 当前仓库已建立 knowledge graph。
-- 若要在 Codex 中使用 CodeGraph MCP，需要重启 Codex 会话，让新的 MCP 配置生效。
+- 当前工作区没有保留 `.codegraph/codegraph.db`。
+- 第 9 讲中的 `sgl-router` 架构图是基于 `experimental/sgl-router/src` 的模块声明、类型索引和主调用链静态整理出的 CodeGraph 式视图。
+- 如果后续本机安装 CodeGraph CLI/MCP，可以重新对 `python/`、`rust/` 和 `experimental/sgl-router/` 建立完整 knowledge graph。

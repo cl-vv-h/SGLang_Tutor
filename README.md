@@ -7,11 +7,12 @@
 - `python/`：从 SGLang 原仓库保留的 Python 版本相关源码，供教学文档引用和源码阅读使用。
 - `sgl-kernel/`：SGLang Python runtime 会直接引用的 kernel 代码与 Python 包，例如 `sgl_kernel` 和 `torch.ops.sgl_kernel.*`。
 - `rust/sglang-grpc/`：`python/pyproject.toml` 中声明的 Rust gRPC 扩展源码，用于保留 Python 包的源码构建路径。
+- `experimental/sgl-router/`：从 SGLang 上游补充的 Rust router 源码，用于讲解 KV-aware、OpenAI-compatible worker 路由器。
 - `proto/sglang/runtime/v1/sglang.proto`：`rust/sglang-grpc` 构建时使用的 protobuf 定义。
 - `learning/`：本仓库维护的教学材料，包括 SGLang 源码阅读、调度架构、模型执行链路、Ascend NPU 实践和 AI Infra 基础专题。
 - `LICENSE`：保留 SGLang 上游项目的开源许可证信息。
 
-为了让仓库更聚焦，当前版本没有保存 SGLang 的完整工程内容，例如上游 Docker、benchmark、测试集、文档站点、模型网关和第三方依赖目录等。`python/sglang` 内部的测试与 benchmark 辅助包、`sgl-kernel` 内部的 benchmark/tests 也已移除，仅保留 Python runtime 和源码构建需要的 kernel 源码。需要完整代码、安装方式或最新开发信息时，请访问 SGLang 官方仓库。
+为了让仓库更聚焦，当前版本没有保存 SGLang 的完整工程内容，例如上游 Docker、文档站点、模型网关和第三方依赖目录等。`python/sglang` 内部的测试与 benchmark 辅助包、`sgl-kernel` 内部的 benchmark/tests 也已移除；另外为 router 教学单独保留了 `experimental/sgl-router/`。需要完整代码、安装方式或最新开发信息时，请访问 SGLang 官方仓库。
 
 ## 教学文件
 
@@ -37,6 +38,7 @@ learning/sglang-source-reading/05-speculative-decoding.md
 learning/sglang-source-reading/06-multiprocess-distributed.md
 learning/sglang-source-reading/07-disaggregation-pd.md
 learning/sglang-source-reading/08-lora-serving.md
+learning/sglang-source-reading/09-router.md
 ```
 
 建议阅读顺序：
@@ -51,11 +53,12 @@ learning/sglang-source-reading/08-lora-serving.md
 8. `learning/sglang-source-reading/06-multiprocess-distributed.md`
 9. `learning/sglang-source-reading/07-disaggregation-pd.md`
 10. `learning/sglang-source-reading/08-lora-serving.md`
-11. `learning/ai-infra-basic/README.md`
+11. `learning/sglang-source-reading/09-router.md`
+12. `learning/ai-infra-basic/README.md`
 
 ## 与 SGLang 原项目的关系
 
-SGLang 的版权和许可证归原项目贡献者所有。本仓库只在教学目的下保留必要的 Python 源码片段和阅读材料，并尽量使用相对路径引用源码，避免依赖某台机器上的本地路径或不稳定的代码行号。
+SGLang 的版权和许可证归原项目贡献者所有。本仓库只在教学目的下保留必要源码片段和阅读材料，并尽量使用相对路径引用源码，避免依赖某台机器上的本地路径或不稳定的代码行号。
 
 如果你想运行、部署或参与开发 SGLang，请以官方仓库为准：
 
