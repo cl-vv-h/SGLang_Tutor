@@ -22,6 +22,7 @@ flowchart TD
   H --> I["第 8 步：PD disaggregation on Ascend"]
   I --> J["第 9 步：LoRA / MoE / HiCache 等特性"]
   J --> K["第 10 步：性能压测与排错"]
+  K --> L["第 11 步：推理优化工作地图"]
 ```
 
 一句话主线：**Ascend NPU 适配主要发生在运行环境、设备初始化、默认参数、kernel/backend、通信和少数特性后端；SGLang 的请求调度主链路仍然沿用通用 serving 架构。**
@@ -403,6 +404,29 @@ Fallback：
 4. 单卡跑通后再打开 TP、HiCache、LoRA、PD 分离。
 5. 如果性能异常，优先看 graph 是否 capture/replay、是否走 fallback、是否频繁触发格式转换或内存搬运。
 
+### 11. 推理优化工作地图
+
+目标：面向 SGLang 和 `sglang-kernel-npu` 两个仓库的新人开发者，建立“优化工作应该分几类、每类看什么、改哪里、怎么证明有效”的整体地图。
+
+核心分类：
+
+| 方向 | 主要仓库 | 典型问题 |
+|---|---|---|
+| 服务层调度与 batching | `sglang` | NPU 吃不满、P99 抖动、长 prompt 阻塞 decode。 |
+| 模型执行与 NPU graph | `sglang` | graph capture/replay 不命中、shape 不稳定、显存占用高。 |
+| Attention 与 KV cache | `sglang` + `sglang-kernel-npu` | prefill/decode attention 慢、KV layout 不匹配。 |
+| NPU kernel 融合 | `sglang-kernel-npu` | 算子慢、launch 多、shape 覆盖不足。 |
+| 内存与数据搬运 | `sglang` + `sglang-kernel-npu` | format cast/copy 频繁、HBM 占用异常。 |
+| TP/HCCL 通信 | `sglang` | 多卡扩展效率差、通信等待高。 |
+| 特性组合 | 两者都有 | PD、LoRA、MoE、量化叠加后性能异常。 |
+| Benchmark/Profiling | `sglang` | 性能无法复现、瓶颈归因不清。 |
+
+读完后应该能回答：
+
+- 一个性能问题应该先看 SGLang 主仓还是 kernel 仓？
+- 什么指标说明瓶颈在调度，什么指标说明瓶颈在 kernel？
+- 一个合格的性能优化 PR 应该交付哪些 benchmark、profiling 和正确性验证？
+
 ## 后续拆分计划
 
 本目录后续建议按下面顺序继续扩展：
@@ -418,6 +442,7 @@ Fallback：
 9. [08-ascend-pd-disaggregation.md](./08-ascend-pd-disaggregation.md)：Ascend PD 分离与 KV transfer。
 10. [09-lora-moe-feature-branches.md](./09-lora-moe-feature-branches.md)：Ascend LoRA、MoE stream、fallback。
 11. [10-benchmark-debugging.md](./10-benchmark-debugging.md)：压测方法、日志定位、性能问题排查。
+12. [11-performance-optimization-work-map.md](./11-performance-optimization-work-map.md)：面向 SGLang 与 `sglang-kernel-npu` 开发者的推理优化方向分类。
 
 ## 第一轮阅读任务
 
