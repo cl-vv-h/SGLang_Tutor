@@ -24,6 +24,7 @@ flowchart TD
   J --> K["第 10 步：性能压测与排错"]
   K --> L["第 11 步：推理优化工作地图"]
   L --> M["第 12 步：NPU Profiling 详细教学"]
+  M --> N["第 13 步：多场景模型运行手册"]
 ```
 
 一句话主线：**Ascend NPU 适配主要发生在运行环境、设备初始化、默认参数、kernel/backend、通信和少数特性后端；SGLang 的请求调度主链路仍然沿用通用 serving 架构。**
@@ -440,6 +441,19 @@ Fallback：
 - 如何针对 prefill、decode、TP、多特性组合分别设计 profiling 窗口。
 - 如何把 profiling 结论转化成 `sglang` 或 `sglang-kernel-npu` 的开发任务。
 
+### 13. 多场景模型运行手册
+
+目标：把单卡、多卡、PD 分离、在线模型、本地模型、离线模型、LoRA、MoE、量化、多模态、长上下文等场景整理成可复制启动模板。
+
+建议用法：
+
+- 第一次跑 NPU：先看单卡 Dense 模型。
+- 模型放不下：看多卡 TP。
+- 网络不稳定：看 ModelScope、本地 Hugging Face 或离线拷贝。
+- 需要拆分 prefill/decode：看 PD 分离模板。
+- 需要跑特殊能力：看 LoRA、MoE、量化、多模态模板。
+- 需要定位性能：再回到第 12 讲 profiling。
+
 ## 后续拆分计划
 
 本目录后续建议按下面顺序继续扩展：
@@ -457,6 +471,7 @@ Fallback：
 11. [10-benchmark-debugging.md](./10-benchmark-debugging.md)：压测方法、日志定位、性能问题排查。
 12. [11-performance-optimization-work-map.md](./11-performance-optimization-work-map.md)：面向 SGLang 与 `sglang-kernel-npu` 开发者的推理优化方向分类。
 13. [12-npu-profiling-guide.md](./12-npu-profiling-guide.md)：SGLang-NPU profiling 流程、NPU trace 解读和性能归因模板。
+14. [13-run-models-by-scenario.md](./13-run-models-by-scenario.md)：单卡、多卡、PD、在线/离线、LoRA、MoE、量化、多模态等场景启动模板。
 
 ## 第一轮阅读任务
 
