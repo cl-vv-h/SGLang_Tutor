@@ -13,7 +13,8 @@ flowchart TD
   E --> F["第 6 讲：多进程 / 多卡 / 分布式"]
   F --> G["第 7 讲：Disaggregation / PD 分离"]
   G --> H["第 8 讲：LoRA Serving / Adapter 热加载"]
-  H --> I["第 9 讲：Structured Output / Grammar 约束生成"]
+  H --> I["第 9 讲：Router 架构与源码解析"]
+  I --> J["第 10 讲：Structured Output / Grammar 约束生成"]
 ```
 
 ## 已生成内容
@@ -27,6 +28,7 @@ flowchart TD
 - [06-multiprocess-distributed.md](./06-multiprocess-distributed.md)：理解 Engine 如何拉起 Tokenizer/Scheduler/Detokenizer，TP/PP/DP/DP attention 如何组织 rank 与通信。
 - [07-disaggregation-pd.md](./07-disaggregation-pd.md)：理解 Prefill/Decode 分离部署、bootstrap/prealloc/transfer 队列、KV sender/receiver 和 transfer backend。
 - [08-lora-serving.md](./08-lora-serving.md)：理解 LoRA adapter 注册、热加载/卸载、Scheduler 混批约束、LoRAMemoryPool、LoRABatchInfo 和 LoRA kernel 执行路径。
+- [09-router.md](./09-router.md)：理解 SGLang 中多层 router 的含义，包括 SmartRouter、调度模拟路由、PD bootstrap route、MoE expert router 和 routed experts 返回链路。
 
 ## 怎么使用这些笔记
 
