@@ -471,7 +471,7 @@ Fallback：
 11. [10-benchmark-debugging.md](./10-benchmark-debugging.md)：压测方法、日志定位、性能问题排查。
 12. [11-performance-optimization-work-map.md](./11-performance-optimization-work-map.md)：面向 SGLang 与 `sglang-kernel-npu` 开发者的推理优化方向分类。
 13. [12-npu-profiling-guide.md](./12-npu-profiling-guide.md)：SGLang-NPU profiling 流程、NPU trace 解读和性能归因模板。
-14. [13-run-models-by-scenario.md](./13-run-models-by-scenario.md)：单卡、多卡、PD、在线/离线、LoRA、MoE、量化、多模态等场景启动模板。
+14. [13-run-models-by-scenario.md](./13-run-models-by-scenario.md)：单卡、多卡、PD 分离、在线/离线、LoRA、MoE、量化、多模态等场景的脚本化启动、验收和跑测模板。
 
 ## 第一轮阅读任务
 

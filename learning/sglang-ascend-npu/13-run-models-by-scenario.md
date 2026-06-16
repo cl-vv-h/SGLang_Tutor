@@ -110,6 +110,79 @@ device=npu
 attention_backend=ascend
 ```
 
+### 0.4 脚本目录约定
+
+本讲后续所有脚本都建议放在个人工作目录里，不写入系统目录，也不修改全局 profile：
+
+```bash
+export WORKSPACE=/workspace/sglang-npu
+mkdir -p "$WORKSPACE/scripts"/{models,single,tp,pd,docker,bench}
+mkdir -p "$WORKSPACE/logs"/{single,tp,pd,docker,bench}
+```
+
+脚本统一遵循三个原则：
+
+- 所有环境变量只在当前脚本进程内 `export`，不写入 `/etc/profile`、`~/.bashrc`、`~/.profile`。
+- 所有日志写到 `$WORKSPACE/logs/<scenario>`，所有 PID 写到对应场景目录，便于停服。
+- 所有模型、缓存、源码都放在 `$WORKSPACE` 或宿主机 `/home/{myspace}/sglang-npu-workspace` 下。
+
+一个最小脚本骨架如下：
+
+```bash
+cat > "$WORKSPACE/scripts/single/run_single_qwen.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORKSPACE=${WORKSPACE:-/workspace/sglang-npu}
+MODEL_ROOT=${MODEL_ROOT:-$WORKSPACE/models}
+LOG_ROOT=${LOG_ROOT:-$WORKSPACE/logs}
+mkdir -p "$LOG_ROOT/single"
+
+export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0}
+
+exec > >(tee -a "$LOG_ROOT/single/qwen-single.log") 2>&1
+exec sglang serve \
+  --model-path "$MODEL_ROOT/Qwen2.5-7B-Instruct" \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --device npu \
+  --attention-backend ascend \
+  --base-gpu-id 0 \
+  --tp-size 1
+SH
+
+chmod +x "$WORKSPACE/scripts/single/run_single_qwen.sh"
+bash "$WORKSPACE/scripts/single/run_single_qwen.sh"
+```
+
+多卡 TP 脚本只需要把可见卡和 `--tp-size` 对齐：
+
+```bash
+cat > "$WORKSPACE/scripts/tp/run_tp4_qwen.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORKSPACE=${WORKSPACE:-/workspace/sglang-npu}
+MODEL_ROOT=${MODEL_ROOT:-$WORKSPACE/models}
+LOG_ROOT=${LOG_ROOT:-$WORKSPACE/logs}
+mkdir -p "$LOG_ROOT/tp"
+
+export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3}
+
+exec > >(tee -a "$LOG_ROOT/tp/qwen-tp4.log") 2>&1
+exec sglang serve \
+  --model-path "$MODEL_ROOT/Qwen2.5-32B-Instruct" \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --device npu \
+  --attention-backend ascend \
+  --tp-size 4
+SH
+
+chmod +x "$WORKSPACE/scripts/tp/run_tp4_qwen.sh"
+bash "$WORKSPACE/scripts/tp/run_tp4_qwen.sh"
+```
+
 ## 1. 按模型来源区分
 
 ### 1.1 在线模型名启动
@@ -338,58 +411,438 @@ sglang serve \
 - 初次验证。
 - 大多数开发调试。
 
-### 3.2 PD 分离：Prefill Server
+### 3.2 PD 分离：整体拓扑
 
-适合：长 prompt 多、decode 持续时间长、希望 prefill/decode 分开扩容。
+适合：长 prompt 多、decode 持续时间长、希望 prefill 和 decode 分开扩容。官方推荐的 PD 分离实践一般拆成三个入口：
 
-Prefill 侧：
+- Prefill server：负责 prompt prefill，启动时使用 `--disaggregation-mode prefill`，并暴露 bootstrap port。
+- Decode server：负责 token decode，启动时使用 `--disaggregation-mode decode`，并启用 `--pd-disaggregation`。
+- Router：对外提供 OpenAI-compatible API，把请求路由到 prefill/decode worker。
 
-```bash
-export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
-# Atlas 800I A2 且要走 RDMA 时再按团队规范启用：
-# export ASCEND_MF_TRANSFER_PROTOCOL="device_rdma"
+单机双卡最小拓扑可以这样理解：
 
-sglang serve \
-  --model-path "$MODEL_ROOT/Qwen2.5-7B-Instruct" \
-  --host 0.0.0.0 \
-  --port 8100 \
-  --device npu \
-  --attention-backend ascend \
-  --tp-size 1 \
-  --disaggregation-mode prefill \
-  --disaggregation-transfer-backend ascend \
-  --disaggregation-bootstrap-port 8995
+```mermaid
+flowchart LR
+  C["Client / Benchmark"] --> R["sgl-router :8000"]
+  R --> P["Prefill server :8100 / bootstrap :8995 / NPU 0"]
+  R --> D["Decode server :8200 / NPU 1"]
+  P <-. "KV transfer / Ascend backend" .-> D
 ```
 
-### 3.3 PD 分离：Decode Server
+多机时，prefill 和 decode 的 HTTP 地址会变成不同机器的 IP，`ASCEND_MF_STORE_URL`、RDMA/SDMA 协议和网络连通性需要由集群统一约定。本讲先用单机双进程把链路跑通。
 
-Decode 侧：
+### 3.3 PD 分离：公共环境脚本
+
+先创建一个只影响当前 PD 脚本的公共环境文件：
 
 ```bash
-export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
-# export ASCEND_MF_TRANSFER_PROTOCOL="device_rdma"
+mkdir -p "$WORKSPACE/scripts/pd" "$WORKSPACE/logs/pd"
 
-sglang serve \
-  --model-path "$MODEL_ROOT/Qwen2.5-7B-Instruct" \
-  --host 0.0.0.0 \
-  --port 8200 \
+cat > "$WORKSPACE/scripts/pd/env.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+export WORKSPACE=${WORKSPACE:-/workspace/sglang-npu}
+export MODEL_ROOT=${MODEL_ROOT:-$WORKSPACE/models}
+export LOG_ROOT=${LOG_ROOT:-$WORKSPACE/logs}
+export MODEL_PATH=${MODEL_PATH:-$MODEL_ROOT/Qwen2.5-7B-Instruct}
+
+export HOST=${HOST:-0.0.0.0}
+export CLIENT_HOST=${CLIENT_HOST:-127.0.0.1}
+export ROUTER_PORT=${ROUTER_PORT:-8000}
+export PREFILL_PORT=${PREFILL_PORT:-8100}
+export DECODE_PORT=${DECODE_PORT:-8200}
+export PREFILL_BOOTSTRAP_PORT=${PREFILL_BOOTSTRAP_PORT:-8995}
+
+export PREFILL_NPUS=${PREFILL_NPUS:-0}
+export DECODE_NPUS=${DECODE_NPUS:-1}
+export PREFILL_TP_SIZE=${PREFILL_TP_SIZE:-1}
+export DECODE_TP_SIZE=${DECODE_TP_SIZE:-1}
+
+# 同一组 PD worker 必须使用同一个 store URL。
+export ASCEND_MF_STORE_URL=${ASCEND_MF_STORE_URL:-tcp://127.0.0.1:18000}
+
+# 默认先走 SDMA/本机链路。跨机或 Atlas 800I A2 RDMA 场景再按集群规范改成 device_rdma。
+export ASCEND_MF_TRANSFER_PROTOCOL=${ASCEND_MF_TRANSFER_PROTOCOL:-sdma}
+
+mkdir -p "$LOG_ROOT/pd"
+SH
+
+chmod +x "$WORKSPACE/scripts/pd/env.sh"
+```
+
+说明：
+
+- `PREFILL_NPUS=0`、`DECODE_NPUS=1` 表示两个 server 分别绑定不同 NPU。
+- 如果一台机器上只有一张可用 NPU，不建议用 PD 分离做性能结论，只能做功能冒烟。
+- 如果 prefill/decode 各自使用多卡，把 `PREFILL_NPUS` 和 `DECODE_NPUS` 写成逗号分隔，并同步调大对应 `*_TP_SIZE`。
+
+### 3.4 PD 分离：Prefill Server 脚本
+
+Prefill server 脚本：
+
+```bash
+cat > "$WORKSPACE/scripts/pd/start_prefill.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$PD_DIR/env.sh"
+
+export ASCEND_RT_VISIBLE_DEVICES="$PREFILL_NPUS"
+
+exec > >(tee -a "$LOG_ROOT/pd/prefill.log") 2>&1
+exec sglang serve \
+  --model-path "$MODEL_PATH" \
+  --host "$HOST" \
+  --port "$PREFILL_PORT" \
   --device npu \
   --attention-backend ascend \
-  --tp-size 1 \
+  --tp-size "$PREFILL_TP_SIZE" \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend ascend \
+  --disaggregation-bootstrap-port "$PREFILL_BOOTSTRAP_PORT"
+SH
+
+chmod +x "$WORKSPACE/scripts/pd/start_prefill.sh"
+```
+
+前台启动方式，适合第一次排错：
+
+```bash
+bash "$WORKSPACE/scripts/pd/start_prefill.sh"
+```
+
+后台启动方式，适合正式联调：
+
+```bash
+nohup bash "$WORKSPACE/scripts/pd/start_prefill.sh" \
+  > "$LOG_ROOT/pd/prefill.nohup.log" 2>&1 &
+echo $! > "$LOG_ROOT/pd/prefill.pid"
+```
+
+Prefill 就绪检查：
+
+```bash
+curl "http://127.0.0.1:${PREFILL_PORT}/health"
+curl "http://127.0.0.1:${PREFILL_PORT}/server_info"
+grep -Ei "disaggregation|bootstrap|ascend|transfer" "$LOG_ROOT/pd/prefill.log"
+```
+
+### 3.5 PD 分离：Decode Server 脚本
+
+Decode server 脚本：
+
+```bash
+cat > "$WORKSPACE/scripts/pd/start_decode.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$PD_DIR/env.sh"
+
+export ASCEND_RT_VISIBLE_DEVICES="$DECODE_NPUS"
+
+exec > >(tee -a "$LOG_ROOT/pd/decode.log") 2>&1
+exec sglang serve \
+  --model-path "$MODEL_PATH" \
+  --host "$HOST" \
+  --port "$DECODE_PORT" \
+  --device npu \
+  --attention-backend ascend \
+  --tp-size "$DECODE_TP_SIZE" \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend ascend \
   --pd-disaggregation
+SH
+
+chmod +x "$WORKSPACE/scripts/pd/start_decode.sh"
 ```
 
-PD 验收重点：
+启动：
 
-- `memfabric_hybrid` 已安装。
-- Prefill 和 Decode 都能看到同一模型。
-- `ASCEND_MF_STORE_URL` 一致。
-- 日志里出现 Ascend transfer engine 初始化。
-- 先本机双进程验证，再扩展到多机。
+```bash
+nohup bash "$WORKSPACE/scripts/pd/start_decode.sh" \
+  > "$LOG_ROOT/pd/decode.nohup.log" 2>&1 &
+echo $! > "$LOG_ROOT/pd/decode.pid"
+```
 
-### 3.4 后台 Docker 服务
+Decode 就绪检查：
+
+```bash
+curl "http://127.0.0.1:${DECODE_PORT}/health"
+curl "http://127.0.0.1:${DECODE_PORT}/server_info"
+grep -Ei "disaggregation|decode|ascend|transfer" "$LOG_ROOT/pd/decode.log"
+```
+
+### 3.6 PD 分离：Router 脚本
+
+当前仓库内的实验 router 在 `experimental/sgl-router`，命令形态是：
+
+```bash
+sgl-router \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model-id Qwen2.5-7B-Instruct \
+  --tokenizer-path /workspace/sglang-npu/models/Qwen2.5-7B-Instruct/tokenizer.json \
+  --worker-urls http://127.0.0.1:8100 http://127.0.0.1:8200
+```
+
+如果容器内没有 `sgl-router` 二进制，先从源码构建一次：
+
+```bash
+cd /sgl-workspace/sglang/experimental/sgl-router
+cargo build --release
+cp target/release/sgl-router "$WORKSPACE/sgl-router"
+```
+
+Router 启动脚本：
+
+```bash
+cat > "$WORKSPACE/scripts/pd/start_router.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$PD_DIR/env.sh"
+
+ROUTER_BIN=${ROUTER_BIN:-sgl-router}
+if ! command -v "$ROUTER_BIN" >/dev/null 2>&1; then
+  if [ -x "$WORKSPACE/sgl-router" ]; then
+    ROUTER_BIN="$WORKSPACE/sgl-router"
+  else
+    echo "Cannot find sgl-router. Build it from experimental/sgl-router first." >&2
+    exit 1
+  fi
+fi
+
+TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_PATH/tokenizer.json}
+
+exec > >(tee -a "$LOG_ROOT/pd/router.log") 2>&1
+exec "$ROUTER_BIN" \
+  --host "$HOST" \
+  --port "$ROUTER_PORT" \
+  --model-id "$(basename "$MODEL_PATH")" \
+  --tokenizer-path "$TOKENIZER_PATH" \
+  --worker-urls \
+    "http://${CLIENT_HOST}:${PREFILL_PORT}" \
+    "http://${CLIENT_HOST}:${DECODE_PORT}"
+SH
+
+chmod +x "$WORKSPACE/scripts/pd/start_router.sh"
+```
+
+启动：
+
+```bash
+nohup bash "$WORKSPACE/scripts/pd/start_router.sh" \
+  > "$LOG_ROOT/pd/router.nohup.log" 2>&1 &
+echo $! > "$LOG_ROOT/pd/router.pid"
+```
+
+Router 就绪检查：
+
+```bash
+curl "http://127.0.0.1:${ROUTER_PORT}/healthz"
+curl "http://127.0.0.1:${ROUTER_PORT}/readyz"
+curl "http://127.0.0.1:${ROUTER_PORT}/v1/models"
+grep -Ei "worker|prefill|decode|ready|route" "$LOG_ROOT/pd/router.log"
+```
+
+> 如果你使用的是 Kubernetes EndpointSlice 发现模式，router 不再写 `--worker-urls`，而是用 `--service-discovery --prefill-selector ... --decode-selector ...`。本讲先聚焦最容易复现的静态 worker URL 模式。
+
+### 3.7 PD 分离：一键启动、压测和停服
+
+一键启动脚本：
+
+```bash
+cat > "$WORKSPACE/scripts/pd/run_all_local.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$PD_DIR/env.sh"
+
+nohup bash "$PD_DIR/start_prefill.sh" > "$LOG_ROOT/pd/prefill.nohup.log" 2>&1 &
+echo $! > "$LOG_ROOT/pd/prefill.pid"
+sleep 10
+
+nohup bash "$PD_DIR/start_decode.sh" > "$LOG_ROOT/pd/decode.nohup.log" 2>&1 &
+echo $! > "$LOG_ROOT/pd/decode.pid"
+sleep 10
+
+nohup bash "$PD_DIR/start_router.sh" > "$LOG_ROOT/pd/router.nohup.log" 2>&1 &
+echo $! > "$LOG_ROOT/pd/router.pid"
+sleep 3
+
+echo "PD service started."
+echo "Router: http://127.0.0.1:${ROUTER_PORT}"
+echo "Logs: $LOG_ROOT/pd"
+SH
+
+chmod +x "$WORKSPACE/scripts/pd/run_all_local.sh"
+bash "$WORKSPACE/scripts/pd/run_all_local.sh"
+```
+
+功能请求必须打到 router，而不是直接打 prefill/decode：
+
+```bash
+curl "http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen2.5-7B-Instruct",
+    "messages": [{"role": "user", "content": "请用三句话解释 PD 分离推理。"}],
+    "temperature": 0,
+    "max_tokens": 128
+  }'
+```
+
+最小压测脚本：
+
+```bash
+cat > "$WORKSPACE/scripts/pd/bench_router.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$PD_DIR/env.sh"
+
+export BENCH_URL="http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions"
+export BENCH_MODEL="$(basename "$MODEL_PATH")"
+export BENCH_RESULT="$LOG_ROOT/pd/bench-router.jsonl"
+export BENCH_NUM_PROMPTS=${BENCH_NUM_PROMPTS:-32}
+export BENCH_INPUT_WORDS=${BENCH_INPUT_WORDS:-512}
+export BENCH_MAX_TOKENS=${BENCH_MAX_TOKENS:-128}
+
+python3 - <<'PY' 2>&1 | tee "$LOG_ROOT/pd/bench-router.log"
+import json
+import os
+import time
+import urllib.request
+
+url = os.environ["BENCH_URL"]
+model = os.environ["BENCH_MODEL"]
+result_path = os.environ["BENCH_RESULT"]
+num_prompts = int(os.environ["BENCH_NUM_PROMPTS"])
+input_words = int(os.environ["BENCH_INPUT_WORDS"])
+max_tokens = int(os.environ["BENCH_MAX_TOKENS"])
+
+prompt = " ".join(["请解释 SGLang NPU PD 分离推理的关键路径。"] * input_words)
+latencies = []
+ok = 0
+
+with open(result_path, "w", encoding="utf-8") as f:
+    for i in range(num_prompts):
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": max_tokens,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        start = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            latency = time.perf_counter() - start
+            usage = data.get("usage", {})
+            row = {
+                "id": i,
+                "ok": True,
+                "latency_s": latency,
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+            }
+            ok += 1
+            latencies.append(latency)
+        except Exception as exc:
+            latency = time.perf_counter() - start
+            row = {"id": i, "ok": False, "latency_s": latency, "error": repr(exc)}
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.flush()
+        print(row)
+
+if latencies:
+    total = sum(latencies)
+    latencies_sorted = sorted(latencies)
+    p50 = latencies_sorted[len(latencies_sorted) // 2]
+    p95 = latencies_sorted[max(0, int(len(latencies_sorted) * 0.95) - 1)]
+    print(
+        json.dumps(
+            {
+                "summary": {
+                    "ok": ok,
+                    "num_prompts": num_prompts,
+                    "avg_latency_s": total / len(latencies),
+                    "p50_latency_s": p50,
+                    "p95_latency_s": p95,
+                    "qps": len(latencies) / total if total else None,
+                    "result_path": result_path,
+                }
+            },
+            ensure_ascii=False,
+        )
+    )
+else:
+    raise SystemExit("all requests failed")
+PY
+SH
+
+chmod +x "$WORKSPACE/scripts/pd/bench_router.sh"
+bash "$WORKSPACE/scripts/pd/bench_router.sh"
+```
+
+跑测结果要同时收集四类信息：
+
+- `bench-router.log`：成功数、平均延迟、P50/P95、QPS。
+- `bench-router.jsonl`：每条请求的 latency、token usage 和错误信息。
+- `router.log`：请求是否稳定进入 worker，是否有 5xx、timeout、circuit breaker。
+- `prefill.log`：prefill batch、bootstrap port、KV transfer 发送侧是否正常。
+- `decode.log`：decode batch、KV transfer 接收侧、持续 decode 是否正常。
+
+停服脚本：
+
+```bash
+cat > "$WORKSPACE/scripts/pd/stop_pd.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$PD_DIR/env.sh"
+
+for name in router decode prefill; do
+  pid_file="$LOG_ROOT/pd/${name}.pid"
+  if [ -f "$pid_file" ]; then
+    pid=$(cat "$pid_file")
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid"
+      echo "stopped $name pid=$pid"
+    fi
+    rm -f "$pid_file"
+  fi
+done
+SH
+
+chmod +x "$WORKSPACE/scripts/pd/stop_pd.sh"
+bash "$WORKSPACE/scripts/pd/stop_pd.sh"
+```
+
+PD 常见问题定位顺序：
+
+1. 先分别访问 prefill/decode 的 `/health` 和 `/server_info`，确认两个 worker 自己可用。
+2. 再访问 router 的 `/healthz`、`/readyz`、`/v1/models`，确认 router 发现了 worker。
+3. 小流量请求先跑通，再增加 `--num-prompts` 和 `--request-rate`。
+4. 如果 router 正常但请求失败，优先看 decode 日志里的 KV 接收和 bootstrap 信息。
+5. 如果跨机失败，优先检查 `ASCEND_MF_STORE_URL`、端口、防火墙、RDMA 网卡和 `ASCEND_MF_TRANSFER_PROTOCOL`。
+
+### 3.8 后台 Docker 服务
 
 适合：长时间运行，或者把服务交给其他人调用。
 
@@ -683,40 +1136,45 @@ sglang serve \
   2>&1 | tee "$LOG_ROOT/tp4-graph.log"
 ```
 
-### 6.3 PD 分离 + 本地模型 + 双进程
+### 6.3 PD 分离 + 本地模型 + 双卡双进程 + Router
 
-先启动 prefill：
+这是最推荐的 PD 入门组合：模型从本地目录读取，prefill 使用 NPU 0，decode 使用 NPU 1，所有请求统一打到 router。
 
 ```bash
-export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
+export WORKSPACE=/workspace/sglang-npu
+export MODEL_PATH="$WORKSPACE/models/Qwen2.5-7B-Instruct"
+export PREFILL_NPUS=0
+export DECODE_NPUS=1
+export ROUTER_PORT=8000
+export PREFILL_PORT=8100
+export DECODE_PORT=8200
+export PREFILL_BOOTSTRAP_PORT=8995
 
-sglang serve \
-  --model-path "$MODEL_ROOT/Qwen2.5-7B-Instruct" \
-  --host 0.0.0.0 \
-  --port 8100 \
-  --device npu \
-  --attention-backend ascend \
-  --tp-size 1 \
-  --disaggregation-mode prefill \
-  --disaggregation-transfer-backend ascend \
-  --disaggregation-bootstrap-port 8995
+bash "$WORKSPACE/scripts/pd/run_all_local.sh"
 ```
 
-再启动 decode：
+然后压测 router：
 
 ```bash
-export ASCEND_MF_STORE_URL="tcp://127.0.0.1:18000"
+bash "$WORKSPACE/scripts/pd/bench_router.sh"
+```
 
-sglang serve \
-  --model-path "$MODEL_ROOT/Qwen2.5-7B-Instruct" \
-  --host 0.0.0.0 \
-  --port 8200 \
-  --device npu \
-  --attention-backend ascend \
-  --tp-size 1 \
-  --disaggregation-mode decode \
-  --disaggregation-transfer-backend ascend \
-  --pd-disaggregation
+看结果时不要只看 benchmark 输出，还要同时看：
+
+```bash
+tail -n 100 "$WORKSPACE/logs/pd/router.log"
+tail -n 100 "$WORKSPACE/logs/pd/prefill.log"
+tail -n 100 "$WORKSPACE/logs/pd/decode.log"
+```
+
+如果要切到多卡 prefill + 多卡 decode，可以这样覆盖变量：
+
+```bash
+export PREFILL_NPUS=0,1
+export PREFILL_TP_SIZE=2
+export DECODE_NPUS=2,3
+export DECODE_TP_SIZE=2
+bash "$WORKSPACE/scripts/pd/run_all_local.sh"
 ```
 
 ## 7. 场景选择速查表
