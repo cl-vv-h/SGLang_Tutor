@@ -25,6 +25,7 @@ flowchart TD
   K --> L["第 11 步：推理优化工作地图"]
   L --> M["第 12 步：NPU Profiling 详细教学"]
   M --> N["第 13 步：多场景模型运行手册"]
+  N --> O["第 14 步：精度/性能测试与精度定位"]
 ```
 
 一句话主线：**Ascend NPU 适配主要发生在运行环境、设备初始化、默认参数、kernel/backend、通信和少数特性后端；SGLang 的请求调度主链路仍然沿用通用 serving 架构。**
@@ -76,6 +77,9 @@ mindmap
       单卡冒烟
       多卡 TP
       benchmark
+      accuracy eval
+      ais_bench
+      token / logits diff
       内存
       graph capture
       kernel fallback
@@ -454,6 +458,24 @@ Fallback：
 - 需要跑特殊能力：看 LoRA、MoE、量化、多模态模板。
 - 需要定位性能：再回到第 12 讲 profiling。
 
+### 14. 精度/性能测试与精度定位
+
+目标：建立可复现的模型精度、服务性能和精度问题定位流程。
+
+重点：
+
+- 如何固定模型、数据、采样参数和启动参数。
+- 如何通过 OpenAI-compatible API 跑性能 workload。
+- 如何用 JSONL 数据集做端到端 accuracy eval。
+- `ais_bench` 在 Ascend 离线推理验证中的角色，以及它和 SGLang serving 评测的边界。
+- 如何沿 `request -> tokenizer -> scheduler -> ForwardBatch -> ModelRunner -> attention/KV -> logits -> sampler` 的流程定位精度问题。
+
+读完后应该能回答：
+
+- 一个精度问题应该先看任务级 accuracy、token diff，还是 logits diff？
+- graph、TP、PD、量化、LoRA、MoE 分别可能引入哪些精度风险？
+- 为什么 `ais_bench` 适合作为 Ascend 离线参考，但不能替代 SGLang 端到端 serving 评测？
+
 ## 后续拆分计划
 
 本目录后续建议按下面顺序继续扩展：
@@ -472,6 +494,7 @@ Fallback：
 12. [11-performance-optimization-work-map.md](./11-performance-optimization-work-map.md)：面向 SGLang 与 `sglang-kernel-npu` 开发者的推理优化方向分类。
 13. [12-npu-profiling-guide.md](./12-npu-profiling-guide.md)：SGLang-NPU profiling 流程、NPU trace 解读和性能归因模板。
 14. [13-run-models-by-scenario.md](./13-run-models-by-scenario.md)：单卡、多卡、PD 分离、在线/离线、LoRA、MoE、量化、多模态等场景的脚本化启动、验收和跑测模板。
+15. [14-accuracy-performance-testing-and-debugging.md](./14-accuracy-performance-testing-and-debugging.md)：模型精度、性能测试、`ais_bench` 参考链路和按执行流程定位精度问题的方法论。
 
 ## 第一轮阅读任务
 
