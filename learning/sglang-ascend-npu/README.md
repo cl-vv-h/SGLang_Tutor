@@ -25,7 +25,8 @@ flowchart TD
   K --> L["第 11 步：推理优化工作地图"]
   L --> M["第 12 步：NPU Profiling 详细教学"]
   M --> N["第 13 步：多场景模型运行手册"]
-  N --> O["第 14 步：精度/性能测试与精度定位"]
+  N --> O["第 14 步：性能测试"]
+  O --> P["第 15 步：精度测试与精度定位"]
 ```
 
 一句话主线：**Ascend NPU 适配主要发生在运行环境、设备初始化、默认参数、kernel/backend、通信和少数特性后端；SGLang 的请求调度主链路仍然沿用通用 serving 架构。**
@@ -458,16 +459,34 @@ Fallback：
 - 需要跑特殊能力：看 LoRA、MoE、量化、多模态模板。
 - 需要定位性能：再回到第 12 讲 profiling。
 
-### 14. 精度/性能测试与精度定位
+### 14. 性能测试
 
-目标：建立可复现的模型精度、服务性能和精度问题定位流程。
+目标：建立可复现的 SGLang-NPU 性能测试流程，能比较单卡、多卡、PD、graph、长上下文等场景下的吞吐、延迟和稳定性。
 
 重点：
 
-- 如何固定模型、数据、采样参数和启动参数。
-- 如何通过 OpenAI-compatible API 跑性能 workload。
+- 如何固定环境、模型、启动参数和 workload。
+- 如何用 OpenAI-compatible API 跑压测。
+- 如何设计短输入短输出、长输入短输出、短输入长输出、长输入长输出四类 workload。
+- 如何分析 QPS、input tokens/s、output tokens/s、TTFT、P95/P99 和 error rate。
+- 如何区分 prefill、decode、scheduler、NPU graph、TP/HCCL、PD/router/KV transfer 瓶颈。
+
+读完后应该能回答：
+
+- 为什么性能测试不能只报平均 QPS？
+- 怎样通过 workload 判断瓶颈偏 prefill 还是偏 decode？
+- graph、TP 和 PD 分离分别应该怎么做性能对比？
+
+### 15. 精度测试与精度定位
+
+目标：建立可复现的模型精度测试流程，并掌握按 SGLang 执行流程定位精度问题的方法。
+
+重点：
+
+- 如何固定模型、数据、采样参数、chat template 和 reference。
 - 如何用 JSONL 数据集做端到端 accuracy eval。
 - `ais_bench` 在 Ascend 离线推理验证中的角色，以及它和 SGLang serving 评测的边界。
+- 如何做任务级 accuracy、token/text diff、logits diff 三层定位。
 - 如何沿 `request -> tokenizer -> scheduler -> ForwardBatch -> ModelRunner -> attention/KV -> logits -> sampler` 的流程定位精度问题。
 
 读完后应该能回答：
@@ -494,7 +513,8 @@ Fallback：
 12. [11-performance-optimization-work-map.md](./11-performance-optimization-work-map.md)：面向 SGLang 与 `sglang-kernel-npu` 开发者的推理优化方向分类。
 13. [12-npu-profiling-guide.md](./12-npu-profiling-guide.md)：SGLang-NPU profiling 流程、NPU trace 解读和性能归因模板。
 14. [13-run-models-by-scenario.md](./13-run-models-by-scenario.md)：单卡、多卡、PD 分离、在线/离线、LoRA、MoE、量化、多模态等场景的脚本化启动、验收和跑测模板。
-15. [14-accuracy-performance-testing-and-debugging.md](./14-accuracy-performance-testing-and-debugging.md)：模型精度、性能测试、`ais_bench` 参考链路和按执行流程定位精度问题的方法论。
+15. [14-performance-testing.md](./14-performance-testing.md)：SGLang-NPU 单卡、多卡、PD、长上下文等场景的性能测试、workload 设计和瓶颈归因。
+16. [15-accuracy-testing-and-debugging.md](./15-accuracy-testing-and-debugging.md)：模型精度测试、`ais_bench` 参考链路、token/logits 对比和按执行流程定位精度问题的方法论。
 
 ## 第一轮阅读任务
 
