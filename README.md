@@ -23,7 +23,7 @@ learning/sglang-source-reading/
 learning/ai-infra-basic/
 ```
 
-其中 `learning/sglang-source-reading/` 偏 SGLang 源码主链路，`learning/ai-infra-basic/` 偏 LLM serving 背后的基础机制，按推理基础、调度、KV Cache、Attention Kernel、执行图、并行、KV 传输、投机解码、量化、LoRA 和性能分析组织。
+其中 `learning/sglang-source-reading/` 偏 SGLang 源码主链路，`learning/ai-infra-basic/` 偏 LLM serving 背后的基础机制，按推理基础、调度、KV Cache、Attention Kernel、执行图、Mamba/SSM、并行、KV 传输、投机解码、量化、LoRA 和性能分析组织。
 
 源码阅读专题当前包含：
 
