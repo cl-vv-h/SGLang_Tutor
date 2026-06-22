@@ -7,6 +7,8 @@
 | 文件 | 内容 |
 |---|---|
 | [01-mamba-and-sglang-state.md](./01-mamba-and-sglang-state.md) | 从 State Space Model 和 Mamba 基本原理讲到 SGLang 中 Mamba state 的内存、调度和数据流 |
+| [02-mamba-principles.md](./02-mamba-principles.md) | 专门讲 Mamba 的模型原理、Mamba2 block 的 forward 实现、prefill/decode kernel 路径 |
+| [03-mamba-radix-cache.md](./03-mamba-radix-cache.md) | 专门讲 Mamba 与 Radix Cache 的关系、代码依赖、状态插入/命中/释放流程 |
 
 ## 推荐先理解的背景
 
