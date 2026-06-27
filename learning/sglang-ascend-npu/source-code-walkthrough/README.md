@@ -96,7 +96,7 @@ flowchart LR
 
 #### 00. 源码阅读方法与 Ascend 分支搜索法
 
-计划文件：`00-reading-method-and-branch-search.md`
+已完成：[00-reading-method-and-branch-search.md](./00-reading-method-and-branch-search.md)
 
 内容：
 
@@ -107,7 +107,7 @@ flowchart LR
 
 #### 01. NPU 平台识别与进程启动
 
-计划文件：`01-platform-detection-and-process-startup.md`
+已完成：[01-platform-detection-and-process-startup.md](./01-platform-detection-and-process-startup.md)
 
 关键源码：
 
@@ -120,7 +120,7 @@ flowchart LR
 
 #### 02. ServerArgs 校验与 NPU 默认参数
 
-计划文件：`02-server-args-and-npu-defaults.md`
+已完成：[02-server-args-and-npu-defaults.md](./02-server-args-and-npu-defaults.md)
 
 关键对象：`ServerArgs`、`init_npu_backend()`、`set_default_server_args()`。
 
@@ -133,7 +133,7 @@ flowchart LR
 
 #### 03. 请求主链路中的 NPU 接入点
 
-计划文件：`03-request-lifecycle-npu-branch-points.md`
+已完成：[03-request-lifecycle-npu-branch-points.md](./03-request-lifecycle-npu-branch-points.md)
 
 调用链：
 
@@ -152,7 +152,7 @@ HTTP API
 
 #### 04. 模型加载、权重放置与 dtype/layout
 
-计划文件：`04-model-loading-dtype-and-layout.md`
+已完成：[04-model-loading-dtype-and-layout.md](./04-model-loading-dtype-and-layout.md)
 
 关键源码：
 
@@ -165,7 +165,7 @@ HTTP API
 
 #### 05. ModelRunner、ForwardBatch 与设备输入缓冲区
 
-计划文件：`05-model-runner-forward-batch-and-input-buffers.md`
+已完成：[05-model-runner-forward-batch-and-input-buffers.md](./05-model-runner-forward-batch-and-input-buffers.md)
 
 关键源码：
 
