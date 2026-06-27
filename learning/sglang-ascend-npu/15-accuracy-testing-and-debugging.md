@@ -14,7 +14,10 @@
 flowchart TD
   A["固定模型和参数"] --> B["建立 reference"]
   B --> C["准备数据集"]
-  C --> D["端到端 accuracy eval"]
+  C --> C1["自建 JSONL smoke"]
+  C --> C2["EvalScope 标准数据集"]
+  C1 --> D["端到端 accuracy eval"]
+  C2 --> D
   D --> E{"是否退化?"}
   E -->|"否"| F["记录基线"]
   E -->|"是"| G["固定 prompt 复现"]
@@ -273,7 +276,306 @@ python3 "$ACC_ROOT/scripts/eval_jsonl_openai.py" \
 - 请求参数。
 - 服务启动参数。
 
-## 3. ais_bench 的角色
+## 3. 使用 EvalScope 评测 SGLang 服务
+
+EvalScope 是 ModelScope 社区提供的大模型评测框架。对于本教程，它最重要的价值是：不需要让 EvalScope 直接加载 NPU 模型，而是通过 OpenAI-compatible API 调用已经启动的 SGLang 服务，再完成数据集加载、prompt 构造、请求、答案解析、指标计算和结果落盘。
+
+```mermaid
+flowchart LR
+  D["ModelScope / Hugging Face 数据集"] --> E["EvalScope evaluator"]
+  E -->|"OpenAI-compatible /v1"| S["SGLang Ascend NPU server"]
+  S -->|"模型输出"| E
+  E --> P["predictions"]
+  E --> R["reviews / reports"]
+  E --> L["logs / progress.json"]
+```
+
+官方入口：
+
+- [EvalScope GitHub](https://github.com/modelscope/evalscope)
+- [EvalScope Quick Start](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html)
+- [EvalScope 参数说明](https://evalscope.readthedocs.io/en/latest/get_started/parameters.html)
+
+### 3.1 EvalScope 和本讲自建 JSONL 脚本的分工
+
+| 工具 | 更适合做什么 |
+|---|---|
+| 本讲 `eval_jsonl_openai.py` | 最小复现、内部样例、快速修改 normalize 规则。 |
+| EvalScope | 标准数据集、统一指标、结果归档、多次实验对比。 |
+| ais_bench | OM 模型和 Ascend 离线推理链路验证。 |
+
+推荐先用自建 smoke JSONL 确认接口，再用 EvalScope 跑 5 条数据，最后才跑完整数据集。
+
+### 3.2 在个人目录创建隔离环境
+
+EvalScope 只负责访问 HTTP API，不需要安装进 SGLang 的运行环境。单独创建 venv 可以避免它的 Python 依赖影响 `torch_npu`、SGLang 和 `sglang-kernel-npu`：
+
+```bash
+export WORKSPACE=/workspace/sglang-npu
+export ACC_ROOT=$WORKSPACE/accuracy
+export EVALSCOPE_ROOT=$ACC_ROOT/evalscope
+
+mkdir -p "$WORKSPACE/venvs" "$EVALSCOPE_ROOT"/{cache,runs,configs,logs}
+python3 -m venv "$WORKSPACE/venvs/evalscope"
+source "$WORKSPACE/venvs/evalscope/bin/activate"
+
+python3 -m pip install -U pip setuptools wheel
+python3 -m pip install evalscope
+```
+
+检查安装并保存依赖快照：
+
+```bash
+which python3
+which evalscope
+python3 -c "from importlib.metadata import version; print(version('evalscope'))"
+evalscope eval --help | head -n 40
+python3 -m pip freeze > "$EVALSCOPE_ROOT/evalscope-requirements.txt"
+```
+
+需要 EvalScope Web 服务和可视化能力时再安装额外依赖：
+
+```bash
+python3 -m pip install 'evalscope[service]'
+```
+
+不要把上述依赖安装进 SGLang 官方容器的全局 Python，也不要使用 `sudo pip install`。
+
+如果需要调试 EvalScope 源码，仍然把仓库放在个人目录：
+
+```bash
+mkdir -p "$WORKSPACE/src"
+git clone https://github.com/modelscope/evalscope.git "$WORKSPACE/src/evalscope"
+source "$WORKSPACE/venvs/evalscope/bin/activate"
+python3 -m pip install -e "$WORKSPACE/src/evalscope"
+```
+
+普通使用优先安装 PyPI 包；只有需要调试 dataset adapter、答案解析或评测逻辑时才使用源码可编辑安装，并记录具体 commit。
+
+### 3.3 配置个人缓存和结果目录
+
+创建局部环境脚本：
+
+```bash
+cat > "$EVALSCOPE_ROOT/env.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+export WORKSPACE=${WORKSPACE:-/workspace/sglang-npu}
+export ACC_ROOT=${ACC_ROOT:-$WORKSPACE/accuracy}
+export EVALSCOPE_ROOT=${EVALSCOPE_ROOT:-$ACC_ROOT/evalscope}
+export MODEL_ID=${MODEL_ID:-Qwen2.5-7B-Instruct}
+export BASE_URL=${BASE_URL:-http://127.0.0.1:8000}
+
+# EvalScope、ModelScope 和 Hugging Face 的下载内容都固定在个人目录。
+export EVALSCOPE_CACHE=${EVALSCOPE_CACHE:-$EVALSCOPE_ROOT/cache/evalscope}
+export MODELSCOPE_CACHE=${MODELSCOPE_CACHE:-$EVALSCOPE_ROOT/cache/modelscope/hub}
+export HF_HOME=${HF_HOME:-$EVALSCOPE_ROOT/cache/huggingface}
+export EVALSCOPE_LANGUAGE=${EVALSCOPE_LANGUAGE:-zh}
+
+mkdir -p \
+  "$EVALSCOPE_CACHE" \
+  "$MODELSCOPE_CACHE" \
+  "$HF_HOME" \
+  "$EVALSCOPE_ROOT"/{runs,configs,logs}
+SH
+
+chmod +x "$EVALSCOPE_ROOT/env.sh"
+source "$EVALSCOPE_ROOT/env.sh"
+```
+
+这些变量只对当前 shell 和它启动的 EvalScope 进程生效，不要追加到 `~/.bashrc`、`~/.profile` 或 `/etc/profile`。
+
+### 3.4 确认 SGLang API 地址和模型 ID
+
+先确认服务健康：
+
+```bash
+source "$EVALSCOPE_ROOT/env.sh"
+curl -f "$BASE_URL/health"
+curl -s "$BASE_URL/v1/models" | tee "$EVALSCOPE_ROOT/logs/models.json"
+```
+
+EvalScope 的 `--api-url` 要传 API 根路径，例如：
+
+```text
+http://127.0.0.1:8000/v1
+```
+
+`--model` 必须和 `/v1/models` 返回的模型 ID 一致。如果 SGLang 启动时配置了 served model name，应使用 served model name，而不是模型目录的 basename。
+
+根据部署位置选择 `BASE_URL`：
+
+| EvalScope 位置 | SGLang 位置 | `BASE_URL` 示例 |
+|---|---|---|
+| 同一容器 | 同一容器 | `http://127.0.0.1:8000` |
+| 宿主机 | 使用 `--network=host` 的 SGLang 容器 | `http://127.0.0.1:8000` |
+| 独立容器 | 同一个自定义 Docker network | `http://<sglang-container-name>:8000` |
+| 另一台服务器 | 远程 SGLang 节点 | `http://<server-ip>:8000` |
+
+不同容器时，`127.0.0.1` 只指向 EvalScope 自己所在的容器。不要为了绕过网络配置就把无鉴权的 SGLang API 暴露到公共网络。
+
+先直接验证 OpenAI API：
+
+```bash
+curl "$BASE_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"$MODEL_ID\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"只输出数字 5：2+3 等于多少？\"}],
+    \"temperature\": 0,
+    \"max_tokens\": 32
+  }"
+```
+
+### 3.5 第一次冒烟评测
+
+EvalScope 默认从 ModelScope 获取数据集。先用 `--limit 5` 验证下载、请求、解析和评分链路：
+
+```bash
+source "$WORKSPACE/venvs/evalscope/bin/activate"
+source "$EVALSCOPE_ROOT/env.sh"
+
+evalscope eval \
+  --model "$MODEL_ID" \
+  --api-url "$BASE_URL/v1" \
+  --api-key EMPTY \
+  --eval-type openai_api \
+  --datasets gsm8k ceval \
+  --limit 5 \
+  --eval-batch-size 1 \
+  --seed 42 \
+  --generation-config '{"temperature":0,"top_p":1,"max_tokens":2048,"stream":false,"timeout":300,"retries":2}' \
+  --enable-progress-tracker \
+  --work-dir "$EVALSCOPE_ROOT/runs/smoke" \
+  2>&1 | tee "$EVALSCOPE_ROOT/logs/smoke.log"
+```
+
+精度冒烟先用 `--eval-batch-size 1`，可以排除并发和混合 batch 对复现的干扰。冒烟通过后再增加并发验证 serving 稳定性，但正式基线应保持固定配置。
+
+### 3.6 正式数据集评测
+
+冒烟通过后，移除 `--limit` 跑完整数据集：
+
+```bash
+RUN_NAME="qwen25-7b-npu-$(date +%Y%m%d-%H%M%S)"
+
+evalscope eval \
+  --model "$MODEL_ID" \
+  --api-url "$BASE_URL/v1" \
+  --api-key EMPTY \
+  --eval-type openai_api \
+  --datasets gsm8k ceval mmlu \
+  --eval-batch-size 1 \
+  --seed 42 \
+  --generation-config '{"temperature":0,"top_p":1,"max_tokens":4096,"stream":false,"timeout":600,"retries":2}' \
+  --enable-progress-tracker \
+  --work-dir "$EVALSCOPE_ROOT/runs/$RUN_NAME" \
+  2>&1 | tee "$EVALSCOPE_ROOT/logs/$RUN_NAME.log"
+```
+
+不同模型需要调整：
+
+- 普通 instruct 模型：优先 `temperature=0`、`top_p=1`。
+- reasoning 模型：提高 `max_tokens`，并检查数据集是否需要移除 `<think>...</think>` 的后处理。
+- 代码数据集：涉及代码执行时应使用隔离 sandbox，不要直接在共享服务器宿主环境执行未知代码。
+- 某些依赖 logits 的数据集不支持 OpenAI API 模式，选择数据集前先查看 EvalScope 对应 benchmark 页面。
+
+### 3.7 使用 YAML 固化配置
+
+为了让不同 commit 的结果可比较，建议把配置保存到个人目录：
+
+```bash
+cat > "$EVALSCOPE_ROOT/configs/sglang_npu_accuracy.yaml" <<YAML
+model: $MODEL_ID
+api_url: $BASE_URL/v1
+api_key: EMPTY
+eval_type: openai_api
+eval_backend: Native
+datasets:
+  - gsm8k
+  - ceval
+limit: 10
+eval_batch_size: 1
+seed: 42
+generation_config:
+  temperature: 0
+  top_p: 1
+  max_tokens: 2048
+  stream: false
+  timeout: 300
+  retries: 2
+work_dir: $EVALSCOPE_ROOT/runs/yaml-smoke
+enable_progress_tracker: true
+YAML
+```
+
+运行 YAML：
+
+```bash
+python3 - <<'PY'
+import os
+from evalscope import run_task
+
+config = os.path.join(
+    os.environ["EVALSCOPE_ROOT"],
+    "configs",
+    "sglang_npu_accuracy.yaml",
+)
+run_task(task_cfg=config)
+PY
+```
+
+提交精度报告时，应同时保存这份 YAML、SGLang 启动命令和代码 commit。
+
+### 3.8 结果目录怎么读
+
+EvalScope 的 `work-dir` 中通常包含：
+
+```text
+runs/<run-name>/
+├── configs/       # 本次任务的最终配置
+├── logs/          # EvalScope 运行日志
+├── predictions/   # 模型原始预测
+├── reviews/       # 逐样例评分和解析结果
+├── reports/       # 汇总指标
+└── progress.json  # 开启 progress tracker 后生成
+```
+
+定位精度回退时，推荐按顺序看：
+
+1. `reports`：确认哪个数据集或 subset 下降。
+2. `reviews`：筛选 reference 正确、candidate 错误的样例。
+3. `predictions`：检查模型原始输出、思维链、答案格式和截断。
+4. `configs`：确认两次实验的 generation config、数据集和模型 ID 一致。
+5. SGLang 日志：按样例定位请求执行路径。
+
+复用已有推理结果重新评分时，可以使用当前版本帮助中显示的 `--use-cache <run-dir>`；如果只修改答案解析或评分逻辑，优先复用 prediction，避免再次跑完整模型推理。执行前先用 `evalscope eval --help` 核对当前版本的 cache/rerun 参数。
+
+### 3.9 可选：启动本地结果服务
+
+安装了 `evalscope[service]` 后，可以仅绑定 loopback 地址，避免共享服务器上对其他用户暴露端口：
+
+```bash
+source "$WORKSPACE/venvs/evalscope/bin/activate"
+evalscope service --host 127.0.0.1 --port 9000
+```
+
+浏览器访问 `http://127.0.0.1:9000`。如果服务器是远程机器，应通过 SSH 端口转发访问，不要为了方便改成公共监听地址。
+
+### 3.10 EvalScope 常见问题
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| API 返回 404 | `--api-url` 没有指向 `/v1` | 改成 `$BASE_URL/v1`。 |
+| model not found | `--model` 与 `/v1/models` 不一致 | 使用服务实际暴露的模型 ID。 |
+| 数据集下载到用户默认 home | 缓存变量未在当前 shell 生效 | 先 `source "$EVALSCOPE_ROOT/env.sh"`。 |
+| 答案内容正确但得分为 0 | 输出格式、答案提取或 reasoning 标签影响评分 | 查看 `predictions` 和 `reviews`，调整 dataset args/过滤器。 |
+| 大量 timeout | `max_tokens` 或 timeout 太小，服务过载 | 先并发 1，增加 timeout，查看 SGLang 日志。 |
+| 两次结果无法比较 | generation config、数据集版本或模型 ID 不一致 | 对比 `configs` 并记录依赖版本。 |
+| API 模式数据集不可用 | 数据集需要 logits 或本地模型能力 | 换支持 API 评测的数据集或使用其他 reference。 |
+
+## 4. ais_bench 的角色
 
 `ais_bench` 是 Ascend 生态里常用的离线推理工具，常用于 OM 模型或 ATC 转换后的模型性能/精度验证。它适合作为 Ascend 离线模型链路的参考，但不能替代 SGLang serving 端到端精度测试。
 
@@ -320,7 +622,7 @@ python3 -m ais_bench \
 - `ais_bench` 更适合定位底层模型/算子链路，不适合覆盖 SGLang 的 scheduler、continuous batching、KV cache 管理和 sampler。
 - 不要把 `ais_bench` 的 QPS 与 SGLang serving QPS 直接比较，它们衡量的系统边界不同。
 
-## 4. 精度问题二分定位
+## 5. 精度问题二分定位
 
 先用开关组合把问题缩小：
 
@@ -342,7 +644,7 @@ python3 -m ais_bench \
 4. 关闭 PD、LoRA、量化、HiCache。
 5. 再逐个打开特性，找到最小复现配置。
 
-## 5. 沿 SGLang 执行流程定位
+## 6. 沿 SGLang 执行流程定位
 
 ```mermaid
 flowchart TD
@@ -359,7 +661,7 @@ flowchart TD
   K --> L["Detokenizer / response"]
 ```
 
-### 5.1 Request 与 chat template
+### 6.1 Request 与 chat template
 
 常见问题：
 
@@ -376,7 +678,7 @@ flowchart TD
 
 如果 token ids 不一致，后面输出不一致是正常现象，先修输入。
 
-### 5.2 TokenizerManager 与 detokenizer
+### 6.2 TokenizerManager 与 detokenizer
 
 常见问题：
 
@@ -395,7 +697,7 @@ curl "$BASE_URL/v1/tokenize" \
 
 如果服务支持 detokenize，也要反向验证 token ids 能否还原文本。
 
-### 5.3 Scheduler、batch、padding、position
+### 6.3 Scheduler、batch、padding、position
 
 典型现象：
 
@@ -413,7 +715,7 @@ curl "$BASE_URL/v1/tokenize" \
 
 如果只有混 batch 错，优先查 `ScheduleBatch`、`ForwardBatch`、attention metadata、position ids、KV slot mapping。
 
-### 5.4 Embedding 与输入 dtype
+### 6.4 Embedding 与输入 dtype
 
 常见问题：
 
@@ -428,7 +730,7 @@ curl "$BASE_URL/v1/tokenize" \
 - 对同一批 `input_ids` 比较 embedding 输出。
 - 单卡正确、TP 错误时，重点看 vocab partition 和 rank 映射。
 
-### 5.5 Attention 与 KV cache
+### 6.5 Attention 与 KV cache
 
 这是 NPU 精度问题最高发区域。
 
@@ -448,7 +750,7 @@ curl "$BASE_URL/v1/tokenize" \
 - dtype 或 format cast 导致误差放大。
 - decode 读取了错误历史 KV。
 
-### 5.6 MLP、Norm、Activation
+### 6.6 MLP、Norm、Activation
 
 常见问题：
 
@@ -464,7 +766,7 @@ curl "$BASE_URL/v1/tokenize" \
 - 关闭可关闭的 fusion 或 graph。
 - 用小模型或少层模型缩短定位时间。
 
-### 5.7 MoE
+### 6.7 MoE
 
 MoE 精度问题通常集中在 routing 和 combine：
 
@@ -480,7 +782,7 @@ MoE 精度问题通常集中在 routing 和 combine：
 2. 对比 shared expert 输出与 routed expert 输出。
 3. 单 batch 单 token 先复现，再扩展到 batch N。
 
-### 5.8 Logits processor 与 sampler
+### 6.8 Logits processor 与 sampler
 
 常见问题：
 
@@ -495,7 +797,7 @@ MoE 精度问题通常集中在 routing 和 combine：
 - 如果 top-1 不同但差距极小，继续看任务级影响。
 - 如果 top-k 排名大范围不同，回到 attention/MLP/logits processor。
 
-### 5.9 NPU graph
+### 6.9 NPU graph
 
 常见问题：
 
@@ -511,7 +813,7 @@ MoE 精度问题通常集中在 routing 和 combine：
 3. 查看 graph capture/replay 日志。
 4. 对比 graph 前后的 logits 或 hidden states。
 
-### 5.10 TP / HCCL
+### 6.10 TP / HCCL
 
 常见问题：
 
@@ -527,7 +829,7 @@ MoE 精度问题通常集中在 routing 和 combine：
 - 小 batch、小 prompt 先复现。
 - 对比各 rank 日志和 tensor 统计量。
 
-### 5.11 PD 分离
+### 6.11 PD 分离
 
 常见问题：
 
@@ -544,7 +846,7 @@ MoE 精度问题通常集中在 routing 和 combine：
 4. 比较普通 serving 与 PD 的首个分叉 token。
 5. 首 token 正确、后续错误时，重点看 decode KV cache index。
 
-## 6. 固定 prompt 对比实践
+## 7. 固定 prompt 对比实践
 
 创建定位 prompt：
 
@@ -642,7 +944,7 @@ python3 "$ACC_ROOT/scripts/compare_two_servers.py" \
 - 只有长 prompt 不同：查 chunked prefill、position、page table。
 - 只有并发不同：查 batch metadata 和 KV slot。
 
-## 7. 精度问题报告模板
+## 8. 精度问题报告模板
 
 ```markdown
 ## 问题现象
@@ -681,7 +983,7 @@ python3 "$ACC_ROOT/scripts/compare_two_servers.py" \
 - 下一步实验：
 ```
 
-## 8. 常见现象速查表
+## 9. 常见现象速查表
 
 | 现象 | 优先怀疑 | 下一步 |
 |---|---|---|
@@ -698,4 +1000,4 @@ python3 "$ACC_ROOT/scripts/compare_two_servers.py" \
 
 ## 本讲小结
 
-精度测试的核心是先定义比较口径，再固定输入、采样参数、模型版本和 reference。任务级数据集能告诉你是否退化，固定 prompt 和 token diff 能告诉你从哪里开始分叉，logits 或中间 tensor diff 才能定位到 kernel、graph、TP、PD、量化、LoRA 或 MoE。`ais_bench` 可以作为 Ascend 离线推理参考，但不能替代 SGLang serving 的端到端精度验证。
+精度测试的核心是先定义比较口径，再固定输入、采样参数、模型版本和 reference。任务级数据集能告诉你是否退化，固定 prompt 和 token diff 能告诉你从哪里开始分叉，logits 或中间 tensor diff 才能定位到 kernel、graph、TP、PD、量化、LoRA 或 MoE。EvalScope 适合通过 OpenAI-compatible API 对 SGLang 做标准数据集评测；`ais_bench` 可以作为 Ascend 离线推理参考，但二者都不能替代针对具体问题的 token/logits 级定位。

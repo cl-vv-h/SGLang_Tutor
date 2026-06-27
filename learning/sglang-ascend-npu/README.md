@@ -484,7 +484,8 @@ Fallback：
 重点：
 
 - 如何固定模型、数据、采样参数、chat template 和 reference。
-- 如何用 JSONL 数据集做端到端 accuracy eval。
+- 如何用 JSONL 数据集和 EvalScope 做端到端 accuracy eval。
+- 如何隔离安装 EvalScope、配置个人缓存，并通过 OpenAI-compatible API 对接 SGLang。
 - `ais_bench` 在 Ascend 离线推理验证中的角色，以及它和 SGLang serving 评测的边界。
 - 如何做任务级 accuracy、token/text diff、logits diff 三层定位。
 - 如何沿 `request -> tokenizer -> scheduler -> ForwardBatch -> ModelRunner -> attention/KV -> logits -> sampler` 的流程定位精度问题。
@@ -514,7 +515,7 @@ Fallback：
 13. [12-npu-profiling-guide.md](./12-npu-profiling-guide.md)：SGLang-NPU profiling 流程、NPU trace 解读和性能归因模板。
 14. [13-run-models-by-scenario.md](./13-run-models-by-scenario.md)：单卡、多卡、PD 分离、在线/离线、LoRA、MoE、量化、多模态等场景的脚本化启动、验收和跑测模板。
 15. [14-performance-testing.md](./14-performance-testing.md)：SGLang-NPU 单卡、多卡、PD、长上下文等场景的性能测试、workload 设计和瓶颈归因。
-16. [15-accuracy-testing-and-debugging.md](./15-accuracy-testing-and-debugging.md)：模型精度测试、`ais_bench` 参考链路、token/logits 对比和按执行流程定位精度问题的方法论。
+16. [15-accuracy-testing-and-debugging.md](./15-accuracy-testing-and-debugging.md)：模型精度测试、EvalScope 安装与数据集评测、`ais_bench` 参考链路、token/logits 对比和按执行流程定位精度问题的方法论。
 
 ## 第一轮阅读任务
 
