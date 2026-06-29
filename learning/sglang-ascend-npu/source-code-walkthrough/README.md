@@ -139,6 +139,16 @@ flowchart TB
 
 本讲从 SGLang 与 `sgl-kernel-npu` 两个项目结构出发，定义所有主要组件、责任边界、分支入口、调用目标和后续课程归属。后续阅读任何一段 NPU 代码，都应先回到这张组件地图判断它属于哪一层。
 
+### 逐组件前必读：端到端模型样例
+
+#### GLM-4.7-Flash 完整执行路径
+
+已完成：[examples/00-glm-4.7-flash-end-to-end.md](./examples/00-glm-4.7-flash-end-to-end.md)
+
+这篇样例位于第一讲和第二讲之间。它以 BF16、TP=4 的 GLM-4.7-Flash 为主线，从模型注册、权重加载和请求调度开始，完整追踪纯 prefill 的 `MHA_NPU`、decode 的 `MLA_NPU`、压缩 paged KV cache、dense/MoE layers、logits 与 sampling；随后展开 prefix cache、NPU Graph、DeepEP/FuseEP 和内置 NextN/EAGLE 变体。
+
+先读端到端样例的目的，是让后续每个组件都能放回一条真实模型执行路径中，而不是把 backend、metadata 和 custom op 当成互不相干的文件。
+
 ### 第二讲至第十八讲：逐组件追踪
 
 | 讲次 | 计划文件 | 组件 | 核心追踪目标 |
@@ -189,7 +199,7 @@ flowchart TB
 - [模型加载、权重放置与 dtype/layout](./foundation/04-model-loading-dtype-and-layout.md)
 - [ModelRunner、ForwardBatch 与输入缓冲区](./foundation/05-model-runner-forward-batch-and-input-buffers.md)
 
-推荐阅读顺序：第一讲组件地图 → 按需补充 `foundation/` → 进入对应组件讲次。
+推荐阅读顺序：第一讲组件地图 → GLM-4.7-Flash 端到端样例 → 按需补充 `foundation/` → 进入对应组件讲次。
 
 ## 6. 版本记录要求
 

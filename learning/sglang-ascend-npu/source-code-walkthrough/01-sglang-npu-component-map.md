@@ -613,7 +613,8 @@ rg '目标算子名' sgl-kernel-npu/tests sgl-kernel-npu/benchmark
 
 ```mermaid
 flowchart TD
-  START["第一讲：组件地图"] --> BASE["需要补公共执行链？"]
+  START["第一讲：组件地图"] --> EXAMPLE["端到端样例：GLM-4.7-Flash"]
+  EXAMPLE --> BASE["需要补公共执行链？"]
   BASE -->|是| FOUNDATION["foundation/ 00-05"]
   BASE -->|否| KIND["当前问题属于哪类？"]
   FOUNDATION --> KIND
@@ -629,6 +630,7 @@ flowchart TD
 
 ```text
 01 组件地图
+  -> GLM-4.7-Flash 端到端执行样例
   -> 02 平台、运行时与 kernel bootstrap
   -> 03 Attention
   -> 04 KV cache
@@ -638,6 +640,8 @@ flowchart TD
   -> 09 DeepEP
   -> 18 构建、注册、测试与双仓开发
 ```
+
+端到端样例见：[examples/00-glm-4.7-flash-end-to-end.md](./examples/00-glm-4.7-flash-end-to-end.md)。它先把本讲的组件放进同一条真实模型调用链，再由后续课程逐个展开。
 
 ## 14. 本讲检查题
 
