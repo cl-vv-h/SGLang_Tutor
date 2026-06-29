@@ -1,5 +1,7 @@
 # 01. NPU 平台识别与进程启动
 
+> 课程定位：本文件是公共启动链路补充材料；对应组件主课程的第 02 讲“平台、运行时与 kernel bootstrap”。主目录见[源码串讲 README](../README.md)。
+
 本讲从 `sglang serve` 启动开始，解释 SGLang 怎样识别 Ascend NPU、何时导入 `torch_npu` 和 `sgl_kernel_npu`、怎样创建 scheduler 子进程，以及每个 TP rank 如何绑定 NPU。
 
 ## 本讲目标

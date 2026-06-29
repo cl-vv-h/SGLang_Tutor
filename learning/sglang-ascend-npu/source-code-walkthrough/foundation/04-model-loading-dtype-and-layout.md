@@ -1,5 +1,7 @@
 # 04. 模型加载、权重放置与 dtype/layout
 
+> 课程定位：本文件是模型加载公共链路补充材料；量化、MoE、LoRA 和模型专用组件会复用这里的权重与 layout 概念。主目录见[源码串讲 README](../README.md)。
+
 本讲追踪模型从本地/Hugging Face/ModelScope checkpoint 进入 NPU 的过程，解释 loader、模型类、weight loader、quant method 和 NPU format cast 的职责边界。
 
 ## 本讲目标

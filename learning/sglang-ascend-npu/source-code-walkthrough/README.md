@@ -1,448 +1,219 @@
 # SGLang Ascend NPU 源码串讲
 
-本目录用于逐讲拆解 SGLang 各项能力在 Ascend NPU 上实际经过的代码分支。重点不是孤立介绍某个文件，而是从用户参数或请求入口开始，沿注册、初始化、调度、模型执行、NPU backend、kernel 和结果返回一路追踪。
+本目录按“组件”而不是“执行阶段”组织 SGLang Ascend NPU 源码教程。
 
-本专题与上一级教程的区别：
+主线问题只有三个：
 
-- 上一级教程回答“怎样安装、运行、测试和优化”。
-- 本目录回答“运行时为什么会进入这条 Ascend 分支、对象怎样初始化、数据怎样流动、最终调用了哪个 NPU 实现”。
-- 遇到实现在 `sglang-kernel-npu`、`torch_npu` 或 CANN 中的情况，会明确标出仓库边界，不把外部 kernel 当成黑盒。
+1. SGLang 在哪里识别 NPU、完成能力分支并选择组件？
+2. 请求执行时，通用 SGLang 代码如何调用 Ascend 专用实现？
+3. 组件内部由哪些 Python、PyTorch Custom Op、C++/Ascend C 与通信实现组成？
 
-## 学习目标
+第一讲先建立完整组件地图；后续每一讲选择一个组件，从 SGLang 分支入口一路追到 `sgl-kernel-npu`、`torch_npu`、CANN 或 HCCL 的实际实现。
 
-完成本专题后，应能够：
+## 1. 两个仓库的职责边界
 
-1. 从一个 SGLang 启动参数定位到 Ascend NPU 的默认值、注册表和具体实现。
-2. 从一个请求定位 `TokenizerManager -> Scheduler -> TpModelWorker -> ModelRunner -> model forward` 主链路中的 NPU 分叉点。
-3. 解释 attention、KV cache、graph、TP/HCCL、PD、量化、MoE、LoRA、采样等特性在 NPU 上走哪条代码路径。
-4. 判断一段能力属于 SGLang 控制面、SGLang NPU adapter、`sglang-kernel-npu`、`torch_npu` 还是 CANN/HCCL。
-5. 面对精度或性能问题时，根据调用链快速选择日志点、tensor 对比点和 profiling 范围。
+### 1.1 SGLang 仓库
 
-## 源码版本约定
+SGLang 是推理运行时和控制面，主要负责：
 
-源码会持续变化，因此每一讲都必须在开头记录：
+- CLI、`ServerArgs`、平台识别和能力校验；
+- 请求调度、batch 组织、模型加载和 `ModelRunner`；
+- attention、graph、量化、MoE、LoRA 等 backend 的选择与生命周期；
+- KV cache、分布式并行、PD 分离和 speculative decoding 的编排；
+- 将 shape、dtype、layout、stream、process group 等运行时上下文交给底层算子。
+
+Ascend 专用代码主要位于：
 
 ```text
-SGLang commit:
-sglang-kernel-npu commit:
-torch_npu / CANN version:
-涉及的模型与启动参数:
+python/sglang/srt/hardware_backend/npu/
+├── attention/
+├── graph_runner/
+├── modules/
+├── moe/
+├── quantization/
+├── allocator_npu.py
+├── cmo.py
+├── memory_pool_npu.py
+└── utils.py
 ```
 
-文件路径和类名以当前学习仓库中的源码为起点。后续版本如果移动了实现，应保留“旧路径 -> 新路径”的迁移说明，而不是直接覆盖历史调用链。
+但 NPU 接入点并不只在这个目录。attention registry、LoRA、distributed、PD、sampler、speculative、模型实现等通用目录中同样存在 Ascend 分支。
 
-## 什么算 Ascend NPU 分支
+### 1.2 sgl-kernel-npu 仓库
 
-源码中不一定会直接出现 `if device == "npu"`。本专题会同时检查六类接入方式：
+官方 `sgl-kernel-npu` 仓库提供两类底层能力：
 
-| 类型 | 典型形式 | 阅读重点 |
-|---|---|---|
-| 平台判断 | `is_npu()`、`args.device == "npu"` | 何时判断、判断结果影响哪些对象。 |
-| 注册表选择 | `attention_backend="ascend"`、LoRA backend registry | 字符串怎样映射到具体类。 |
-| NPU 默认参数 | `set_default_server_args()` | 哪些通用参数在 NPU 上被改写。 |
-| 动态导入 | `import torch_npu`、按平台导入 Ascend 类 | 避免其他平台加载 NPU 依赖的机制。 |
-| 专用算子调用 | `torch_npu.npu_*`、`torch.ops.npu.*`、`sgl_kernel_npu` | 输入 dtype、shape、layout 和输出语义。 |
-| 禁用与 fallback | NPU 下关闭 CUDA/Triton 路径或回退 PyTorch | 是正确性兜底还是性能降级。 |
+1. 面向推理的 SGLang NPU kernels；
+2. 面向 MoE Expert Parallel 的 DeepEP-Ascend。
 
-## 总体调用图
+其主要结构是：
+
+```text
+sgl-kernel-npu/
+├── python/
+│   ├── sgl_kernel_npu/
+│   │   └── sgl_kernel_npu/
+│   │       ├── activation/
+│   │       ├── attention/
+│   │       ├── fla/
+│   │       ├── mamba/
+│   │       ├── mem_cache/
+│   │       ├── moe/
+│   │       ├── norm/
+│   │       ├── sample/
+│   │       ├── utils/
+│   │       ├── kvcacheio.py
+│   │       └── speculative.py
+│   └── deep_ep/
+├── csrc/
+├── include/
+├── benchmark/
+├── tests/
+├── cmake/
+├── scripts/
+└── build.sh
+```
+
+这里的 Python 模块负责用户态 API、参数检查和算子包装；`csrc/` 负责算子注册、host 侧逻辑和 device kernel；DeepEP-Ascend 负责 MoE token dispatch/combine 及低时延通信。
+
+官方参考：
+
+- [sgl-kernel-npu 仓库](https://github.com/sgl-project/sgl-kernel-npu)
+- [SGLang 仓库](https://github.com/sgl-project/sglang)
+
+## 2. 组件驱动的总调用模型
 
 ```mermaid
 flowchart TB
-  CLI["sglang serve / ServerArgs"] --> DETECT["is_npu / device=npu"]
-  DETECT --> DEFAULTS["NPU defaults / backend registry"]
-  DEFAULTS --> TM["TokenizerManager"]
-  TM --> SCH["Scheduler / ScheduleBatch"]
-  SCH --> WORKER["TpModelWorker"]
-  WORKER --> MR["ModelRunner / ForwardBatch"]
+  API["CLI / HTTP / Offline Engine"] --> ARGS["ServerArgs 与平台识别"]
+  ARGS --> INIT["init_npu_backend 与组件注册"]
+  INIT --> RUNTIME["Scheduler / Worker / ModelRunner"]
 
-  MR --> ATTN["Ascend attention / KV cache"]
-  MR --> LAYER["RoPE / Norm / Activation / Linear"]
-  MR --> GRAPH["NPUGraph / compile backend"]
-  MR --> QUANT["NPU quantization"]
-  MR --> MOE["NPU MoE"]
-  MR --> LORA["Ascend LoRA"]
-  SCH --> DIST["TP / HCCL / NPU communicator"]
-  SCH --> PD["Ascend PD / KV transfer"]
-  SCH --> SPEC["Speculative decoding"]
-  MR --> MM["Multimodal NPU branches"]
-  MR --> LOGITS["Logits / Ascend sampler"]
+  RUNTIME --> ATTENTION["Attention / MLA"]
+  RUNTIME --> GRAPH["NPU Graph"]
+  RUNTIME --> CACHE["KV Cache / Memory"]
+  RUNTIME --> LAYER["Norm / RoPE / Activation"]
+  RUNTIME --> QUANT["Quantization / Linear"]
+  RUNTIME --> MOE["MoE / DeepEP"]
+  RUNTIME --> LORA["LoRA"]
+  RUNTIME --> SEQ["FLA / Mamba"]
+  RUNTIME --> SPEC["Speculative / Sampling"]
+  RUNTIME --> MODEL["Multimodal / Model-specific"]
+  RUNTIME --> DIST["HCCL / PD / KV Transfer"]
 
-  ATTN --> KERNEL["sglang-kernel-npu / torch_npu / CANN"]
-  LAYER --> KERNEL
-  QUANT --> KERNEL
-  MOE --> KERNEL
-  LORA --> KERNEL
-  DIST --> HCCL["HCCL / ZBAL"]
-  PD --> MF["memfabric_hybrid / SDMA / device RDMA"]
+  ATTENTION --> WRAPPER["sgl_kernel_npu Python API"]
+  CACHE --> WRAPPER
+  LAYER --> WRAPPER
+  MOE --> WRAPPER
+  LORA --> WRAPPER
+  SEQ --> WRAPPER
+  SPEC --> WRAPPER
+
+  ATTENTION --> TORCHNPU["torch_npu / torch.ops.npu"]
+  GRAPH --> TORCHNPU
+  QUANT --> TORCHNPU
+  MODEL --> TORCHNPU
+  DIST --> HCCL["HCCL / CANN / memfabric"]
+
+  WRAPPER --> REGISTER["PyTorch Custom Op 注册"]
+  REGISTER --> CSRC["C++ Host / Ascend C Kernel"]
+  MOE --> DEEPEP["DeepEP-Ascend dispatch / combine"]
 ```
 
-## 阅读顺序
+读图时要区分四层：
 
-```mermaid
-flowchart LR
-  A["阶段一：入口与主链路"] --> B["阶段二：模型核心算子"]
-  B --> C["阶段三：编译与分布式"]
-  C --> D["阶段四：高级特性"]
-  D --> E["阶段五：模型与工程闭环"]
-```
+| 层次 | 主要职责 | 常见定位方式 |
+|---|---|---|
+| SGLang 通用控制面 | 参数、调度、batch、模型执行 | `ServerArgs`、`Scheduler`、`ModelRunner` |
+| SGLang NPU adapter | 平台分支、backend、metadata、NPU 专用对象 | `hardware_backend/npu/` 及各 registry |
+| NPU Python/算子层 | Python wrapper、`torch.ops.npu`、`torch_npu.npu_*` | `sgl_kernel_npu`、`torch_npu` |
+| Device/通信层 | C++ host、Ascend C kernel、CANN、HCCL、DeepEP | `csrc/`、CANN/HCCL API |
 
-不建议直接从一个两千行的 Ascend attention backend 开始读。先理解平台识别、默认参数、注册表和 `ForwardBatch`，后面看到 mask、KV index、graph input 时才知道它们从哪里产生。
+## 3. 主课程目录
 
-## 课程目录
+### 第一讲：组件地图
 
-下面是本目录计划包含的各讲。文件会按此顺序逐步创建。
+#### 01. SGLang NPU 全组件与双仓目录总览
 
-### 阶段一：入口、初始化与通用主链路
+已完成：[01-sglang-npu-component-map.md](./01-sglang-npu-component-map.md)
 
-#### 00. 源码阅读方法与 Ascend 分支搜索法
+本讲从 SGLang 与 `sgl-kernel-npu` 两个项目结构出发，定义所有主要组件、责任边界、分支入口、调用目标和后续课程归属。后续阅读任何一段 NPU 代码，都应先回到这张组件地图判断它属于哪一层。
 
-已完成：[00-reading-method-and-branch-search.md](./00-reading-method-and-branch-search.md)
+### 第二讲至第十八讲：逐组件追踪
 
-内容：
+| 讲次 | 计划文件 | 组件 | 核心追踪目标 |
+|---|---|---|---|
+| 02 | `02-platform-runtime-and-kernel-bootstrap.md` | 平台与运行时接入 | `is_npu`、默认参数、动态导入、`sgl_kernel_npu` 注册 |
+| 03 | `03-ascend-attention-and-mla.md` | Attention / MLA | registry、prefill/decode、paged KV、MLA、attention kernel |
+| 04 | `04-kv-cache-memory-and-allocator.md` | KV cache 与内存 | pool、allocator、cache location、assign/update、KVCacheIO |
+| 05 | `05-npu-graph-and-compilation.md` | NPU Graph | graph runner 选择、capture、replay、静态输入、piecewise compile |
+| 06 | `06-norm-rope-and-activation.md` | Norm / RoPE / Activation | 通用 layer 分支、融合算子、residual 与 dtype 语义 |
+| 07 | `07-quantization-and-linear.md` | 量化与 Linear | quant method 选择、W8A8、AWQ、GPTQ、动态量化与 matmul |
+| 08 | `08-moe-routing-and-fused-expert.md` | MoE 计算 | top-k、dispatch 前处理、expert compute、fused MoE、量化 MoE |
+| 09 | `09-deepep-ascend-and-expert-parallel.md` | DeepEP-Ascend | EP 分支、buffer 初始化、normal/low-latency dispatch/combine |
+| 10 | `10-ascend-lora.md` | LoRA | backend registry、adapter batch、SGMV/BGMV expand/shrink |
+| 11 | `11-fla-mamba-and-hybrid-linear-attention.md` | FLA / Mamba | GDN、hybrid backend、gating、causal conv1d、state update |
+| 12 | `12-speculative-decoding.md` | Speculative decoding | EAGLE/MTP、draft graph、tree build、verify、cache location |
+| 13 | `13-sampling-and-constrained-decoding.md` | Sampling / Constraint | top-k/top-p、greedy verify、token bitmask、grammar 分支 |
+| 14 | `14-model-specific-and-multimodal-components.md` | 模型与多模态适配 | Qwen/GLM/DeepSeek、processor、ViT graph、模型专用融合算子 |
+| 15 | `15-distributed-hccl-and-communication.md` | 分布式通信 | TP/EP group、HCCL、NPUCommunicator、collective 与压缩通信 |
+| 16 | `16-pd-disaggregation-and-kv-transfer.md` | PD 与 KV 传输 | backend registry、transfer engine、sender/receiver、SDMA/RDMA |
+| 17 | `17-utility-kernels-and-memory-optimization.md` | 工具与内存优化 | lightning indexer、tri-inv、batch matmul、CMO/prefetch |
+| 18 | `18-build-registration-tests-and-cross-repo-development.md` | 构建与开发闭环 | wheel、custom op 注册、tests、benchmark、双仓联调与 PR 边界 |
 
-- 建立 SGLang 与 `sglang-kernel-npu` 的版本对应关系。
-- 使用 `rg` 搜索 `is_npu`、`ascend`、`torch_npu`、`torch.ops.npu`、registry 和 fallback。
-- 区分通用 runtime、平台 adapter、kernel wrapper 和外部算子实现。
-- 建立“入口参数 -> 分支条件 -> 类 -> kernel -> 测试”的阅读记录模板。
+## 4. 每讲的固定分析模板
 
-#### 01. NPU 平台识别与进程启动
+第二讲起，每个组件都按以下结构展开：
 
-已完成：[01-platform-detection-and-process-startup.md](./01-platform-detection-and-process-startup.md)
+1. **组件边界**：解决什么问题，不负责什么问题。
+2. **双仓目录树**：SGLang 与 `sgl-kernel-npu` 中的对应文件。
+3. **分支入口**：平台判断、registry、参数、模型类型或 capability check。
+4. **初始化调用链**：对象何时创建，持有哪些状态，依赖哪些组件。
+5. **请求调用链**：prefill、decode 或特定请求怎样进入组件。
+6. **内部代码组成**：Python class/function、wrapper、custom op、host、device kernel。
+7. **数据契约**：tensor shape、dtype、layout、metadata、stream 与 process group。
+8. **后端边界**：`sgl_kernel_npu`、`torch_npu`、CANN、HCCL、DeepEP 的分工。
+9. **fallback 与限制**：禁用路径、native fallback、能力矩阵和版本条件。
+10. **验证方式**：最小调用、测试目录、benchmark、日志和 profiling 位置。
+11. **修改影响面**：改 SGLang 还是 kernel 仓，可能破坏哪些调用者。
+12. **检查题**：要求读者独立复述分支和调用关系。
 
-关键源码：
+## 5. 基础链路补充材料
 
-- `python/sglang/srt/utils/common.py`
-- `python/sglang/srt/platforms/device_mixin.py`
-- `python/sglang/srt/server_args.py`
-- `python/sglang/srt/hardware_backend/npu/utils.py`
+旧版 00～05 讲保留在 `foundation/`。它们不再作为主课程的组件编号，而是帮助初学者先理解 SGLang 的公共运行链：
 
-内容：`is_npu()` 如何判断设备；`torch_npu` 何时导入；device count、current device、显存查询如何适配；server 启动时怎样进入 NPU 初始化。
+- [源码阅读方法与 Ascend 分支搜索法](./foundation/00-reading-method-and-branch-search.md)
+- [NPU 平台识别与进程启动](./foundation/01-platform-detection-and-process-startup.md)
+- [ServerArgs 校验与 NPU 默认参数](./foundation/02-server-args-and-npu-defaults.md)
+- [请求主链路中的 NPU 接入点](./foundation/03-request-lifecycle-npu-branch-points.md)
+- [模型加载、权重放置与 dtype/layout](./foundation/04-model-loading-dtype-and-layout.md)
+- [ModelRunner、ForwardBatch 与输入缓冲区](./foundation/05-model-runner-forward-batch-and-input-buffers.md)
 
-#### 02. ServerArgs 校验与 NPU 默认参数
+推荐阅读顺序：第一讲组件地图 → 按需补充 `foundation/` → 进入对应组件讲次。
 
-已完成：[02-server-args-and-npu-defaults.md](./02-server-args-and-npu-defaults.md)
+## 6. 版本记录要求
 
-关键对象：`ServerArgs`、`init_npu_backend()`、`set_default_server_args()`。
-
-内容：
-
-- `--device npu` 如何影响参数校验。
-- attention backend 为什么被改为 `ascend`。
-- page size、chunked prefill、graph batch size、custom all-reduce、HiCache 等默认值的来源。
-- 用户显式参数与 NPU 默认值的优先级。
-
-#### 03. 请求主链路中的 NPU 接入点
-
-已完成：[03-request-lifecycle-npu-branch-points.md](./03-request-lifecycle-npu-branch-points.md)
-
-调用链：
+SGLang 与 `sgl-kernel-npu` 都在快速演进。学习或排障时必须记录：
 
 ```text
-HTTP API
-  -> TokenizerManager
-  -> Scheduler / ScheduleBatch
-  -> TpModelWorker
-  -> ModelRunner
-  -> ForwardBatch
-  -> model forward
-  -> logits / sampler
+SGLang commit:
+sgl-kernel-npu commit:
+torch / torch_npu version:
+CANN version:
+NPU 型号:
+模型与启动参数:
 ```
 
-内容：哪些部分完全复用通用 SGLang，哪些位置开始读取 NPU device、stream、graph、attention metadata 和 distributed group。
-
-#### 04. 模型加载、权重放置与 dtype/layout
-
-已完成：[04-model-loading-dtype-and-layout.md](./04-model-loading-dtype-and-layout.md)
-
-关键源码：
-
-- `python/sglang/srt/model_loader/loader.py`
-- `python/sglang/srt/model_executor/`
-- `python/sglang/srt/layers/linear.py`
-- `python/sglang/srt/layers/vocab_parallel_embedding.py`
-
-内容：权重怎样加载到 NPU；dtype 与参数分片如何确定；何时需要 format cast；TP 权重加载与普通加载的差异；模型加载错误如何表现为精度或启动问题。
-
-#### 05. ModelRunner、ForwardBatch 与设备输入缓冲区
-
-已完成：[05-model-runner-forward-batch-and-input-buffers.md](./05-model-runner-forward-batch-and-input-buffers.md)
-
-关键源码：
-
-- `python/sglang/srt/model_executor/model_runner.py`
-- `python/sglang/srt/model_executor/input_buffers.py`
-- `python/sglang/srt/managers/tp_worker.py`
-- `python/sglang/srt/managers/schedule_batch.py`
-
-内容：prefill/decode batch 如何转成设备 tensor；seq length、position、KV index、sampling info 怎样进入 forward；graph replay 为什么依赖稳定的输入 buffer。
-
-### 阶段二：模型核心算子与 KV 路径
-
-#### 06. Attention Registry 与 AscendAttnBackend 初始化
-
-计划文件：`06-attention-registry-and-ascend-backend-init.md`
-
-关键源码：
-
-- `python/sglang/srt/layers/attention/attention_registry.py`
-- `python/sglang/srt/hardware_backend/npu/attention/ascend_backend.py`
-- `python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py`
-
-内容：`attention_backend="ascend"` 如何映射到 `AscendAttnBackend`；backend 初始化需要哪些 ModelRunner 状态；MHA、MLA、hybrid linear attention 如何选择不同分支。
-
-#### 07. Ascend Prefill / Extend Attention
-
-计划文件：`07-ascend-prefill-extend-attention.md`
-
-内容：
-
-- prefill/extend metadata 怎样构造。
-- causal mask、padding、actual seq length 的 NPU 处理。
-- chunked prefill 如何改变 attention 和 KV 写入。
-- 调用 `sglang-kernel-npu` 或 `torch_npu` attention 算子前后的 tensor shape/layout。
-
-#### 08. Ascend Decode Attention 与 Paged KV Cache
-
-计划文件：`08-ascend-decode-attention-and-paged-kv.md`
-
-内容：decode 每步的 KV index、page table、slot mapping；KV cache 初始化与读写；page size 对 Ascend backend 的影响；batch 变化时 decode metadata 如何更新；首 token 正确但后续分叉时该看哪里。
-
-#### 09. RoPE、RMSNorm、Activation 与基础 NPU 算子
-
-计划文件：`09-rope-norm-activation-and-basic-npu-ops.md`
-
-关键源码：
-
-- `python/sglang/srt/layers/rotary_embedding/`
-- `python/sglang/srt/layers/layernorm.py`
-- `python/sglang/srt/layers/activation.py`
-
-内容：`npu_rotary_mul`、NPU RMSNorm、SwiGLU/GeGLU/FastGELU 分支；fused 与 native fallback；dtype、广播和 residual 语义；这些基础算子为何也可能造成端到端精度差异。
-
-#### 10. LogitsProcessor、约束解码与 Ascend Sampler
-
-计划文件：`10-logits-constrained-decoding-and-sampler.md`
-
-关键源码：
-
-- `python/sglang/srt/layers/logits_processor.py`
-- `python/sglang/srt/layers/sampler.py`
-- `python/sglang/srt/constrained/`
-
-内容：Ascend sampler 为何可直接处理 logits；softmax、top-k/top-p/min-p、greedy 和 penalty 如何进入 NPU 分支；`npu_top_k_top_p` 的约束；输出 token 分叉如何定位。
-
-### 阶段三：Graph、编译、内存与分布式
-
-#### 11. NPU Graph Capture、Replay 与 Piecewise Compile
-
-计划文件：`11-npu-graph-capture-replay-and-compile.md`
-
-关键源码：
-
-- `python/sglang/srt/compilation/backend.py`
-- `python/sglang/srt/compilation/npu_piecewise_backend.py`
-- `python/sglang/srt/model_executor/cuda_graph_runner.py`
-- `python/sglang/srt/compilation/weak_ref_tensor.py`
-
-内容：通用类名为何仍含 CUDA；NPU 如何切到 `torch.npu.NPUGraph`；warmup、capture、replay、graph pool、static buffer、shape 覆盖；graph on 才出现精度问题时的检查点。
-
-#### 12. TP、HCCL、NPUCommunicator 与 ZBAL
-
-计划文件：`12-tp-hccl-npu-communicator-and-zbal.md`
-
-关键源码：
-
-- `python/sglang/srt/distributed/parallel_state.py`
-- `python/sglang/srt/distributed/communication_op.py`
-- `python/sglang/srt/distributed/device_communicators/npu_communicator.py`
-
-内容：process group 怎样选择 `hccl`；TP group 初始化；all-reduce/all-gather/reduce-scatter 的 NPU 路径；quant communication；ZBAL 本地内存分支；单卡正确但 TP 错误时怎样分层检查。
-
-#### 13. KV Cache 内存池、HiCache 与 NPU 存储后端
-
-计划文件：`13-kv-memory-pool-hicache-and-storage.md`
-
-关键源码：
-
-- `python/sglang/srt/mem_cache/`
-- `python/sglang/srt/mem_cache/hicache_storage.py`
-- `python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py`
-
-内容：token-to-KV 映射、内存池和 radix cache；HiCache 的设备/主机/外部层级；NPU layout 和 IO backend；cache 命中、换入换出对性能与正确性的影响。
-
-### 阶段四：高级特性分支
-
-#### 14. Ascend 量化 Linear、AWQ、GPTQ 与 W8A8
-
-计划文件：`14-ascend-quantization-linear-awq-gptq-w8a8.md`
-
-关键源码：
-
-- `python/sglang/srt/hardware_backend/npu/quantization/`
-- `python/sglang/srt/layers/quantization/`
-- `python/sglang/srt/layers/linear.py`
-
-内容：quant config 怎样选择 Ascend method；权重、scale、zero point 怎样加载；动态 per-token quant；AWQ/GPTQ/CompressedTensors 的 NPU 分支；量化 kernel 与 `sglang-kernel-npu` 的边界。
-
-#### 15. Ascend MoE、Expert Routing 与 Fused EP
-
-计划文件：`15-ascend-moe-routing-fused-ep.md`
-
-关键源码：
-
-- `python/sglang/srt/layers/moe/`
-- `python/sglang/srt/hardware_backend/npu/quantization/fused_moe_method_npu.py`
-- `python/sglang/srt/hardware_backend/npu/utils.py`
-
-内容：top-k routing、token dispatch、expert compute、combine；shared/routed expert stream；fused EP 和 TP/EP size；MoE 量化分支；expert id 正确但输出错误时的定位方法。
-
-#### 16. Ascend LoRA Backend
-
-计划文件：`16-ascend-lora-backend.md`
-
-关键源码：
-
-- `python/sglang/srt/lora/backend/lora_registry.py`
-- `python/sglang/srt/lora/backend/ascend_backend.py`
-- `python/sglang/srt/lora/lora.py`
-
-内容：registry 如何选择 `AscendLoRABackend`；adapter 加载、batch info、segment 和 weight index；`sgmv_shrink`/`sgmv_expand`；多 adapter batch、graph 和 TP 的组合路径。
-
-#### 17. Ascend PD Disaggregation 与 KV Transfer
-
-计划文件：`17-ascend-pd-disaggregation-kv-transfer.md`
-
-关键源码：
-
-- `python/sglang/srt/disaggregation/utils.py`
-- `python/sglang/srt/disaggregation/ascend/transfer_engine.py`
-- `python/sglang/srt/disaggregation/ascend/conn.py`
-- `python/sglang/srt/disaggregation/prefill.py`
-- `python/sglang/srt/disaggregation/decode.py`
-
-内容：transfer backend registry 如何选择 Ascend 类；`AscendTransferEngine` 初始化；manager/sender/receiver/bootstrap server 的关系；SDMA 与 device RDMA；prefill KV 怎样交给 decode。
-
-#### 18. Speculative Decoding 在 NPU 上的分支
-
-计划文件：`18-speculative-decoding-on-npu.md`
-
-关键源码：
-
-- `python/sglang/srt/speculative/`
-- `python/sglang/srt/speculative/draft_utils.py`
-- `python/sglang/srt/hardware_backend/npu/attention/ascend_backend.py`
-
-内容：EAGLE/MTP/ngram 等能力哪些复用通用代码；`AscendAttnMultiStepDraftBackend` 的创建；draft/verify batch 和 KV 位置；NPU 下被禁用或 fallback 的 Triton op。
-
-#### 19. 多模态模型的 Ascend 分支
-
-计划文件：`19-multimodal-models-on-ascend.md`
-
-关键源码：
-
-- `python/sglang/srt/managers/mm_utils.py`
-- `python/sglang/srt/multimodal/processors/`
-- `python/sglang/multimodal_gen/runtime/platforms/npu.py`
-- `python/sglang/multimodal_gen/runtime/layers/attention/backends/ascend_fa.py`
-
-内容：图片/视频 processor 到 input embedding；Ascend reshape/dims 限制；NPU stream synchronize；ViT/视觉 attention；多模态 graph 和输入 shape。
-
-#### 20. 模型专用分支：DeepSeek、Qwen、Hybrid Attention
-
-计划文件：`20-model-specific-ascend-branches.md`
-
-关键源码：
-
-- `python/sglang/srt/models/deepseek_common/attention_backend_handler.py`
-- `python/sglang/srt/hardware_backend/npu/attention/ascend_hybrid_linear_attn_backend.py`
-- `python/sglang/srt/hardware_backend/npu/attention/ascend_gdn_backend.py`
-
-内容：模型结构为何会绕开通用 MHA 路径；MLA、Mamba2、GDN、hybrid linear attention 的 backend 选择；模型专用 patch 与通用 Ascend backend 的边界。
-
-### 阶段五：Kernel 边界、可观测性与开发闭环
-
-#### 21. SGLang 到 sglang-kernel-npu 的调用边界
-
-计划文件：`21-sglang-to-kernel-npu-boundary.md`
-
-内容：
-
-- Python wrapper 如何导入 `sgl_kernel_npu`。
-- `torch.ops.npu`、`torch_npu.npu_*` 与自定义 kernel 的区别。
-- 从 Python 调用点追到 kernel 注册、shape/dtype 校验和算子实现。
-- 哪类修改应该进入 SGLang，哪类修改应该进入 `sglang-kernel-npu`。
-- kernel 缺失时 import error、fallback 和 capability check 如何表现。
-
-#### 22. NPU Profiling、日志与精度观测点
-
-计划文件：`22-npu-profiling-logging-and-accuracy-probes.md`
-
-关键源码：
-
-- `python/sglang/srt/utils/profile_utils.py`
-- `python/sglang/srt/managers/scheduler_components/profiler_manager.py`
-
-内容：`torch_npu.profiler` patch；服务端 profile 控制；在请求、ForwardBatch、attention、KV、MoE、sampler 放置观测点；如何避免同步和 dump 改变性能结论。
-
-#### 23. Fallback、能力矩阵与不支持路径
-
-计划文件：`23-fallback-capability-and-unsupported-paths.md`
-
-内容：系统梳理 NPU 下关闭的 CUDA/Triton 特性、CPU/native fallback、参数校验报错和 capability check；区分“明确不支持”“正确性 fallback”“可运行但性能差”。
-
-#### 24. Ascend 特性的测试与 PR 实践
-
-计划文件：`24-ascend-feature-tests-and-pr-workflow.md`
-
-内容：为每条分支建立单元测试、模型 smoke、精度测试、性能测试和 profiling 证据；SGLang 与 kernel 仓联动提交；版本兼容矩阵；PR 描述模板和回归清单。
-
-## 每一讲的固定结构
-
-后续每个文件都按以下模板编写：
-
-1. **本讲目标**：读完能回答哪些问题。
-2. **运行场景**：用什么模型和启动参数进入该分支。
-3. **入口与分支条件**：从 CLI/API 到选择逻辑。
-4. **初始化调用链**：对象在什么时候创建，依赖什么状态。
-5. **请求执行调用链**：prefill/decode 或特性请求怎样流动。
-6. **关键类与函数逐段讲解**：强调输入、输出、副作用和状态。
-7. **Kernel 边界**：进入 `sglang-kernel-npu`、`torch_npu`、CANN/HCCL 的位置。
-8. **数据结构**：tensor shape、dtype、layout、metadata。
-9. **NPU 与 CUDA/CPU 的差异**：说明复用、替换、禁用和 fallback。
-10. **调试实践**：日志、断点、tensor dump、最小复现。
-11. **精度风险与性能风险**：哪些修改容易出问题。
-12. **练习与检查题**：确保读者能独立追踪分支。
-
-## 第一轮建议阅读任务
-
-在开始第 01 讲前，先完成以下搜索：
-
-```bash
-cd /sgl-workspace/sglang
-
-rg "def is_npu|is_npu\(" python/sglang/srt
-rg "attention_backend.*ascend|register_attention_backend\(\"ascend\"" python/sglang/srt
-rg "torch_npu|torch\.ops\.npu|torch\.npu" python/sglang/srt
-rg "AscendKV|AscendTransferEngine" python/sglang/srt/disaggregation
-rg "AscendLoRABackend|GPTQLinearAscendMethod" python/sglang/srt
-```
-
-建议把搜索结果按下面格式记录：
-
-| 接入点 | 分支条件 | 进入的类/函数 | 外部依赖 | 所属课程 |
-|---|---|---|---|---|
-| Attention | `attention_backend == "ascend"` | `AscendAttnBackend` | `sglang-kernel-npu` / `torch_npu` | 06-08 |
-| Graph | `is_npu()` | `NpuPiecewiseBackend` / `NPUGraph` | `torch.npu` | 11 |
-| Distributed | device type `npu` | HCCL / `NPUCommunicator` | HCCL / `torch_npu` | 12 |
-| PD | transfer backend `ascend` | `AscendTransferEngine` | `memfabric_hybrid` | 17 |
-| LoRA | LoRA backend `ascend` | `AscendLoRABackend` | NPU SGMV op | 16 |
-
-## 本目录的完成标准
-
-当全部课程完成后，本目录应形成三类产物：
-
-- 一张覆盖主要特性的 Ascend NPU 分支知识图谱。
-- 一套从启动命令到 kernel 的逐特性调用链文档。
-- 一套能复现、调试和验证每条分支的最小实践脚本与检查清单。
-
-阅读者最终不应只知道“Ascend 用 `attention_backend=ascend`”，而应能说明这个参数在哪里被设置、怎样进入 registry、`AscendAttnBackend` 如何初始化、metadata 从何而来、KV cache 如何组织，以及最后调用了哪个 NPU kernel。
+教程中的目录和符号以编写时的源码为线索。若新版移动了实现，应记录“旧路径 → 新路径”和 commit，而不是只保留最新版结论。
+
+## 7. 学完后的能力标准
+
+完成本系列后，读者应能：
+
+- 从一个启动参数或模型特性找到 SGLang 的 NPU 分支条件；
+- 从 registry 或工厂函数定位实际 backend class；
+- 从 backend 方法追踪到 `sgl_kernel_npu` 或 `torch_npu` 算子；
+- 继续定位到 custom op 注册和 `csrc/` 实现；
+- 判断问题属于控制面、adapter、kernel、CANN/HCCL 还是通信环境；
+- 为一个组件设计最小测试、精度对比和性能 benchmark；
+- 判断修改应提交到 SGLang、`sgl-kernel-npu`，还是需要双仓配套变更。

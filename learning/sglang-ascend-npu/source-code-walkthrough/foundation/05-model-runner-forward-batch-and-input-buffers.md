@@ -1,5 +1,7 @@
 # 05. ModelRunner、ForwardBatch 与设备输入缓冲区
 
+> 课程定位：本文件是 `ModelRunner` 公共执行链补充材料；后续每个组件讲次都会从这些初始化与 forward 接口继续向下追踪。主目录见[源码串讲 README](../README.md)。
+
 本讲聚焦模型执行前最后一段通用链路：`ScheduleBatch` 如何转换为 `ForwardBatch`，ModelRunner 如何初始化 backend、选择 graph/eager 分支，以及输入 buffer 为什么在 NPU 上有专门的正确性保护。
 
 ## 本讲目标

@@ -2,7 +2,7 @@
 
 本目录用于拆解 SGLang 在 Ascend NPU 上的适配、部署和源码实践。学习目标不是把 GPU serving 经验简单搬到 NPU，而是建立一条清晰路径：先跑通环境和最小服务，再理解 SGLang 如何识别 NPU、设置默认参数、选择 Ascend 后端，最后深入 attention、graph、分布式通信、PD disaggregation、LoRA 与性能调优。
 
-需要按特性逐条追踪 Ascend 源码分支时，进入 [source-code-walkthrough](./source-code-walkthrough/README.md)。该专题从平台识别和请求主链路开始，依次串讲 attention/KV、基础算子、graph、TP/HCCL、量化、MoE、LoRA、PD、投机解码、多模态和 kernel 边界。
+需要按组件追踪 Ascend 源码分支时，进入 [source-code-walkthrough](./source-code-walkthrough/README.md)。该专题先用第一讲建立 SGLang 与 `sgl-kernel-npu` 的完整组件地图，再逐组件串讲分支入口、初始化与运行时调用链、内部代码组成、kernel/通信边界和验证方法；旧版公共执行链讲义保留为基础补充材料。
 
 ## 适合谁阅读
 

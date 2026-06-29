@@ -1,5 +1,7 @@
 # 03. 请求主链路中的 NPU 接入点
 
+> 课程定位：本文件是公共请求链路补充材料。组件主课程会从这里标出的分支点，继续深入各 backend 与 kernel。主目录见[源码串讲 README](../README.md)。
+
 本讲从一个 OpenAI-compatible 请求开始，追踪它经过 TokenizerManager、Scheduler、ScheduleBatch、TpModelWorker、ForwardBatch、ModelRunner、sampler 和 detokenizer 的完整路径，并标出 Ascend NPU 真正接管执行的位置。
 
 ## 本讲目标
