@@ -1,0 +1,272 @@
+digraph GLM47Flash {
+  graph [
+    rankdir=TB,
+    bgcolor="#F6F8FA",
+    pad="0.30",
+    nodesep="0.28",
+    ranksep="0.46",
+    splines=ortho,
+    compound=true,
+    newrank=true,
+    fontname="Microsoft YaHei",
+    fontsize=24,
+    fontcolor="#17202A",
+    label="GLM-4.7-Flash on SGLang Ascend NPU\n模型结构、关键张量维度与 Prefill / Decode 数据路径",
+    labelloc=t,
+    labeljust=c
+  ];
+
+  node [
+    shape=plain,
+    fontname="Microsoft YaHei",
+    fontsize=11,
+    fontcolor="#17202A"
+  ];
+  edge [
+    fontname="Microsoft YaHei",
+    fontsize=9,
+    color="#667085",
+    fontcolor="#475467",
+    arrowsize=0.72,
+    penwidth=1.3
+  ];
+
+  subgraph cluster_legend {
+    label="维度约定（基线：TP=4）";
+    color="#D0D5DD";
+    fillcolor="#FFFFFF";
+    style="rounded,filled";
+    penwidth=1.1;
+    legend [label=<
+      <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="8" CELLPADDING="2">
+        <TR>
+          <TD><B>T</B>：本 rank 本轮 token 数</TD>
+          <TD><B>B</B>：decode batch size</TD>
+          <TD><B>D=2048</B>：hidden size</TD>
+          <TD><B>H=20 / Htp=5</B>：全局 / 单 rank heads</TD>
+        </TR>
+        <TR>
+          <TD><B>Rq=768</B>：Q latent</TD>
+          <TD><B>Rkv=512</B>：KV latent</TD>
+          <TD><B>Drope=64</B>：RoPE head dim</TD>
+          <TD><B>Dnope=192 / Dh=256</B></TD>
+        </TR>
+      </TABLE>
+    >];
+  }
+
+  subgraph cluster_top {
+    label="A. 端到端模型主干";
+    color="#B8C2CC";
+    fillcolor="#FFFFFF";
+    style="rounded,filled";
+    penwidth=1.3;
+
+    request [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#98A2B3" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#F2F4F7">
+        <TR><TD><B>请求与调度</B></TD></TR>
+        <TR><TD ALIGN="LEFT">input_ids [T]<BR/>positions [T]<BR/>ForwardBatch metadata</TD></TR>
+      </TABLE>
+    >];
+
+    embed [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#378A8A" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#E8F5F3">
+        <TR><TD><B>VocabParallelEmbedding</B></TD></TR>
+        <TR><TD ALIGN="LEFT">全局 W: [154880, 2048]<BR/>TP4 本地 W: [38720, 2048]<BR/>输出 X0: [T, 2048]</TD></TR>
+      </TABLE>
+    >];
+
+    layer0 [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#2F80A0" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#EAF4F8">
+        <TR><TD><B>Decoder Layer 0</B></TD></TR>
+        <TR><TD>MLA Attention + Dense MLP<BR/>[T,2048] -&gt; [T,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    layers146 [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#4E8B57" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#EDF7EE">
+        <TR><TD><B>Decoder Layers 1 ... 46（共 46 层）</B></TD></TR>
+        <TR><TD>MLA Attention + 64E Top-4 MoE + Shared Expert<BR/>每层 [T,2048] -&gt; [T,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    finalnorm [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#7A6F9B" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#F2EFF8">
+        <TR><TD><B>Final RMSNorm</B></TD></TR>
+        <TR><TD>[T,2048] -&gt; [T,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    lmhead [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#7A6F9B" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#F2EFF8">
+        <TR><TD><B>ParallelLMHead + LogitsProcessor</B></TD></TR>
+        <TR><TD ALIGN="LEFT">TP4 本地 W: [38720,2048]<BR/>local logits: [B,38720]<BR/>gather 后: [B,154880]</TD></TR>
+      </TABLE>
+    >];
+
+    sampler [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#B26A3C" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#FFF3E8">
+        <TR><TD><B>Sampler / Response</B></TD></TR>
+        <TR><TD>next_token_ids [B]<BR/>detokenize / reasoning / tool parser</TD></TR>
+      </TABLE>
+    >];
+
+    request -> embed -> layer0 -> layers146 -> finalnorm -> lmhead -> sampler;
+  }
+
+  subgraph cluster_decoder {
+    label="B. 放大一个 Glm4MoeLiteDecoderLayer";
+    color="#B8C2CC";
+    fillcolor="#FFFFFF";
+    style="rounded,filled";
+    penwidth=1.3;
+
+    dec_in [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#98A2B3" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#F8F9FB">
+        <TR><TD><B>layer input</B></TD></TR>
+        <TR><TD>hidden [T,2048]<BR/>residual [T,2048] 或 None</TD></TR>
+      </TABLE>
+    >];
+
+    norm1 [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#7A6F9B" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#F2EFF8">
+        <TR><TD><B>Add + RMSNorm</B></TD></TR>
+        <TR><TD>torch_npu.npu_add_rms_norm<BR/>输出 [T,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    fused_a [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#D69E2E" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF8DE">
+        <TR><TD><B>fused_qkv_a_proj_with_mqa</B></TD></TR>
+        <TR><TD ALIGN="LEFT">W: [1344,2048]（每 rank 复制）<BR/>[T,2048] -&gt; [T,1344]</TD></TR>
+      </TABLE>
+    >];
+
+    q_latent [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#D69E2E" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF8DE">
+        <TR><TD><B>Q latent 分支</B></TD></TR>
+        <TR><TD ALIGN="LEFT">q_a [T,768] -&gt; RMSNorm<BR/>q_b local W [1280,768]<BR/>q [T,5,256]<BR/>= q_nope [T,5,192] + q_pe [T,5,64]</TD></TR>
+      </TABLE>
+    >];
+
+    kv_latent [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#C8705A" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF0EC">
+        <TR><TD><B>KV latent 分支</B></TD></TR>
+        <TR><TD ALIGN="LEFT">latent [T,576]<BR/>= cKV [T,512] + k_pe [T,64]<BR/>cKV 经 RMSNorm；q_pe/k_pe 经 RoPE</TD></TR>
+      </TABLE>
+    >];
+
+    kvcache [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#C8705A" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF0EC">
+        <TR><TD><B>NPUMLATokenToKVPool</B></TD></TR>
+        <TR><TD ALIGN="LEFT">page_size=128<BR/>cKV: [47,P+1,128,1,512]<BR/>k_rope: [47,P+1,128,1,64]<BR/>block_tables [B,max_blocks]</TD></TR>
+      </TABLE>
+    >];
+
+    prefill [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#2F80A0" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#EAF4F8">
+        <TR><TD><B>Prefill: MHA_NPU</B></TD></TR>
+        <TR><TD ALIGN="LEFT">kv_b local W [2240,512]<BR/>K [T,5,256], V [T,5,256]<BR/>FIA -&gt; Oattn [T,5,256]</TD></TR>
+      </TABLE>
+    >];
+
+    decode [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#2F80A0" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#EAF4F8">
+        <TR><TD><B>Decode: MLA_NPU</B></TD></TR>
+        <TR><TD ALIGN="LEFT">q_nope x w_kc [5,192,512]<BR/>Qabs [B,5,512] + q_pe [B,5,64]<BR/>paged MLA -&gt; Olatent [B,5,512]<BR/>x w_vc [5,512,256] -&gt; [B,5,256]</TD></TR>
+      </TABLE>
+    >];
+
+    oproj [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#D69E2E" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF8DE">
+        <TR><TD><B>o_proj（Row Parallel）</B></TD></TR>
+        <TR><TD ALIGN="LEFT">local input [T/B,1280]<BR/>local W [2048,1280]<BR/>TP reduce -&gt; [T/B,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    norm2 [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#7A6F9B" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#F2EFF8">
+        <TR><TD><B>Residual + post-attention RMSNorm</B></TD></TR>
+        <TR><TD>[T/B,2048] -&gt; [T/B,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    dense [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#2F80A0" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#EAF4F8">
+        <TR><TD><B>Layer 0 Dense MLP</B></TD></TR>
+        <TR><TD ALIGN="LEFT">gate_up local W [5120,2048]<BR/>Y [T,5120] = gate [T,2560] + up [T,2560]<BR/>SwiGLU -&gt; [T,2560]<BR/>down local W [2048,2560]<BR/>TP reduce -&gt; [T,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    moe [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#4E8B57" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#EDF7EE">
+        <TR><TD><B>Layers 1-46 Routed MoE</B></TD></TR>
+        <TR><TD ALIGN="LEFT">router W [64,2048] FP32 -&gt; logits [T,64]<BR/>top-k -&gt; ids/weights [T,4]<BR/>TP4 NPU w13 [64,2048,768]<BR/>TP4 NPU w2 [64,384,2048]<BR/>routing + GMM + SwiGLU + GMM + combine<BR/>routed output [T,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    shared [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#4E8B57" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#EDF7EE">
+        <TR><TD><B>Shared Expert（独立路径）</B></TD></TR>
+        <TR><TD ALIGN="LEFT">gate_up local W [768,2048]<BR/>SwiGLU [T,384]<BR/>down local W [2048,384]<BR/>shared output [T,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    dec_out [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#98A2B3" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#F8F9FB">
+        <TR><TD><B>layer output</B></TD></TR>
+        <TR><TD>routed + shared + residual/collective<BR/>[T/B,2048]</TD></TR>
+      </TABLE>
+    >];
+
+    dec_in -> norm1 -> fused_a;
+    fused_a -> q_latent [label="split 前 768"];
+    fused_a -> kv_latent [label="split 后 576"];
+    kv_latent -> kvcache [label="写入压缩 cache", color="#C8705A"];
+    q_latent -> prefill [label="普通 extend"];
+    kv_latent -> prefill;
+    q_latent -> decode [label="decode / verify"];
+    kvcache -> decode [label="paged read", color="#C8705A"];
+    prefill -> oproj;
+    decode -> oproj;
+    oproj -> norm2;
+    norm2 -> dense [label="layer 0"];
+    norm2 -> moe [label="layers 1-46"];
+    norm2 -> shared [label="layers 1-46"];
+    dense -> dec_out;
+    moe -> dec_out [label="routed"];
+    shared -> dec_out [label="shared"];
+  }
+
+  subgraph cluster_nextn {
+    label="C. 可选 NextN / EAGLE Draft";
+    color="#B8C2CC";
+    fillcolor="#FFFFFF";
+    style="rounded,filled";
+    penwidth=1.3;
+
+    draft_in [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#B26A3C" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF3E8">
+        <TR><TD><B>Draft 输入</B></TD></TR>
+        <TR><TD>token embedding [Td,2048]<BR/>target hidden [Td,2048]</TD></TR>
+      </TABLE>
+    >];
+    ehproj [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#B26A3C" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF3E8">
+        <TR><TD><B>enorm + hnorm + eh_proj</B></TD></TR>
+        <TR><TD>concat [Td,4096]<BR/>W [2048,4096] -&gt; [Td,2048]</TD></TR>
+      </TABLE>
+    >];
+    draft_layer [label=<
+      <TABLE BORDER="0" CELLBORDER="1" COLOR="#B26A3C" CELLSPACING="0" CELLPADDING="6" BGCOLOR="#FFF3E8">
+        <TR><TD><B>1 x Decoder Layer + shared LM head</B></TD></TR>
+        <TR><TD>draft logits [Td,154880]<BR/>tree build / target verify</TD></TR>
+      </TABLE>
+    >];
+    draft_in -> ehproj -> draft_layer;
+  }
+
+  legend -> request [style=invis];
+  sampler -> dec_in [style=invis, weight=10];
+  dec_out -> draft_in [style=invis, weight=10];
+}
