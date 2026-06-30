@@ -378,21 +378,21 @@ flowchart TD
 
 ---
 
-## 11.1 先统一术语：进程、GPU、rank、group 到底是什么
+## 11.1 先统一术语：进程、GPU/NPU、rank、group 到底是什么
 
 读 SGLang 分布式代码时，最容易混淆的是这四个词：
 
 | 概念 | 在 SGLang 中大致对应什么 | 是否一一对应 | 说明 |
 |---|---|---|---|
-| OS 进程 | `Scheduler` 子进程、`DataParallelController` 子进程、`DetokenizerManager` 子进程、主进程中的 `TokenizerManager` | 不完全一一对应 | 模型计算 rank 通常是一个 Scheduler 子进程；Tokenizer/Detokenizer 不一定绑定 GPU。 |
-| GPU / device | `gpu_id` / `local_rank` | 通常一个模型 rank 绑定一个 GPU | `Engine._launch_scheduler_processes()` 计算 `gpu_id`，传给 `run_scheduler_process()`、`TpModelWorker`、`ModelRunner`。 |
+| OS 进程 | `Scheduler` 子进程、`DataParallelController` 子进程、`DetokenizerManager` 子进程、主进程中的 `TokenizerManager` | 不完全一一对应 | 模型计算 rank 通常是一个 Scheduler 子进程；Tokenizer/Detokenizer 通常不绑定 GPU/NPU。 |
+| GPU / NPU / device | `gpu_id` / `local_rank` | 通常一个模型 rank 绑定一个加速器 device | `Engine._launch_scheduler_processes()` 计算 `gpu_id`，传给 `run_scheduler_process()`、`TpModelWorker`、`ModelRunner`。变量仍叫 `gpu_id`，但 `device="npu"` 时表示本地 NPU 索引。 |
 | global rank | torch distributed world 内的 rank | 一个模型计算进程一个 global rank | 在 `ModelRunner.init_torch_distributed()` 中，rank 计算为 `tp_size * pp_rank + tp_rank`。 |
-| logical rank | `tp_rank`、`pp_rank`、`dp_rank`、`attn_cp_rank`、`moe_ep_rank` 等 | 一个进程同时拥有多个 logical rank | 同一个进程/GPU 会在 TP、PP、DP attention、MoE EP 等多个维度中分别有自己的 rank。 |
+| logical rank | `tp_rank`、`pp_rank`、`dp_rank`、`attn_cp_rank`、`moe_ep_rank` 等 | 一个进程同时拥有多个 logical rank | 同一个进程/device 会在 TP、PP、DP attention、MoE EP 等多个维度中分别有自己的 rank。 |
 | process group | `get_tp_group()`、`get_pp_group()`、`get_attn_tp_group()` 等 | 一个进程可加入多个 group | group 是 collective 的边界；不同并行策略使用不同 group 通信。 |
 
 一句话：
 
-> 一个模型计算进程通常绑定一张 GPU，并在 torch distributed world 里拥有一个 global rank；但这个进程同时属于多个逻辑 group，所以它会有 `tp_rank`、`pp_rank`、`attn_tp_rank`、`attn_cp_rank`、`moe_ep_rank`、`moe_dp_rank` 等多个身份。
+> 一个模型计算进程通常绑定一张 GPU 或 NPU，并在 torch distributed world 里拥有一个 global rank；但这个进程同时属于多个逻辑 group，所以它会有 `tp_rank`、`pp_rank`、`attn_tp_rank`、`attn_cp_rank`、`moe_ep_rank`、`moe_dp_rank` 等多个身份。
 
 ---
 
@@ -557,7 +557,7 @@ flowchart TB
 
 ---
 
-## 11.4 进程、GPU 与 rank 的实际映射
+## 11.4 进程、GPU/NPU 与 rank 的实际映射
 
 标准 `dp_size == 1` 时，`Engine._launch_scheduler_processes()` 双层循环启动 Scheduler：
 
@@ -575,7 +575,7 @@ for pp_rank in pp_rank_range:
 
 | 参数 | 从哪里来 | 进入哪些类 | 用途 |
 |---|---|---|---|
-| `gpu_id` | `Engine._launch_scheduler_processes()` | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前进程绑定哪张 GPU。 |
+| `gpu_id` | `Engine._launch_scheduler_processes()` | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前进程绑定哪个本地加速器；CUDA 下是 GPU 索引，Ascend 下是 NPU 索引。 |
 | `tp_rank` | loop 变量 | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前 rank 在 TP 维度的位置。 |
 | `pp_rank` | loop 变量 | `Scheduler`、`TpModelWorker`、`ModelRunner` | 当前 rank 属于哪个 pipeline stage。 |
 | `attn_cp_rank` | `_compute_parallelism_ranks()` | `TpModelWorker`、`ModelRunner` | attention context parallel 的 rank。 |
@@ -594,6 +594,56 @@ flowchart LR
   Runner --> Dist["ModelRunner.init_torch_distributed"]
   Dist --> Groups["initialize_model_parallel<br/>创建 TP/PP/ATTN/MoE groups"]
 ```
+
+### Scheduler、TpModelWorker、ModelRunner 与设备的直接关系
+
+这三个名字容易让人误以为它们是三个进程。实际并不是：在标准模型 rank 上，它们位于**同一个 Scheduler 子进程**内，并形成持有与调用关系。
+
+```mermaid
+flowchart LR
+  Engine["Engine 主进程<br/>计算 device id 与 ranks"] -->|"mp.Process"| Scheduler
+
+  subgraph RankProc["一个 Scheduler 子进程 / 一个 global rank"]
+    Scheduler["Scheduler<br/>CPU 调度状态与 event loop"] -->|"持有并调用"| Worker["TpModelWorker<br/>调度态到执行态的适配层"]
+    Worker -->|"持有并调用"| Runner["ModelRunner<br/>模型、KV cache、backend、process groups"]
+    Runner --> Device["本地 device: GPU 或 NPU"]
+  end
+
+  Runner -->|"TP/PP/EP collective"| Peers["其他模型 rank 子进程<br/>各自绑定自己的 device"]
+```
+
+职责边界如下：
+
+| 组件 | 是否独立进程 | 主要使用 CPU 还是 device | 和资源的关系 |
+|---|---|---|---|
+| `Scheduler` | 它所在的模型 rank 本身是一个子进程 | 调度逻辑主要在 CPU，也会创建 device tensor、stream/event | 保存 waiting/running batch，决定本轮执行什么；它不加载另一份模型。 |
+| `TpModelWorker` | 不是额外进程，是 `Scheduler` 进程内的对象 | CPU 适配逻辑 + device batch | 持有一个主 `ModelRunner`；把 `ScheduleBatch` 转成 `ForwardBatch`，处理 TP/PP/spec 分支。 |
+| `ModelRunner` | 不是额外进程，是 `TpModelWorker` 持有的对象 | 主要直接操作 GPU/NPU | 绑定本地 device，加载本 rank 的模型分片，分配 KV cache，初始化 attention/graph/sampler 和分布式 group。 |
+| 模型层与 backend | `ModelRunner` 内部对象 | GPU/NPU | 执行当前 rank 的矩阵、attention、MoE、sampling kernel，并通过 process group 与其他 rank 通信。 |
+
+最关键的设备绑定发生在：
+
+```text
+python/sglang/srt/model_executor/model_runner.py
+ModelRunner.init_torch_distributed()
+
+torch.get_device_module(self.device).set_device(self.gpu_id)
+backend = get_default_distributed_backend(self.device)
+init_distributed_environment(
+    rank=self.tp_size * self.pp_rank + self.tp_rank,
+    local_rank=self.gpu_id,
+    ...
+)
+```
+
+这里使用 `torch.get_device_module(self.device)`，所以同一套主流程会根据 `self.device` 选择设备模块：
+
+| 运行平台 | `self.device` | `gpu_id` 的实际含义 | 默认设备通信后端 | 设备专用执行层 |
+|---|---|---|---|---|
+| NVIDIA GPU | `cuda` | 当前进程绑定的本地 CUDA device 索引 | NCCL | CUDA attention、CUDA Graph、Triton/CUDA kernels。 |
+| Ascend NPU | `npu` | 当前进程绑定的本地 NPU device 索引，名称只是历史沿用 | HCCL；启用 ZBAL 时可切换为 ZBAL | Ascend attention、NPU Graph、`torch_npu` / `sgl_kernel_npu` kernels。 |
+
+因此，前面的 TP/PP/DP 映射示例把 `gpu 0..N` 替换为 `npu 0..N` 后，**进程数、global rank、logical rank 和 group 关系不变**；变化的是 device module、collective backend 和最终执行的 kernel。GPU 与 NPU 不是由 `Scheduler` 各启动一套不同架构，而是在 `ModelRunner` 及其 backend 初始化阶段分流。
 
 ### 单机 TP=4、PP=1 的直观映射
 
