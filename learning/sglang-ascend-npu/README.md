@@ -498,9 +498,9 @@ Fallback：
 - graph、TP、PD、量化、LoRA、MoE 分别可能引入哪些精度风险？
 - 为什么 `ais_bench` 适合作为 Ascend 离线参考，但不能替代 SGLang 端到端 serving 评测？
 
-## 后续拆分计划
+## 课程索引
 
-本目录后续建议按下面顺序继续扩展：
+建议按下面顺序学习：
 
 1. [00-background.md](./00-background.md)：Ascend NPU 背景知识，梳理硬件、CANN、torch_npu、HCCL、KV cache、attention、graph、PD 等前置概念。
 2. [01-environment-and-install.md](./01-environment-and-install.md)：GNU/Linux + Ascend NPU 服务器上的安装、环境检查、Docker/源码部署和最小服务跑通。
