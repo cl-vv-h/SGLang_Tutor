@@ -42,11 +42,10 @@ G = X @ Wr
 G: [T,E]
 ```
 
-`G[t,e]` 表示 token `t` 分配给 expert `e` 的原始分数。Qwen3-MoE 的 SGLang 实现使用：
+`G[t,e]` 表示 token `t` 分配给 expert `e` 的原始分数。其核心计算为：
 
 ```text
-self.gate = ReplicatedLinear(H, E, bias=False)
-router_logits, _ = self.gate(hidden_states)
+router_logits = hidden_states @ router_weight
 ```
 
 Router 参数相对于所有 expert 参数通常较小，复制在 ranks 上可以避免先为路由分数做切分通信。
@@ -78,7 +77,7 @@ topk_ids: [T,K], integer
 topk_weights: [T,K], floating point
 ```
 
-SGLang 的 `TopK` 根据模型配置和 backend 生成统一的 `topk_output`，其中至少包含 expert ids 和权重。
+Top-K 输出至少包含 expert ids 和对应权重；实现还可附带 token index、expert offset 和路由排序信息。
 
 ## 5. Dispatch：从 token 顺序变成 expert 顺序
 
@@ -153,7 +152,7 @@ y3 = 0.55*E0(x3) + 0.45*E2(x3)
 
 ## 7. 单个 Expert 的 SwiGLU
 
-每个 Qwen3-MoE expert 是门控 MLP。对 `X_e [r_e,H]`：
+现代 MoE 常使用门控 SwiGLU expert。对 `X_e [r_e,H]`：
 
 ```text
 gate = X_e @ W_gate      [r_e,Ie]
@@ -291,50 +290,51 @@ R = T*K
 
 可能仍然很小，并分散到多个 experts。此时 router、dispatch、通信和 kernel launch 的固定开销占比明显上升。
 
-## 13. SGLang 普通执行路径
+## 13. MoE 的参考实现顺序
 
-`Qwen3MoeSparseMoeBlock.forward_normal` 的核心调用链：
+一个与框架无关的 MoE forward 可以表示为：
 
 ```text
-hidden_states [T,H]
-  -> gate(hidden_states)
-     router_logits [T,E]
-  -> topk(hidden_states, router_logits)
-     topk_output: ids [T,K], weights [T,K]
-  -> experts(hidden_states, topk_output)
-     final_hidden_states [T,H]
-  -> optional EP/TP reduction
+router_logits = X @ W_router                 # [T,E]
+topk_scores, topk_ids = topk(router_logits)  # [T,K], [T,K]
+topk_weights = normalize(topk_scores)        # [T,K]
+
+permuted_X, route_meta = dispatch(X, topk_ids)
+                                                    # [R,H], R=T*K
+permuted_Y = grouped_expert_swiglu(permuted_X,
+                                  route_meta)       # [R,H]
+Y = combine(permuted_Y, route_meta, topk_weights)  # [T,H]
 ```
 
-`get_moe_impl_class(quant_config)` 根据量化和硬件后端选择 expert 实现。模型层依赖统一接口，不直接绑定某一种 Triton、CUDA、NPU 或量化 kernel。
+`dispatch` 必须保存逆置换信息，否则无法把 expert 顺序恢复为 token 顺序。`combine` 必须同时执行逆置换和按路由权重求和。
 
-## 14. DeepEP 分解执行路径
+## 14. 可并行调度的阶段划分
 
-在 DeepEP 路径中，MoE 被拆成显式阶段：
+分布式 MoE 可以拆成以下数据依赖阶段：
 
 ```text
-op_gate
-  -> op_select_experts
-  -> op_dispatch_a
-  -> op_dispatch_b
-  -> op_experts
-  -> op_combine_a
-  -> op_combine_b
-  -> op_output
+Gate
+  -> Select Experts
+  -> Count Routes per Destination
+  -> Dispatch All-to-All
+  -> Grouped Expert GEMM
+  -> Combine All-to-All
+  -> Weighted Reduction
 ```
 
 数据依赖：
 
 | 阶段 | 消费 | 产生 |
 |---|---|---|
-| `op_gate` | `hidden_states_mlp_input` | `router_logits` |
-| `op_select_experts` | hidden + logits | `topk_output` |
-| `op_dispatch_a/b` | hidden + top-k | `dispatch_output` |
-| `op_experts` | dispatched rows | `combine_input` |
-| `op_combine_a/b` | expert output + route metadata | `hidden_states_after_combine` |
-| `op_output` | combined rows | `hidden_states_mlp_output [T,H]` |
+| Gate | `X [T,H]` | `router_logits [T,E]` |
+| Select Experts | logits | ids/weights `[T,K]` |
+| Count Routes | expert ids | 每个目标 rank/expert 的行数 |
+| Dispatch | token rows + route metadata | expert 分组 rows `[R_local,H]` |
+| Expert GEMM | expert 分组 rows | expert outputs `[R_local,H]` |
+| Combine | expert outputs + inverse routes | token route outputs `[R,H]` |
+| Weighted Reduction | route outputs + weights | `Y [T,H]` |
 
-`dispatch_a/b` 和 `combine_a/b` 的拆分允许通信准备、数据传输和计算以 backend 支持的方式重叠。
+当通信库支持异步操作时，route count、数据发送和本地 expert GEMM 可以流水化；数学结果仍由依赖顺序约束。
 
 ## 15. 不能混淆的三个数量
 

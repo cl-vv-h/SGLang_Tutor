@@ -16,11 +16,11 @@ P(x_t | x_0, x_1, ..., x_(t-1))
 
 训练时可以并行计算序列中所有位置，但每个位置只能关注自己和更早的 token。推理时，prefill 一次处理 prompt，decode 每轮追加一个或少量 token。
 
-Qwen3-MoE 是 Decoder-only Transformer。它的注意力子层负责 token 间的信息交换，Sparse MoE 子层负责逐 token 的非线性特征变换。
+现代生成式语言模型普遍采用 Decoder-only Transformer。注意力子层负责 token 间的信息交换，FFN 或 Sparse MoE 子层负责逐 token 的非线性特征变换。
 
 ## 2. 整机数据流
 
-![Qwen3-MoE 整机数据流](./assets/qwen3-moe-overview.svg)
+![Decoder-only Transformer 整机数据流](./assets/decoder-only-overview.svg)
 
 整机计算可以写成：
 
@@ -51,9 +51,9 @@ input_ids
 
 训练通常令 `M=T`。在线自回归推理通常只需要每条请求最后一个有效位置的 logits，因此常见 `M=B`，无需为 prompt 的每一行都生成完整词表 logits。
 
-## 3. 为什么 SGLang 常使用 `[T,H]` 而不是 `[B,S,H]`
+## 3. 等长布局与 Packed Token 布局
 
-教材常把 hidden states 写成 `[B,S,H]`。Serving batch 中的请求长度不同：
+训练教材通常把 hidden states 写成 `[B,S,H]`。当 batch 中的序列长度不同时，可以补齐到统一长度，也可以只打包有效 token：
 
 ```text
 request 0: S_0 = 4
@@ -61,14 +61,14 @@ request 1: S_1 = 2
 request 2: S_2 = 5
 ```
 
-若全部 padding 到 `S_max=5`，形状是 `[3,5,H]`，其中 4 行是无效 padding。SGLang 更常把有效 token 打包：
+若全部 padding 到 `S_max=5`，形状是 `[3,5,H]`，其中 4 行是无效 padding。packed 表示只保留有效 token：
 
 ```text
 T = 4 + 2 + 5 = 11
 hidden_states.shape = [11,H]
 ```
 
-序列边界、每条序列长度、KV Cache 位置和因果可见范围由 `ForwardBatch` 及 attention metadata 表达。线性层、RMSNorm 和 MoE 只需要处理连续的 `[T,H]`。
+packed 表示必须额外保存每条序列的起始偏移和长度。Attention 根据这些边界限制可见范围；线性层、归一化和 MoE 则可直接处理连续的 `[T,H]`。
 
 两种表示的数学含义相同：
 
@@ -101,7 +101,7 @@ X_0: [T,H]
 
 ![Pre-Norm Decoder Layer](./assets/decoder-block.svg)
 
-Qwen3-MoE 使用 pre-norm 残差结构。设该层输入为 `x_l [T,H]`：
+多数现代 Decoder-only 模型使用 pre-norm 残差结构。设该层输入为 `x_l [T,H]`：
 
 ```text
 n_l = RMSNorm(x_l)                  [T,H]

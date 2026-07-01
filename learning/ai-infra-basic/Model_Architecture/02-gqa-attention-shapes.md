@@ -49,7 +49,7 @@ V_flat = X @ Wv
 | `Q_flat` | `[T,Qdim]` |
 | `K_flat`, `V_flat` | `[T,KVdim]` |
 
-SGLang 的 `QKVParallelLinear` 把三个投影打包成一次逻辑操作：
+高性能实现通常把三个权重拼接为一次融合 QKV 投影：
 
 ```text
 qkv = qkv_proj(X)
@@ -304,7 +304,7 @@ Qdim_local = Nq_local * D
 Nkv_local = Nkv / Ptp
 ```
 
-若 `Nkv < Ptp`，SGLang 会在部分 TP ranks 上复制 KV heads，使：
+若 `Nkv < Ptp`，一种常见策略是在部分 TP ranks 上复制 KV heads，使：
 
 ```text
 Nkv_local = max(1, Nkv / Ptp)
@@ -321,35 +321,36 @@ attn output local: [T,Nq_local*D]
 
 `RowParallelLinear` 把局部 attention 输出投影回 hidden 分片/完整 hidden，并由层通信逻辑决定何时执行 all-reduce 或与后续通信融合。
 
-## 14. 对应 SGLang 调用链
+## 14. Attention 的参考实现顺序
 
-`Qwen3MoeAttention` 中的主要路径：
+不考虑特定框架时，GQA 的实现顺序可以表示为：
 
 ```text
-forward(hidden_states, positions, forward_batch)
-  -> forward_prepare(...)
-     -> qkv_proj(hidden_states)
-     -> apply_qk_norm_rope(qkv, positions, forward_batch)
-        -> split q, k, v
-        -> apply_qk_norm(q, k)
-        -> rotary_emb(positions, q, k)
-  -> forward_core(...)
-     -> RadixAttention(q, k, v, forward_batch)
-     -> o_proj(attn_output)
+qkv = linear(hidden_states, Wqkv)
+q, k, v = split(qkv)
+q = reshape(q, [B,S,Nq,D])
+k = reshape(k, [B,S,Nkv,D])
+v = reshape(v, [B,S,Nkv,D])
+q = rms_norm_per_head(q)
+k = rms_norm_per_head(k)
+q, k = apply_rope(q, k, positions)
+k_cache, v_cache = append_cache(k, v)
+attn_output = causal_gqa(q, k_cache, v_cache)
+output = linear(merge_heads(attn_output), Wo)
 ```
 
 关键变量：
 
-| 源码变量 | 逻辑形状 |
+| 变量 | 逻辑形状 |
 |---|---:|
 | `hidden_states` | `[T,H]` |
 | `qkv` | `[T,q_size+2*kv_size]` |
-| `q` | `[T,q_size]`，backend 可解释为 `[T,Nq_local,D]` |
-| `k`, `v` | `[T,kv_size]`，backend 可解释为 `[T,Nkv_local,D]` |
+| `q` | `[T,q_size]`，或恢复为 `[T,Nq_local,D]` |
+| `k`, `v` | `[T,kv_size]`，或恢复为 `[T,Nkv_local,D]` |
 | `attn_output` | `[T,q_size]` |
 | `output` | `[T,H]` 或通信前的等价局部表示 |
 
-`fused_qk_norm_rope` 可以把 split、QK Norm 和 RoPE 合并到一个 kernel；`fused_set_kv_buffer_arg` 还可以在 RoPE 路径中直接写 KV buffer。融合改变 kernel 边界，不改变上述逻辑形状和依赖。
+工程实现可以把 split、QK Norm、RoPE 和 KV 写入融合到一个 kernel。融合改变的是 kernel 边界和中间访存，不改变上述逻辑形状和数据依赖。
 
 ## 15. KV Cache 容量公式
 
