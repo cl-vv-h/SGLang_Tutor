@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1220" height="560" viewBox="0 0 1220 560" role="img" aria-labelledby="title desc">
+  <title id="title">Pre-norm decoder block</title>
+  <desc id="desc">A hidden tensor follows RMSNorm, causal attention, residual addition, RMSNorm, sparse MoE, and another residual addition.</desc>
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#334155"/></marker><style>.b{stroke:#334155;stroke-width:2;rx:6}.t{font:600 19px Arial,sans-serif;fill:#0f172a}.s{font:15px Consolas,monospace;fill:#334155}.l{stroke:#334155;stroke-width:3;fill:none;marker-end:url(#a)}.r{stroke:#64748b;stroke-width:2;fill:none;stroke-dasharray:7 5;marker-end:url(#a)}</style></defs>
+  <rect width="1220" height="560" fill="#f8fafc"/>
+  <rect class="b" x="30" y="200" width="125" height="90" fill="#dbeafe"/><text class="t" x="92" y="235" text-anchor="middle">Input</text><text class="s" x="92" y="265" text-anchor="middle">x [T,H]</text>
+  <rect class="b" x="210" y="200" width="145" height="90" fill="#e0e7ff"/><text class="t" x="282" y="235" text-anchor="middle">RMSNorm</text><text class="s" x="282" y="265" text-anchor="middle">x_hat [T,H]</text>
+  <rect class="b" x="410" y="180" width="170" height="130" fill="#fef3c7"/><text class="t" x="495" y="225" text-anchor="middle">Causal GQA</text><text class="s" x="495" y="255" text-anchor="middle">a [T,H]</text><text class="s" x="495" y="280" text-anchor="middle">KV cache update</text>
+  <circle cx="640" cy="245" r="31" fill="#dcfce7" stroke="#334155" stroke-width="2"/><text class="t" x="640" y="252" text-anchor="middle">+</text>
+  <rect class="b" x="725" y="200" width="145" height="90" fill="#e0e7ff"/><text class="t" x="797" y="235" text-anchor="middle">RMSNorm</text><text class="s" x="797" y="265" text-anchor="middle">r_hat [T,H]</text>
+  <rect class="b" x="925" y="180" width="155" height="130" fill="#fce7f3"/><text class="t" x="1002" y="225" text-anchor="middle">Sparse MoE</text><text class="s" x="1002" y="255" text-anchor="middle">m [T,H]</text><text class="s" x="1002" y="280" text-anchor="middle">Top-K experts</text>
+  <circle cx="1155" cy="245" r="31" fill="#dcfce7" stroke="#334155" stroke-width="2"/><text class="t" x="1155" y="252" text-anchor="middle">+</text>
+  <path class="l" d="M155 245 H200"/><path class="l" d="M355 245 H400"/><path class="l" d="M580 245 H599"/><path class="l" d="M671 245 H715"/><path class="l" d="M870 245 H915"/><path class="l" d="M1080 245 H1114"/>
+  <path class="r" d="M92 300 V390 H640 V286"/><path class="r" d="M640 390 H1155 V286"/>
+  <text class="s" x="365" y="420" text-anchor="middle">r = x + Attention(RMSNorm(x))</text><text class="s" x="900" y="420" text-anchor="middle">y = r + MoE(RMSNorm(r))</text>
+  <text class="s" x="610" y="500" text-anchor="middle">Every main-path activation preserves [T,H]; internal operators temporarily expand or split dimensions.</text>
+</svg>
