@@ -1,0 +1,203 @@
+# 基础 01：从一个公式到并行 Kernel
+
+本章先不写任何框架代码，只回答一个根问题：一条数学公式为什么会变成 `grid`、`program`、`tile`、搬运和同步？
+
+## 1. 算子、Kernel 和程序不是一回事
+
+假设要计算：
+
+\[
+y_i = a x_i + b
+\]
+
+在模型代码里，它可能只是一行表达式；在工程里至少有三层对象：
+
+| 层次 | 含义 | 例子 |
+|---|---|---|
+| 算子语义 | 对输入输出做什么数学变换 | `y = a * x + b` |
+| 算子工程 | shape/dtype 检查、输出分配、dispatch、tiling、workspace、注册 | Python wrapper、C++ host 代码 |
+| Device Kernel | 真正在 NPU 核上执行的一段程序 | Triton `@triton.jit` 函数、Ascend C `__aicore__` 核函数 |
+
+一个“算子”可能启动一个 kernel，也可能启动多个 kernel；反过来，一个融合 kernel 也可能一次完成多个原本独立的算子。
+
+## 2. Host 和 Device
+
+**Host** 通常指 CPU 及其进程，负责准备参数、选择实现、分配输出和发起 kernel launch。**Device** 指 Ascend NPU，负责执行数据密集的计算。
+
+```mermaid
+sequenceDiagram
+  participant H as "Host / CPU"
+  participant R as "CANN Runtime"
+  participant D as "Ascend NPU"
+  H->>H: 检查 shape/dtype，计算 grid 或 tiling
+  H->>H: 分配输出和 workspace
+  H->>R: 将 kernel 与参数提交到 stream
+  R->>D: 异步 launch
+  D->>D: 多核并行执行 kernel
+  D-->>H: 结果仍位于 device memory
+```
+
+Kernel launch 通常是异步的：Host 把任务放进 stream 后可以继续工作。只有读取结果、显式同步或存在依赖时，Host 才必须等待。
+
+## 3. 为什么要切分工作
+
+NPU 有多个计算核，但单个核的片上存储很小。一个大 tensor 不能整体塞进某个核里，因此通常做两级切分：
+
+1. **多核切分**：把总任务分给多个核或 program instance；
+2. **单核分块**：每个核再把自己的数据切成多个 tile，逐块搬入片上存储并计算。
+
+例如长度为 10000 的向量，假设每个 tile 处理 1024 个元素：
+
+```text
+总任务：10000 elements
+逻辑 tile：ceil(10000 / 1024) = 10 个
+
+tile 0: [0, 1024)
+tile 1: [1024, 2048)
+...
+tile 9: [9216, 10000)  # 尾块，不满 1024
+```
+
+尾块需要 `mask` 或显式长度，避免读写越界。
+
+## 4. SPMD：同一份程序处理不同数据
+
+SPMD 是 **Single Program, Multiple Data**。启动多个执行实例，每个实例运行同一份 kernel，但根据自己的编号处理不同数据。
+
+可以把它想成 8 位工人拿到同一张作业指导书：
+
+```text
+工人 0 -> 第 0 份数据
+工人 1 -> 第 1 份数据
+...
+工人 7 -> 第 7 份数据
+```
+
+关键不是复制 8 份源码，而是每个实例取得不同的 ID。
+
+| Triton | Ascend C | 含义 |
+|---|---|---|
+| `tl.program_id(axis)` | `AscendC::GetBlockIdx()` | 当前执行实例/核负责哪份任务 |
+| `grid=(N,)` | launch 的 `blockDim=N` | 启动多少个逻辑实例 |
+| `tl.num_programs(axis)` | Host 传入的 `blockDim` 或 tiling 数据 | 当前维度共有多少实例 |
+
+这张表是编程模型类比，不表示 Triton grid 与 Ascend C `blockDim` 在编译器 ABI 或物理调度上完全等价；两者都用“多个实例执行同一 kernel”帮助我们理解 SPMD。
+
+## 5. Program 是什么
+
+在 Triton 中，**program** 不是整个 Python 进程，也不是一条线程。它是一次 kernel launch 中的一个并行程序实例。
+
+一个 program 通常处理一块数据，而不是一个标量：
+
+```python
+pid = tl.program_id(0)
+offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+```
+
+如果 `BLOCK_SIZE=256`，`pid=3` 的 program 处理 `[768, 1024)`。`offsets` 是一组索引，后续 `tl.load` 和加法都作用于这一组元素。
+
+这也是 Triton 常说的 **blocked program**：程序员以一块 tensor 数据为思考单位，编译器再把块级表达降低到硬件执行。
+
+## 6. Grid 是什么
+
+**Grid** 描述一次 launch 要创建多少个 program instance。它最多可以有三个轴。
+
+一维向量可使用一维 grid：
+
+```python
+grid = (triton.cdiv(N, BLOCK_SIZE),)
+```
+
+二维矩阵也可以使用二维 grid：
+
+```python
+grid = (
+    triton.cdiv(M, BLOCK_M),
+    triton.cdiv(N, BLOCK_N),
+)
+```
+
+此时 `tl.program_id(0)` 选择行 tile，`tl.program_id(1)` 选择列 tile。
+
+注意：**grid 是逻辑任务空间，不等于物理核的拓扑图。** 如果 grid 有 10000 个 program，而设备只有几十个物理核，这些任务必须分多轮调度。Triton-Ascend 上启动过多小 program 的开销可能很明显，因此常见优化是把 grid 固定到物理 Vector Core 数量，让每个 program 在内部循环处理多个 tile。
+
+## 7. Tile 是什么
+
+**Tile** 是算法分块后的一个数据块。它是逻辑概念，不必对应某一块固定物理内存。
+
+矩阵乘法 `C[M,N] = A[M,K] @ B[K,N]` 常切成：
+
+```text
+A tile: [BLOCK_M, BLOCK_K]
+B tile: [BLOCK_K, BLOCK_N]
+C tile: [BLOCK_M, BLOCK_N]
+```
+
+每个 program 负责一个 C tile，并沿 K 维循环：
+
+```text
+acc = 0
+for k_tile in K:
+    搬入 A tile 和 B tile
+    acc += A tile @ B tile
+写回 C tile
+```
+
+Tile 太小会增加启动、循环和搬运次数；太大会占满片上存储、降低可并行度，甚至触发 UB/L1 overflow。调优本质上经常是在找一个“足够大但放得下”的 tile。
+
+## 8. Block 这个词为什么容易混乱
+
+`block` 在不同上下文中可能表示不同对象：
+
+- `BLOCK_SIZE`：Triton kernel 的编译期 tile 大小；
+- `blockDim`：Ascend C launch 的核/实例数量；
+- `GetBlockIdx()`：当前 Ascend C 实例编号；
+- data block：算法切分出的普通数据块；
+- CUDA thread block：CUDA 特有概念，不能直接等同于 Ascend Core。
+
+阅读源码时不要只看到 `block` 就做判断，要结合变量来自 Host、launch 还是 kernel 内部。
+
+## 9. Shape、Stride、Layout 和 DType
+
+Kernel 的契约至少有四部分：
+
+| 术语 | 解释 | 常见错误 |
+|---|---|---|
+| shape | 每个维度有多少元素 | 把 `[B,H,D]` 当成 `[B,D,H]` |
+| stride | 某维索引加一，内存地址跨过多少元素 | 对 transpose 后的 tensor 按 contiguous 读取 |
+| layout/format | 数据在物理存储中的组织方式 | ND 与 NZ、分形布局混用 |
+| dtype | 每个元素的数据类型 | FP16 累加溢出、索引宽度错误 |
+
+地址计算的本质是：
+
+\[
+address(i,j) = base + i \times stride_0 + j \times stride_1
+\]
+
+很多“kernel 算错”其实是地址、stride 或尾块问题，而不是数学公式错了。
+
+## 10. 三层并行要分清
+
+```text
+请求/模型层：多个请求、多个 batch、多个模型层
+Kernel 多核层：grid / blockDim 启动多个实例
+核内层：Vector/Cube 指令一次处理多个元素，搬运与计算还能流水并行
+```
+
+优化某一层不一定改善另一层。例如 kernel 快 10%，但它只占端到端时间的 2%，整体收益不足 0.2%；反过来，减少一次大 tensor 的中间写回可能同时降低 kernel 数和 GM 流量，收益会更明显。
+
+## 11. 本章检查点
+
+- 能否用自己的话区分算子、算子工程和 device kernel？
+- `program` 为什么不是一个标量线程？
+- `grid=(1000,)` 是否表示设备有 1000 个物理核？
+- `tile` 为什么既不能无限增大，也不能无限缩小？
+- `blockDim` 和 `BLOCK_SIZE` 分别控制什么？
+- 为什么 transpose 后只看 shape 不够，还要看 stride？
+
+## 官方资料
+
+- [Triton Programming Guide：blocked program 模型](https://triton-lang.org/main/programming-guide/chapter-1/introduction.html)
+- [Triton `program_id`](https://triton-lang.org/main/python-api/generated/triton.language.program_id.html)
+- [Ascend C 核函数与 SPMD](https://www.hiascend.com/document/detail/zh/canncommercial/80RC2/developmentguide/opdevg/Ascendcopdevg/atlas_ascendc_10_0014.html)
+- [Ascend C 多核 Tiling 概述](https://www.hiascend.com/document/detail/en/canncommercial/850/opdevg/Ascendcopdevg/atlas_ascendc_10_10005.html)
