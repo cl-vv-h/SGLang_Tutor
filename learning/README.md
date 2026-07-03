@@ -9,3 +9,4 @@
 - [tp-worker-model-runner](./tp-worker-model-runner/)：`TpModelWorker` 与 `ModelRunner` 的架构、执行流程、函数定位和中文注释版源码副本。
 - [sglang-ascend-npu](./sglang-ascend-npu/)：SGLang Ascend NPU 实践总览，覆盖环境、NPU 后端、attention、graph、HCCL、PD 分离、LoRA 与调优路线。
 - [ai-infra-basic](./ai-infra-basic/)：AI Infra 基础专题，按推理基础、调度优化、KV Cache、Attention Kernel、执行图、Mamba/SSM、并行策略、KV 传输、投机解码、量化、LoRA、Benchmark/Profiling 组织。
+- [ascend-kernel-infra](./ascend-kernel-infra/)：继续下沉到 Ascend NPU 算子层，学习 sgl-kernel-npu、Triton-Ascend、Ascend C、torch_npu 的关系、编程模型与性能优化。
