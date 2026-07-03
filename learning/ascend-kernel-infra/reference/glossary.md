@@ -10,7 +10,9 @@
 | sgl-kernel-npu | SGLang 官方 Ascend NPU kernel 仓库/包，混合 Triton、Ascend C、C++ 和通信实现 |
 | PyTorch/ATen | 上层 tensor 与算子语义、dispatcher 体系 |
 | torch_npu | PyTorch 的 Ascend NPU 设备后端和扩展 |
+| Driver / Firmware | 让操作系统、运行时和 NPU 硬件真正连通并可执行任务的底层软件与固件层 |
 | CANN | Ascend 基础软件栈，包括编译器、算子库、runtime、通信等 |
+| CANN Runtime | CANN 中负责 device、memory、stream、kernel/model launch 的执行层 |
 | AscendCL | CANN 中的运行时/应用接口，管理 device、memory、stream、kernel/model execution 等 |
 | HCCL | Ascend 多卡集合通信库，角色近似 CUDA 生态的 NCCL |
 | Host | 通常指 CPU 进程及 Host 侧代码，准备参数和发起 device 工作 |
@@ -37,6 +39,10 @@
 | Autotune | 对一组候选 meta-parameter 做测量并选择更优配置 |
 | Schema | Custom op 的函数签名、参数、返回值、mutation/alias 契约 |
 | Binding | 把 Python/PyTorch 调用连接到 C++/device 实现的接口代码 |
+| ACLNN | CANN 提供的一类高层算子接口/算子库入口，常用于直接复用现成 NPU 算子能力 |
+| Operator Library / 算子库 | 已由 CANN 预先提供的标准或融合算子实现集合，优先用于复用而不是重复写 kernel |
+| Tiling | 根据具体 shape、dtype 和硬件资源计算 blockDim、tile、workspace 等切分参数的过程/协议 |
+| Platform | 向编译器和 Host 侧暴露硬件核数、存储层级、架构能力等事实的查询与抽象层 |
 
 ## C. 并行编程模型
 

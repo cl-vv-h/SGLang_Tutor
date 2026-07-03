@@ -2,6 +2,8 @@
 
 本专题承接 [`learning/sglang-ascend-npu`](../sglang-ascend-npu/)：已有专题关注“如何让 SGLang 在 Ascend NPU 上正确、稳定地运行”，这里继续向下一层，关注“一个算子如何被表达、编译、注册、调用和优化”。
 
+- [路线图](./ROADMAP.md)：查看主线、前置关系和待深化主题；
+
 核心学习对象是：
 
 - [`sgl-kernel-npu`](https://github.com/sgl-project/sgl-kernel-npu)：SGLang 面向 Ascend NPU 的专用 kernel 库；
@@ -32,6 +34,7 @@
 | 内容 | 目标 |
 |---|---|
 | [01：SGLang、sgl-kernel-npu、Triton-Ascend、Ascend C、torch_npu 的关系](./01-stack-and-relationships.md) | 先分清产品、框架、编译器、编程语言和运行时边界 |
+| [02：CANN 全栈与边界](./02-cann-stack-and-boundaries.md) | 分清 Driver/Firmware、Runtime、AscendCL、算子库、编译器、Tiling、Platform、HCCL 的职责 |
 
 ### 1. Foundations：初学者必须先懂的硬件与并行基础
 
@@ -76,7 +79,8 @@
 
 ```mermaid
 flowchart LR
-  A["软件栈关系"] --> B["Kernel / SPMD 基础"]
+  A["软件栈关系"] --> B0["CANN 全栈与边界"]
+  B0 --> B["Kernel / SPMD 基础"]
   B --> C["Ascend 硬件与存储"]
   C --> D["搬运 / 同步 / 流水"]
   D --> E["Triton-Ascend 01-03"]
@@ -88,7 +92,7 @@ flowchart LR
   I --> J
 ```
 
-第一遍建议先学 Triton-Ascend，再学 Ascend C。Triton 用较少样板代码暴露并行算法的核心，适合建立 program/tile 直觉；Ascend C 再把编译器背后隐藏的片上存储、搬运、队列和同步展开。这个顺序是为了降低学习坡度，不代表 Triton 或 Ascend C 有固定的性能高低。
+第一遍建议先走完“软件栈关系 -> CANN 全栈 -> Kernel/SPMD 基础”，再进入 Triton-Ascend 和 Ascend C。这样做的原因是：先把“谁负责执行、谁负责编译、谁负责通信、谁负责切分”分清，后面的源码名词才不会混成一团。之后仍建议先学 Triton-Ascend，再学 Ascend C。Triton 用较少样板代码暴露并行算法的核心，适合建立 program/tile 直觉；Ascend C 再把编译器背后隐藏的片上存储、搬运、队列和同步展开。这个顺序是为了降低学习坡度，不代表 Triton 或 Ascend C 有固定的性能高低。
 
 已有 Triton/CUDA 经验时，可以从“基础 02”开始；已有 Ascend C 经验时，可以直接阅读 `sgl-kernel-npu/` 三篇源码导读，但建议先过一遍软件栈关系，避免混淆 `torch.ops.npu` 的实现归属。
 
@@ -98,6 +102,7 @@ flowchart LR
 
 - `sgl-kernel-npu`: [`b2378ee05769cf7df209ffc5e1b669728f435a7e`](https://github.com/sgl-project/sgl-kernel-npu/tree/b2378ee05769cf7df209ffc5e1b669728f435a7e)，2026-07-02；
 - `triton-ascend`: [`be90ac7e52267822c0ea83d20b705c1e4eaf586f`](https://github.com/triton-lang/triton-ascend/tree/be90ac7e52267822c0ea83d20b705c1e4eaf586f)，2026-07-02。
+- CANN 文档与兼容关系：本轮按 Triton-Ascend 3.2.1 README 中给出的 `CANN 9.0.0` 兼容矩阵解读，真实环境仍需按目标硬件与 `torch_npu` 版本复核。
 
 阅读自己环境中的源码时，请重新记录 commit、CANN、torch/torch_npu 和硬件型号。
 
