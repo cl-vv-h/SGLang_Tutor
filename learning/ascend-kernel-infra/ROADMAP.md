@@ -20,7 +20,7 @@
 
 | 待深化主题 | 前置知识 | 当前状态 | 对应文件 |
 |---|---|---|---|
-| Platform 与 Tiling 协议专项：硬件查询、tiling data、workspace、blockDim 的统一读法 | 02，foundations/02-03，Ascend C 02 | 待写 | 计划新增：`ascend-c/04-platform-tiling-and-workspace-contracts.md` |
+| Platform 与 Tiling 协议专项：硬件查询、tiling data、workspace、blockDim 的统一读法 | 02，foundations/02-03，Ascend C 02 | 已完成 | [`ascend-c/04-platform-tiling-and-workspace-contracts.md`](./ascend-c/04-platform-tiling-and-workspace-contracts.md) |
 | Triton-Ascend 编译产物专项：TTIR、Linalg IR、AscendNPU IR、driver、cache | 02，Triton-Ascend 01-03 | 待写 | 计划新增：`triton-ascend/04-ttir-mlir-driver-and-cache.md` |
 | `sgl-kernel-npu` 再精读一个“现成算子 + custom glue”混合路径案例 | `sgl-kernel-npu/01`，02 | 待选题 | 计划新增：`sgl-kernel-npu/04-*.md` |
 | DeepEP / MoE / HCCL kernel 路径 | 02，`sgl-kernel-npu/01`，分布式与通信基础 | 待写 | 计划新增：`sgl-kernel-npu/05-deepep-hccl-and-moe-kernel-path.md` |

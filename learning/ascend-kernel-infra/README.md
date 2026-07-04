@@ -59,6 +59,7 @@
 | [Ascend C 01：Global/Local Tensor、TPipe 与 TQue](./ascend-c/01-global-local-tensor-pipe-queue.md) | 能读懂 Vector kernel 的 Init/Process/CopyIn/Compute/CopyOut |
 | [Ascend C 02：一个 Add 算子的端到端工程](./ascend-c/02-add-operator-end-to-end.md) | 理解 Host tiling、blockDim、launch、PyTorch 注册和 shared library |
 | [Ascend C 03：Tiling、流水、同步与性能优化](./ascend-c/03-tiling-pipeline-sync-optimization.md) | 能分析多核/核内 tiling、double buffer、Cube/CV 流水和同步开销 |
+| [Ascend C 04：Platform、Tiling、Workspace 与 Host/Device 契约](./ascend-c/04-platform-tiling-and-workspace-contracts.md) | 能区分平台信息、执行计划、临时 scratch 和变体选择，并读懂真实 `op_host/*.cpp` 的 launch 路径 |
 
 ### 4. torch_npu 与 ACLNN：看懂现成算子路径
 
@@ -90,7 +91,7 @@ flowchart LR
   B --> C["Ascend 硬件与存储"]
   C --> D["搬运 / 同步 / 流水"]
   D --> E["Triton-Ascend 01-03"]
-  E --> F["Ascend C 01-03"]
+  E --> F["Ascend C 01-04"]
   F --> G["torch_npu / ACLNN 边界"]
   G --> H["sgl-kernel-npu 仓库"]
   H --> I["Triton 真实源码"]

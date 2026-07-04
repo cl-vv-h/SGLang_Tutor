@@ -2,6 +2,8 @@
 
 源码基线：`sgl-kernel-npu@b2378ee`。这个算子特别适合串起 Python import、PyTorch 注册、Host tiling、Global/Local Tensor、双缓冲和测试。
 
+如果你对 `Platform`、`blockDim`、`tiling data` 和 `workspace` 的 Host 侧边界还不稳，先读 [`../ascend-c/04-platform-tiling-and-workspace-contracts.md`](../ascend-c/04-platform-tiling-and-workspace-contracts.md) 再回来看这一章，会更容易把 launch 前后的职责拆开。
+
 ## 1. 算子语义
 
 输入：

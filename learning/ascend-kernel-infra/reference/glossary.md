@@ -45,6 +45,8 @@
 | Operator Library / 算子库 | 已由 CANN 预先提供的标准或融合算子实现集合，优先用于复用而不是重复写 kernel |
 | Tiling | 根据具体 shape、dtype 和硬件资源计算 blockDim、tile、workspace 等切分参数的过程/协议 |
 | Platform | 向编译器和 Host 侧暴露硬件核数、存储层级、架构能力等事实的查询与抽象层 |
+| PlatformAscendCManager | Ascend C Host 侧常见的平台查询单例接口，可读取 AIV/AIC 核数、UB/L1/L0 容量和库侧 workspace 需求等信息 |
+| Tiling Key | Host 编码出的 kernel 变体选择值，用来区分不同 transpose、dtype、format、split-K 等实现路径，不等于 tile 大小本身 |
 
 ## C. 并行编程模型
 
@@ -101,7 +103,9 @@
 | DeQue | 消费者取得已就绪 LocalTensor |
 | DataCopy | 在 Global/Local 或不同 Local 位置之间搬运数据的 API 类别 |
 | Tiling Data | Host 计算并传给 Device 的切分参数协议 |
+| Tiling Tensor | Host 把 tiling 结构体序列化后复制到 device 的 byte tensor，用于让 Device kernel 按约定 ABI 读取本次执行计划 |
 | Workspace | 算子运行所需的额外临时全局内存 |
+| Lib API Workspace | 由 `GetLibApiWorkSpaceSize()` 之类接口返回的库或 launch 框架所需 device scratch 大小，和算法自己的业务输入输出区分开 |
 
 ## F. 流水与同步
 
