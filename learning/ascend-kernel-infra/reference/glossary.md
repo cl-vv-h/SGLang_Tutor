@@ -18,6 +18,8 @@
 | Host | 通常指 CPU 进程及 Host 侧代码，准备参数和发起 device 工作 |
 | Device | Ascend NPU 及其 device 侧执行环境 |
 | Runtime | 加载 kernel、管理 stream/memory 并向设备提交任务的软件层 |
+| Cache Manager | Triton runtime 中按哈希保存编译产物、launcher stub 或辅助 `.so` 的缓存管理器；命中后可直接复用，不必重新编译 |
+| Dump Manager | Triton runtime 中负责把调试用 IR、launcher 源码或二进制写到 dump 目录的管理器 |
 | Dispatcher | PyTorch 根据 operator、device/dtype 等选择 backend 实现的机制 |
 | PrivateUse1 | PyTorch 为外部设备 backend 保留的 dispatch key，torch_npu 用于 NPU 接入 |
 | OpCommand | `torch_npu` framework 层用于打包一次 NPU 算子调用、stream 和 custom handler 的命令对象 |
@@ -35,6 +37,10 @@
 | AOT | Ahead-Of-Time，部署前编译；Ascend C shared library 常走此路线 |
 | IR | Intermediate Representation，编译器在前端与机器代码之间使用的中间表示 |
 | TTIR | Triton IR，Triton 编译链中的核心中间表示之一 |
+| `ttadapter` / `kernel.ttadapter.mlir` | Triton-Ascend 源码里给“TTIR 经过一轮 Ascend 后端 pass 后的文本中间产物”起的文件名；它更像阶段标签，不是另一门独立语言 |
+| Linalg IR | MLIR 中表达张量、循环和线性代数操作的一层 IR；Triton-Ascend 会把大量 Triton 专属操作降到这里，再交给 BiSheng 等后端工具 |
+| MLIR Bytecode / `mlirbc` | MLIR 的二进制序列化格式；语义上和文本 `.mlir` 对应，只是更紧凑、更适合在工具链之间传递 |
+| LLIR | 比 Linalg IR 更靠近后端代码生成的一层低级中间表示；在本课程里主要把它当成“进入最终 binary 生成前的最后几层 IR” |
 | Lowering | 把高层语义逐步转换成更接近目标硬件的 IR/指令 |
 | Meta-parameter | 控制 tile、stages 等编译策略的参数，常由 `tl.constexpr` 承载 |
 | Autotune | 对一组候选 meta-parameter 做测量并选择更优配置 |
@@ -129,6 +135,7 @@
 | 术语 | 解释 |
 |---|---|
 | Alignment / 对齐 | 地址或搬运长度满足硬件粒度要求，如 32B 对齐 |
+| Launcher Stub | Host 侧临时生成的小段 C++/Python 扩展胶水，用来把 Triton/PyTorch 调用参数整理成底层 runtime 能执行的 launch 形式 |
 | Padding | 补充无效元素使 shape/字节满足对齐或基本块要求 |
 | Arithmetic Intensity | 每搬运一个字节完成多少计算，用于判断计算或带宽倾向 |
 | Memory-bound | 性能主要受数据搬运带宽/延迟限制 |

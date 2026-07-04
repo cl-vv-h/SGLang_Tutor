@@ -51,6 +51,7 @@
 | [Triton 01：Program、Grid、Tile 与第一个 Kernel](./triton-ascend/01-program-grid-tile.md) | 能逐行解释 Vector Add，并理解 NPU 的物理核 grid 策略 |
 | [Triton 02：地址、广播、归约与矩阵分块](./triton-ascend/02-tensor-addressing-reduction-matmul.md) | 能阅读二维地址、RMSNorm、MatMul 与 CV fusion |
 | [Triton 03：编译、调试与性能优化](./triton-ascend/03-compile-debug-optimize.md) | 能区分用户 kernel/compiler/driver 问题，建立 UB、autotune、benchmark 闭环 |
+| [Triton 04：TTIR、MLIR、Driver 与 Cache](./triton-ascend/04-ttir-mlir-driver-and-cache.md) | 能把 Python kernel 对应到真实编译阶段、launcher stub、缓存命中与中间产物 |
 
 ### 3. Ascend C：显式管理存储、队列和流水
 
@@ -90,7 +91,7 @@ flowchart LR
   B0 --> B["Kernel / SPMD 基础"]
   B --> C["Ascend 硬件与存储"]
   C --> D["搬运 / 同步 / 流水"]
-  D --> E["Triton-Ascend 01-03"]
+  D --> E["Triton-Ascend 01-04"]
   E --> F["Ascend C 01-04"]
   F --> G["torch_npu / ACLNN 边界"]
   G --> H["sgl-kernel-npu 仓库"]
