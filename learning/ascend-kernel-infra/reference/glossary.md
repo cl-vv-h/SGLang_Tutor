@@ -20,6 +20,7 @@
 | Runtime | 加载 kernel、管理 stream/memory 并向设备提交任务的软件层 |
 | Dispatcher | PyTorch 根据 operator、device/dtype 等选择 backend 实现的机制 |
 | PrivateUse1 | PyTorch 为外部设备 backend 保留的 dispatch key，torch_npu 用于 NPU 接入 |
+| OpCommand | `torch_npu` framework 层用于打包一次 NPU 算子调用、stream 和 custom handler 的命令对象 |
 
 ## B. 算子与编译
 
@@ -40,6 +41,7 @@
 | Schema | Custom op 的函数签名、参数、返回值、mutation/alias 契约 |
 | Binding | 把 Python/PyTorch 调用连接到 C++/device 实现的接口代码 |
 | ACLNN | CANN 提供的一类高层算子接口/算子库入口，常用于直接复用现成 NPU 算子能力 |
+| aclOpExecutor | ACLNN 两段式接口返回的执行句柄，封装本次算子的计算流程，后续与 workspace、stream 一起提交执行 |
 | Operator Library / 算子库 | 已由 CANN 预先提供的标准或融合算子实现集合，优先用于复用而不是重复写 kernel |
 | Tiling | 根据具体 shape、dtype 和硬件资源计算 blockDim、tile、workspace 等切分参数的过程/协议 |
 | Platform | 向编译器和 Host 侧暴露硬件核数、存储层级、架构能力等事实的查询与抽象层 |

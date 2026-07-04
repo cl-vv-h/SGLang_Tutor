@@ -60,7 +60,13 @@
 | [Ascend C 02：一个 Add 算子的端到端工程](./ascend-c/02-add-operator-end-to-end.md) | 理解 Host tiling、blockDim、launch、PyTorch 注册和 shared library |
 | [Ascend C 03：Tiling、流水、同步与性能优化](./ascend-c/03-tiling-pipeline-sync-optimization.md) | 能分析多核/核内 tiling、double buffer、Cube/CV 流水和同步开销 |
 
-### 4. sgl-kernel-npu：回到真实生产源码
+### 4. torch_npu 与 ACLNN：看懂现成算子路径
+
+| 内容 | 学习成果 |
+|---|---|
+| [torch_npu 01：Dispatcher、ACLNN 与 Custom Op 的边界](./torch_npu/01-dispatch-aclnn-and-custom-op-boundaries.md) | 能区分标准 `torch`/`torch_npu`/`torch.ops.*` 调用分别落到哪条 NPU 路径 |
+
+### 5. sgl-kernel-npu：回到真实生产源码
 
 | 内容 | 源码案例 |
 |---|---|
@@ -68,7 +74,7 @@
 | [源码 02：Triton Fused Split Q/K Norm](./sgl-kernel-npu/02-triton-fused-split-qk-norm.md) | `(B,)` grid、三段 tile、FP32 reduction、constexpr bias fusion |
 | [源码 03：Ascend C Apply Token Bitmask](./sgl-kernel-npu/03-ascend-c-apply-token-bitmask.md) | Host UB tiling、按行分核、三个 TQue、packed bitmask 与异步生命周期 |
 
-### 5. Reference：工作时反复查阅
+### 6. Reference：工作时反复查阅
 
 | 内容 | 用途 |
 |---|---|
@@ -85,16 +91,17 @@ flowchart LR
   C --> D["搬运 / 同步 / 流水"]
   D --> E["Triton-Ascend 01-03"]
   E --> F["Ascend C 01-03"]
-  F --> G["sgl-kernel-npu 仓库"]
-  G --> H["Triton 真实源码"]
-  G --> I["Ascend C 真实源码"]
-  H --> J["技术选型与性能闭环"]
-  I --> J
+  F --> G["torch_npu / ACLNN 边界"]
+  G --> H["sgl-kernel-npu 仓库"]
+  H --> I["Triton 真实源码"]
+  H --> J["Ascend C 真实源码"]
+  I --> K["技术选型与性能闭环"]
+  J --> K
 ```
 
 第一遍建议先走完“软件栈关系 -> CANN 全栈 -> Kernel/SPMD 基础”，再进入 Triton-Ascend 和 Ascend C。这样做的原因是：先把“谁负责执行、谁负责编译、谁负责通信、谁负责切分”分清，后面的源码名词才不会混成一团。之后仍建议先学 Triton-Ascend，再学 Ascend C。Triton 用较少样板代码暴露并行算法的核心，适合建立 program/tile 直觉；Ascend C 再把编译器背后隐藏的片上存储、搬运、队列和同步展开。这个顺序是为了降低学习坡度，不代表 Triton 或 Ascend C 有固定的性能高低。
 
-已有 Triton/CUDA 经验时，可以从“基础 02”开始；已有 Ascend C 经验时，可以直接阅读 `sgl-kernel-npu/` 三篇源码导读，但建议先过一遍软件栈关系，避免混淆 `torch.ops.npu` 的实现归属。
+已有 Triton/CUDA 经验时，可以从“基础 02”开始；已有 Ascend C 经验时，可以更快进入 `torch_npu/01` 和 `sgl-kernel-npu/` 源码导读，但建议先过一遍软件栈关系，避免混淆 `torch.ops.*`、ACLNN 和 custom kernel 的实现归属。
 
 ## 源码基线
 
@@ -102,6 +109,7 @@ flowchart LR
 
 - `sgl-kernel-npu`: [`b2378ee05769cf7df209ffc5e1b669728f435a7e`](https://github.com/sgl-project/sgl-kernel-npu/tree/b2378ee05769cf7df209ffc5e1b669728f435a7e)，2026-07-02；
 - `triton-ascend`: [`be90ac7e52267822c0ea83d20b705c1e4eaf586f`](https://github.com/triton-lang/triton-ascend/tree/be90ac7e52267822c0ea83d20b705c1e4eaf586f)，2026-07-02。
+- `torch_npu`: [`86986b9711ef597e83edc41da1f02c34a03fea7b`](https://github.com/Ascend/pytorch/tree/86986b9711ef597e83edc41da1f02c34a03fea7b)，2026-07-04 核对远端 `HEAD`；
 - CANN 文档与兼容关系：本轮按 Triton-Ascend 3.2.1 README 中给出的 `CANN 9.0.0` 兼容矩阵解读，真实环境仍需按目标硬件与 `torch_npu` 版本复核。
 
 阅读自己环境中的源码时，请重新记录 commit、CANN、torch/torch_npu 和硬件型号。
