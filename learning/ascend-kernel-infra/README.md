@@ -52,6 +52,7 @@
 | [Triton 02：地址、广播、归约与矩阵分块](./triton-ascend/02-tensor-addressing-reduction-matmul.md) | 能阅读二维地址、RMSNorm、MatMul 与 CV fusion |
 | [Triton 03：编译、调试与性能优化](./triton-ascend/03-compile-debug-optimize.md) | 能区分用户 kernel/compiler/driver 问题，建立 UB、autotune、benchmark 闭环 |
 | [Triton 04：TTIR、MLIR、Driver 与 Cache](./triton-ascend/04-ttir-mlir-driver-and-cache.md) | 能把 Python kernel 对应到真实编译阶段、launcher stub、缓存命中与中间产物 |
+| [Triton 05：Persistent Kernel、大 Grid 与 Task Queue 边界](./triton-ascend/05-persistent-kernel-and-large-grid.md) | 能区分手写 persistent、auto-blockify 与 runtime task queue，并读懂官方 `09-persistent-matmul.py` |
 
 ### 3. Ascend C：显式管理存储、队列和流水
 
@@ -109,8 +110,8 @@ flowchart LR
 
 本轮源码导读固定到以下 commit，避免主分支变化导致行号和结论漂移：
 
-- `sgl-kernel-npu`: [`b2378ee05769cf7df209ffc5e1b669728f435a7e`](https://github.com/sgl-project/sgl-kernel-npu/tree/b2378ee05769cf7df209ffc5e1b669728f435a7e)，2026-07-02；
-- `triton-ascend`: [`be90ac7e52267822c0ea83d20b705c1e4eaf586f`](https://github.com/triton-lang/triton-ascend/tree/be90ac7e52267822c0ea83d20b705c1e4eaf586f)，2026-07-02。
+- `sgl-kernel-npu`: [`b2378ee05769cf7df209ffc5e1b669728f435a7e`](https://github.com/sgl-project/sgl-kernel-npu/tree/b2378ee05769cf7df209ffc5e1b669728f435a7e)，2026-07-05 重新 fetch 官方 `origin/main`，远端 `HEAD` 仍为该 commit；
+- `triton-ascend`: [`be90ac7e52267822c0ea83d20b705c1e4eaf586f`](https://github.com/triton-lang/triton-ascend/tree/be90ac7e52267822c0ea83d20b705c1e4eaf586f)，2026-07-05 重新 fetch 官方 `origin/main`，远端 `HEAD` 仍为该 commit。
 - `torch_npu`: [`86986b9711ef597e83edc41da1f02c34a03fea7b`](https://github.com/Ascend/pytorch/tree/86986b9711ef597e83edc41da1f02c34a03fea7b)，2026-07-04 核对远端 `HEAD`；
 - CANN 文档与兼容关系：本轮按 Triton-Ascend 3.2.1 README 中给出的 `CANN 9.0.0` 兼容矩阵解读，真实环境仍需按目标硬件与 `torch_npu` 版本复核。
 

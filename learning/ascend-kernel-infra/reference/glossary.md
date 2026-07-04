@@ -61,12 +61,14 @@
 | SPMD | Single Program, Multiple Data；多个实例执行同一程序但处理不同数据 |
 | Program | Triton 的一个并行 kernel 实例，通常处理一个 tile |
 | Program ID / pid | 当前 Triton program 在 grid 某个轴上的编号 |
-| Grid | 一次 Triton launch 创建的 program instance 逻辑空间，最多三维 |
+| Grid | 一次 Triton launch 创建的 program instance 逻辑空间，最多三维；逻辑 grid 不天然等于设备同时并行的物理核数 |
 | BlockDim | Ascend C launch 的核/逻辑实例数量 |
 | Block Index | 当前 Ascend C 实例编号，常由 `GetBlockIdx()` 获取 |
 | Tile | 从大 tensor 切下、一次在某核上处理的数据块 |
+| Logical Tile / Logical Block | 从数学输出空间切出来的一份逻辑工作单元；它说明“总共有多少块工作”，不等于“这次真的启动了多少物理核” |
 | Block Tensor | Triton program 内的一块 N 维值或指针集合 |
 | Persistent Kernel | 让有限 program 持续循环处理多个逻辑 tile，减少超大 grid 调度 |
+| Auto-blockify | Triton-Ascend 的大 grid 优化机制：编译期把 kernel 包进内层循环，运行期把 launch block 数钳到物理核数，用较少物理 block 覆盖更多逻辑 block |
 | Tail / 尾块 | 总长度不能整除 tile 或核数时剩余的数据部分 |
 | Mask | 标记 block tensor 中哪些 lane 的 load/store/compute 有效 |
 | Stride | 某维索引增加 1 时，线性内存地址跨过的元素数 |
@@ -82,6 +84,7 @@
 | Scalar | 核内负责地址、循环、分支、参数和指令发射的控制计算单元 |
 | Cube Core / AIC | 分离模式下专注矩阵计算的核 |
 | Vector Core / AIV | 分离模式下专注向量计算的核 |
+| Physical Core Count | 当前设备该类 kernel 可并行使用的真实物理核数量；对 Cube 主导 kernel 常看 `num_aicore`，对纯 Vector kernel 常看 `num_vectorcore` |
 | MTE | Memory Transfer Engine，负责不同存储层级的数据搬运 |
 | FixPipe | Cube 输出等数据通路与随路转换相关单元，具体能力依架构 |
 | GM | Global Memory，核外全局设备内存的逻辑称呼 |
@@ -126,6 +129,7 @@
 | Event | 表达异步指令通路之间依赖的同步资源 |
 | Barrier | 让指定范围内多个执行者都到达某点后再继续的同步机制 |
 | Stream | Host 向 device 提交异步任务的有序队列 |
+| Task Queue | Triton-Ascend launcher/runtime 的异步提交模式；开启后 Host 提交 launch 后可先返回，但这不等于 device kernel 内部变成 persistent 调度 |
 | Record Stream | 告知 allocator 某 tensor storage 正被异步 stream 使用，避免提前回收 |
 | Cross-core Sync | 多核之间的数据就绪或阶段同步 |
 | CV Fusion | Cube 与 Vector 阶段在同一融合算子内协作执行 |

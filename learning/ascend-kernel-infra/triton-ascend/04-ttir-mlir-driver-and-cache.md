@@ -357,11 +357,12 @@ run_my_kernel()
 
 ## 17. 下一步学什么
 
-学完这一章，最自然的下一步不是继续背编译器名词，而是去看一个真实需要这些知识的 kernel。建议回到：
+学完这一章，最自然的下一步不是继续背编译器名词，而是先去看“为什么 Triton-Ascend 在 NPU 上常常要改写 grid 调度”，再回到真实 kernel。建议顺序是：
 
+- [Triton-Ascend 05：Persistent Kernel、大 Grid 与 Task Queue 边界](./05-persistent-kernel-and-large-grid.md)
 - [源码 02：Triton Fused Split Q/K Norm](../sgl-kernel-npu/02-triton-fused-split-qk-norm.md)
 
-当你能把那一章中的 Triton kernel，再反向映射到“TTIR 长什么样、哪一步会过 `ttadapter`、哪一步会进 driver/cache”时，这条链才算真的连起来。
+当你能把 `05` 章里的调度改写，再和这里讲的 compiler/driver/cache 链路拼起来，最后回到 `sgl-kernel-npu` 的真实 Triton kernel，反向映射“TTIR 长什么样、哪一步会过 `ttadapter`、哪一步会进 driver/cache”，这条链才算真的连起来。
 
 ## 官方源码与文档
 
