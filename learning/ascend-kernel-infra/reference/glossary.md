@@ -32,6 +32,8 @@
 | Kernel | 在 NPU device 上执行的一段计算程序 |
 | Custom Op | 框架默认没有、由扩展自行注册实现的算子 |
 | Fusion / 融合 | 把多个计算阶段放进更少 kernel，减少 launch 和 GM 中间读写 |
+| FLA / Flash Linear Attention | 一类把长序列注意力改写成“分块 + 状态递推”形式的算法/实现家族，避免显式构造完整 `T x T` attention 矩阵 |
+| Gated Delta Rule | FLA 家族中的一种更新规则，用 `g` 控制遗忘/衰减，用 `beta` 控制当前 token 对状态的写入强度 |
 | DSL | 领域专用语言；Triton 是面向并行 kernel 的 Python DSL |
 | JIT | Just-In-Time，运行时按参数编译 kernel；Triton 常用此方式 |
 | AOT | Ahead-Of-Time，部署前编译；Ascend C shared library 常走此路线 |
@@ -73,6 +75,8 @@
 | Mask | 标记 block tensor 中哪些 lane 的 load/store/compute 有效 |
 | Stride | 某维索引增加 1 时，线性内存地址跨过的元素数 |
 | Layout/Format | Tensor 元素在物理内存中的组织方式，如 ND、NZ |
+| Packed B=1 Layout | 把多条样本沿 token 维拼成一条长序列，对外保留 `B=1` 壳子，再用 `cu_seqlens` 恢复每条样本边界的布局约定 |
+| `cu_seqlens` | cumulative sequence lengths，记录 packed 变长输入每条样本起止位置的前缀和数组 |
 
 ## D. Ascend 硬件
 
@@ -115,6 +119,7 @@
 | Tiling Tensor | Host 把 tiling 结构体序列化后复制到 device 的 byte tensor，用于让 Device kernel 按约定 ABI 读取本次执行计划 |
 | Workspace | 算子运行所需的额外临时全局内存 |
 | Lib API Workspace | 由 `GetLibApiWorkSpaceSize()` 之类接口返回的库或 launch 框架所需 device scratch 大小，和算法自己的业务输入输出区分开 |
+| Recurrent State / Final State | chunked 线性注意力或递推算子在 chunk 之间传递的历史摘要；`initial_state` 是输入状态，`final_state` 是本轮处理后输出给下一轮的状态 |
 
 ## F. 流水与同步
 

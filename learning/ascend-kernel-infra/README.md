@@ -76,6 +76,7 @@
 | [源码 01：仓库结构与算子生命周期](./sgl-kernel-npu/01-repository-and-op-lifecycle.md) | import → `.so` → schema/dispatch → Host → device kernel |
 | [源码 02：Triton Fused Split Q/K Norm](./sgl-kernel-npu/02-triton-fused-split-qk-norm.md) | `(B,)` grid、三段 tile、FP32 reduction、constexpr bias fusion |
 | [源码 03：Ascend C Apply Token Bitmask](./sgl-kernel-npu/03-ascend-c-apply-token-bitmask.md) | Host UB tiling、按行分核、三个 TQue、packed bitmask 与异步生命周期 |
+| [源码 04：FLA Chunk Gated Delta Rule 的双路径入口](./sgl-kernel-npu/04-fla-chunk-gated-delta-rule-mixed-path.md) | 同一 Python API 如何在分段 Triton 与 mega custom op 之间分流，并管理 `packed B=1`、`cu_seqlens`、state、`blockDim` 与 workspace 契约 |
 
 ### 6. Reference：工作时反复查阅
 
