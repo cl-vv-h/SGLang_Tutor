@@ -8,6 +8,7 @@
 |---|---|
 | SGLang | 面向 LLM/多模态模型的高性能 serving 框架，负责请求、batch、模型执行和缓存等编排 |
 | sgl-kernel-npu | SGLang 官方 Ascend NPU kernel 仓库/包，混合 Triton、Ascend C、C++ 和通信实现 |
+| DeepEP-Ascend | `sgl-kernel-npu` 里的 MoE 专用通信子模块，站在 HCCL 之上，把 token 路由、dispatch、combine 和部分 fused expert 计算封装成统一接口 |
 | PyTorch/ATen | 上层 tensor 与算子语义、dispatcher 体系 |
 | torch_npu | PyTorch 的 Ascend NPU 设备后端和扩展 |
 | Driver / Firmware | 让操作系统、运行时和 NPU 硬件真正连通并可执行任务的底层软件与固件层 |
@@ -32,6 +33,7 @@
 | Kernel | 在 NPU device 上执行的一段计算程序 |
 | Custom Op | 框架默认没有、由扩展自行注册实现的算子 |
 | Fusion / 融合 | 把多个计算阶段放进更少 kernel，减少 launch 和 GM 中间读写 |
+| MoE / Mixture-of-Experts | 先让 router 为每个 token 选 top-k 个 expert，再把 token 发给这些 expert 计算的模型结构；和 dense FFN 不同，它天然包含 token 分流与回流 |
 | FLA / Flash Linear Attention | 一类把长序列注意力改写成“分块 + 状态递推”形式的算法/实现家族，避免显式构造完整 `T x T` attention 矩阵 |
 | Gated Delta Rule | FLA 家族中的一种更新规则，用 `g` 控制遗忘/衰减，用 `beta` 控制当前 token 对状态的写入强度 |
 | DSL | 领域专用语言；Triton 是面向并行 kernel 的 Python DSL |
@@ -61,6 +63,10 @@
 | 术语 | 解释 |
 |---|---|
 | SPMD | Single Program, Multiple Data；多个实例执行同一程序但处理不同数据 |
+| Expert Parallel / EP | 按 expert 维度切分模型并把不同 expert 分布到不同卡上的并行方式；它和按张量维度切分的 TP 不同 |
+| Top-k Routing | router 为每个 token 选出 top-k 个 expert 的路由过程；输出通常是 `topk_idx` 和 `topk_weights` |
+| Dispatch | 把 token 按 top-k 路由结果统计、重排并发送到正确 expert 所在卡与本地缓冲区的过程，不等于单纯 `all_to_all` |
+| Combine | expert 计算结束后，把结果按原 token 顺序回排并按 top-k 权重聚合的过程，是 dispatch 的回程 |
 | Program | Triton 的一个并行 kernel 实例，通常处理一个 tile |
 | Program ID / pid | 当前 Triton program 在 grid 某个轴上的编号 |
 | Grid | 一次 Triton launch 创建的 program instance 逻辑空间，最多三维；逻辑 grid 不天然等于设备同时并行的物理核数 |
@@ -128,6 +134,7 @@
 | CopyIn | 将当前 tile 从 GM 搬入 Local Memory |
 | Compute | 使用 Vector/Cube 等单元处理 LocalTensor |
 | CopyOut | 将结果从 Local Memory 搬回 GM |
+| All-to-all / AllToAllV | 各 rank 彼此交换不同数量数据包的通信模式；MoE token 在 expert parallel 下常用它跨卡分发与回收 |
 | Pipeline / 流水 | 让不同 tile 的搬入、计算、搬出阶段在不同硬件通路重叠 |
 | Double Buffer | 使用 ping/pong 两组 buffer，让下一 tile 搬入与当前 tile 计算重叠 |
 | Queue Depth | 同一 TQue 可连续入队而未出队的次数，不等于 buffer number |
