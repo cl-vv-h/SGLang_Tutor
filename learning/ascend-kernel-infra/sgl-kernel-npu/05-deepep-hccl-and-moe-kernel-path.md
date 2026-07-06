@@ -487,7 +487,7 @@ normal path 的优势是更透明。调试时先看：
 
 最自然的下一步有两条：
 
-- 继续留在 DeepEP，专门读 `low_latency_dispatch/low_latency_combine` 和 A2 layered 路径，理解为什么小 batch 推理要走另一套 contract。
+- 继续留在 DeepEP，直接读 [`06-deepep-low-latency-and-layered-a2-path.md`](./06-deepep-low-latency-and-layered-a2-path.md)，专门拆 `low_latency_dispatch/low_latency_combine` 和 A2 layered 路径，理解为什么小 batch 推理要走另一套 contract。
 - 回到更重的 kernel 融合，单独拆 `dispatch_ffn_combine` 或 `fused_deep_moe` 的 device/host 边界。
 
 如果按课程依赖顺序继续推进，前者优先级更高，因为它把“通信路径为何要分 normal 与 low latency”这层再补完整。

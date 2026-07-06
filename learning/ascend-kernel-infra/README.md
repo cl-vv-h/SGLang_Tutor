@@ -78,6 +78,7 @@
 | [源码 03：Ascend C Apply Token Bitmask](./sgl-kernel-npu/03-ascend-c-apply-token-bitmask.md) | Host UB tiling、按行分核、三个 TQue、packed bitmask 与异步生命周期 |
 | [源码 04：FLA Chunk Gated Delta Rule 的双路径入口](./sgl-kernel-npu/04-fla-chunk-gated-delta-rule-mixed-path.md) | 同一 Python API 如何在分段 Triton 与 mega custom op 之间分流，并管理 `packed B=1`、`cu_seqlens`、state、`blockDim` 与 workspace 契约 |
 | [源码 05：DeepEP、HCCL 与 MoE token 路径](./sgl-kernel-npu/05-deepep-hccl-and-moe-kernel-path.md) | 看懂 `deep_ep::Buffer` 如何把 router 的 top-k 路由变成 `layout -> dispatch -> local expert compute -> combine`，并定位 `fused_deep_moe` / `dispatch_ffn_combine` |
+| [源码 06：DeepEP Low-Latency、A2 Layered 与小 Batch 推理路径](./sgl-kernel-npu/06-deepep-low-latency-and-layered-a2-path.md) | 看懂为什么小 batch 推理要改走 `low_latency_dispatch/low_latency_combine`，以及 A2 的 layered 路径如何把同机 HCCS 与跨机 RDMA 组合起来 |
 
 ### 6. Reference：工作时反复查阅
 
@@ -112,8 +113,8 @@ flowchart LR
 
 本轮源码导读固定到以下 commit，避免主分支变化导致行号和结论漂移：
 
-- `sgl-kernel-npu`: [`d5630dff41c8108216f835597e63f6d3a7445908`](https://github.com/sgl-project/sgl-kernel-npu/tree/d5630dff41c8108216f835597e63f6d3a7445908)，2026-07-05 重新 fetch 官方 `origin/main`，远端 `HEAD` 已前进到该 commit；本轮新增的 DeepEP 章节按此 commit 核对，且相关 `csrc/deepep/` / `tests/python/deepep/` 路径相对上一轮 `b2378ee` 无差异；
-- `triton-ascend`: [`be90ac7e52267822c0ea83d20b705c1e4eaf586f`](https://github.com/triton-lang/triton-ascend/tree/be90ac7e52267822c0ea83d20b705c1e4eaf586f)，2026-07-05 重新 fetch 官方 `origin/main`，远端 `HEAD` 仍为该 commit。
+- `sgl-kernel-npu`: [`d5630dff41c8108216f835597e63f6d3a7445908`](https://github.com/sgl-project/sgl-kernel-npu/tree/d5630dff41c8108216f835597e63f6d3a7445908)。本地参考仓库当前工作树仍停在 `b2378ee05769cf7df209ffc5e1b669728f435a7e`，但已存在 `origin/main -> d5630df` 的远端跟踪引用；本轮据此对 `README.md`、`csrc/deepep/` 与 `tests/python/deepep/` 做对象级 diff，确认新增的 DeepEP 05-06 章节依赖路径在 `b2378ee..d5630df` 之间无差异；
+- `triton-ascend`: [`be90ac7e52267822c0ea83d20b705c1e4eaf586f`](https://github.com/triton-lang/triton-ascend/tree/be90ac7e52267822c0ea83d20b705c1e4eaf586f)，本地 `origin/main` 跟踪引用与当前参考工作树一致。
 - `torch_npu`: [`86986b9711ef597e83edc41da1f02c34a03fea7b`](https://github.com/Ascend/pytorch/tree/86986b9711ef597e83edc41da1f02c34a03fea7b)，2026-07-04 核对远端 `HEAD`；
 - CANN 文档与兼容关系：本轮按 Triton-Ascend 3.2.1 README 中给出的 `CANN 9.0.0` 兼容矩阵解读，真实环境仍需按目标硬件与 `torch_npu` 版本复核。
 

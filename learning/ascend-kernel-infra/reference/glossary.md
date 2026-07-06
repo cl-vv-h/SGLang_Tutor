@@ -67,6 +67,9 @@
 | Top-k Routing | router 为每个 token 选出 top-k 个 expert 的路由过程；输出通常是 `topk_idx` 和 `topk_weights` |
 | Dispatch | 把 token 按 top-k 路由结果统计、重排并发送到正确 expert 所在卡与本地缓冲区的过程，不等于单纯 `all_to_all` |
 | Combine | expert 计算结束后，把结果按原 token 顺序回排并按 top-k 权重聚合的过程，是 dispatch 的回程 |
+| Low-Latency Mode | DeepEP 为小 batch 推理准备的另一套 dispatch/combine 协议；目标更偏向固定小批次延迟，而不是 normal mode 那种大吞吐 prefill/training 路径 |
+| `num_max_dispatch_tokens_per_rank` / 对齐 token 上界 | low-latency 路径按“各 rank 本轮 token 数的最大值”预留缓冲和协议边界；它不是当前 rank 的真实有效 token 数 |
+| Packed Receive Buffer / `packed_recv_x` | low-latency dispatch 输出给本地 expert 计算的紧凑接收 buffer；顺序按 expert-friendly 布局组织，不等于原 token 顺序 |
 | Program | Triton 的一个并行 kernel 实例，通常处理一个 tile |
 | Program ID / pid | 当前 Triton program 在 grid 某个轴上的编号 |
 | Grid | 一次 Triton launch 创建的 program instance 逻辑空间，最多三维；逻辑 grid 不天然等于设备同时并行的物理核数 |
@@ -135,6 +138,7 @@
 | Compute | 使用 Vector/Cube 等单元处理 LocalTensor |
 | CopyOut | 将结果从 Local Memory 搬回 GM |
 | All-to-all / AllToAllV | 各 rank 彼此交换不同数量数据包的通信模式；MoE token 在 expert parallel 下常用它跨卡分发与回收 |
+| A2 Layered Path | 910B/A2 上按“同机 HCCS + 跨机 RDMA”分层组织的 DeepEP 通信路径；它需要比普通 per-rank count 更丰富的中间路由辅助张量 |
 | Pipeline / 流水 | 让不同 tile 的搬入、计算、搬出阶段在不同硬件通路重叠 |
 | Double Buffer | 使用 ping/pong 两组 buffer，让下一 tile 搬入与当前 tile 计算重叠 |
 | Queue Depth | 同一 TQue 可连续入队而未出队的次数，不等于 buffer number |
@@ -164,3 +168,4 @@
 | Reference | 简单独立的正确实现，用来比较 custom kernel 输出 |
 | Numerical Tolerance | 浮点比较允许的 `atol/rtol` 误差范围 |
 | Profiling / Trace | 记录 Host、launch、kernel、搬运和等待时间线以定位瓶颈 |
+| RDMA Size Hint / `get_low_latency_rdma_size_hint` | DeepEP 暴露的 low-latency buffer 预留提示接口；在当前 `d5630df` 实现里它直接返回 `num_max_dispatch_tokens_per_rank`，不要仅凭名字脑补 byte 计算公式 |
