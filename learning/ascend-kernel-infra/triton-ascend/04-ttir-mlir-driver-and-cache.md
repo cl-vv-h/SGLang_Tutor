@@ -47,11 +47,11 @@
 
 ```mermaid
 flowchart LR
-  PY["Python @triton.jit kernel"] --> TTIR["TTIR\n先看 Triton 语义是否正确"]
-  TTIR --> TTA["`kernel.ttadapter.mlir`\nTriton pass + Linalg 降低结果"]
-  TTA --> BC["`kernel.mlirbc` (可选)\nMLIR Bytecode"]
-  BC --> BCMLIR["`kernel.mlir` (可选)\nBytecode 重新展开"]
-  TTA --> OBJ["`kernel.o` / `kernel_reloc.o`"]
+  PY["Python @triton.jit kernel"] --> TTIR["TTIR<br/>先看 Triton 语义是否正确"]
+  TTIR --> TTA["kernel.ttadapter.mlir<br/>Triton pass + Linalg 降低结果"]
+  TTA --> BC["kernel.mlirbc（可选）<br/>MLIR Bytecode"]
+  BC --> BCMLIR["kernel.mlir（可选）<br/>Bytecode 重新展开"]
+  TTA --> OBJ["kernel.o / kernel_reloc.o"]
   BCMLIR --> OBJ
   OBJ --> DRIVER["driver.py + launcher stub"]
   DRIVER --> CANN["CANN runtime / stream / load_binary"]
