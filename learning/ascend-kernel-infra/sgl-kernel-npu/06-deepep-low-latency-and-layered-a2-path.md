@@ -420,13 +420,49 @@ def low_latency_roundtrip(
 3. 对照 [`test_low_latency.py#L386-L395`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/tests/python/deepep/test_low_latency.py#L386-L395)，解释为什么测试先算 `aligned_num_tokens`，再构造 `Buffer`。
 4. 打开 [`cam_moe_distribute_dispatch_a2_layered.h`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/deepep/ops2/op_kernel/a2/cam_moe_distribute_dispatch_a2_layered.h)，只靠命名和成员函数列表，列出你能确认的 layered A2 责任边界，以及你不能确认的部分。
 
-## 19. 自测问题
+## 19. 自测问题与参考答案
 
-- 为什么说 low-latency path 没有改变 MoE 的数学语义，却改变了通信 contract？
-- `aligned_num_tokens` 和当前 rank 的 `num_tokens` 到底差在哪？
-- `handle` 为什么不是可有可无，而是 combine 的回程单据？
-- A2 layered 的“分层”至少被哪几条官方证据约束住了？
-- 为什么本章要特别提醒你不要从 `get_low_latency_rdma_size_hint` 的函数名反推实现？
+### 1. 为什么说 low-latency path 没有改变 MoE 的数学语义，却改变了通信 contract？
+
+**答案：**数学上仍是 router 为 token 选择 top-k expert，dispatch 把 token 送到这些 expert，本地 FFN 计算后 combine 按原 token 与权重聚合。Low-latency 不应改变 expert 选择、权重或最终结果。
+
+改变的是阶段间交换数据的协议。Low-latency path 要求 `low_latency_mode=True`，使用所有 rank 对齐后的 token 上界预留 packed receive buffer，返回 `packed_recv_count` 与专用 handle，并带有 FP8、异步 event/hook、zero-copy 和 A2 layered 等选项。Normal path 的 layout/count/handle 形状与调用顺序不能直接假定适用于这里。
+
+这是一种用更固定的容量和专用 buffer contract 换取小 batch/解码低延迟的工程设计。正确性测试应与 normal/baseline 语义比较，但性能和内存规划必须按 low-latency 接口单独评估。
+
+### 2. `aligned_num_tokens` 和当前 rank 的 `num_tokens` 到底差在哪？
+
+**答案：**`num_tokens` 是本 rank 此轮真实有效 token 数；`aligned_num_tokens` 是各参与 rank 的 token 数做 AllReduce MAX 后得到的统一上界，用于所有 rank 形成一致的通信与 buffer 容量合同。
+
+例如四个 rank 分别有 `[3,7,5,2]` 个 token，则每个 rank 的 `aligned_num_tokens` 都是 7，但 rank 0 仍只有 3 个有效 token。多出来的容量是协议预留，不应当被当成有效 token 参与 expert 数学。
+
+统一上界让 rank 间能用兼容 shape 预分配接收区，并避免某个 rank 按 3、另一个按 7 对同一通信阶段作出不一致解释。它通常增加少量空槽成本，换来更可预测的 launch/通信形状；动态 token 波动较大时要评估浪费。
+
+### 3. `handle` 为什么不是可有可无，而是 combine 的回程单据？
+
+**答案：**Low-latency dispatch 会重排、复制并跨 rank 发送 token。Combine 仅看到 expert 输出、`topk_idx/topk_weights` 仍不足以重建这次具体传输的源/目标位置、packed buffer 布局、计数和回程 offset。
+
+Handle 封装了 dispatch 产生的路由与 buffer 元数据，combine 用它执行逆向通信和恢复 token 关系。它类似一次物流的运单：内容相同但运单来自另一轮，也可能被送回错误来源。
+
+因此 handle 必须与同一轮 `packed_recv_x`/expert 输出配对，并活到异步 combine 不再使用为止。跨 batch 复用、修改其中 tensor 顺序，或只把它当可选性能 hint，都会破坏协议正确性。
+
+### 4. A2 layered 的“分层”至少被哪几条官方证据约束住了？
+
+**答案：**至少有三组相互印证的证据，而不是只凭变量名猜测。
+
+1. 仓库 README 明确描述 A2 使用“同机 HCCS + 跨机 RDMA”的组合路径。
+2. `deep_ep.cpp` 定义 `A2_MAX_HCCS_PEERS = 8`，并在 `soc_version == ASCEND910B` 时计算 `num_rdma_ranks/num_nvl_ranks`、`rdma_rank/nvl_rank` 等两级分组信息；这里的 `nvl_*` 应按代码历史命名理解为本地快速互联组，不能机械套成 NVIDIA NVLink。
+3. Low-latency dispatch/combine 存在 A2 layered 分支、额外计数/assist tensor，并有专门的 `cam_moe_distribute_dispatch_a2_layered.h` kernel 文件。
+
+这些证据足以支持“先在本地 HCCS 层组织，再通过 RDMA 处理跨机通信”的高层结论；但没有更底层官方资料时，仍不应擅自推导每条硬件指令、链路时序或精确带宽模型。
+
+### 5. 为什么本章要特别提醒你不要从 `get_low_latency_rdma_size_hint` 的函数名反推实现？
+
+**答案：**函数名表达设计意图，不是当前版本实现合同。固定 commit 的 `config.cpp` 中，该函数直接返回 `num_max_dispatch_tokens_per_rank`，并没有在这里按 hidden、rank 数和 dtype 计算一个明确的 RDMA byte 数。
+
+若只看 `rdma_size_hint` 这个名字，很容易自行脑补“返回字节数”“已经包含所有通信 buffer”或“值随 hidden 成比例”，随后用错误单位分配内存。真正语义必须由函数签名、实现、调用点和测试共同确定。
+
+这也提醒我们 API 会演进：未来版本可能真的加入更完整公式。教程固定 commit 的意义，就是把结论限定为“在这个版本中源码做了什么”，而不是把名字当成跨版本不变的事实。
 
 ## 20. 下一步学什么
 

@@ -364,13 +364,59 @@ python .\tests\test_your_real_kernel.py
 3. 假设 `ttir` 正常、`npubin` 失败，列出你会优先检查的三个信息：目标架构、`compile_mode`、哪条 BiSheng 命令行。
 4. 用自己的话解释：为什么 `ttadapter` 不是一门新语言，而更像是“教学上拿来识别阶段边界的文件名”。
 
-## 16. 自测问题
+## 16. 自测问题与参考答案
 
-- `ttir`、`ttadapter`、`mlirbc`、`npubin` 各自最适合回答哪一类问题？
-- 为什么说 driver 问题和 compiler 问题不能混为一谈？
-- `TRITON_COMPILE_ONLY` 和 `TRITON_ALWAYS_COMPILE` 分别在解决什么问题？
-- `use_bytecode=True` 时，多出来的是哪两步？
-- 为什么打开 dump 后还可能什么都看不到？
+### 1. `ttir`、`ttadapter`、`mlirbc`、`npubin` 各自最适合回答哪一类问题？
+
+**答案：**它们是同一次编译在不同阶段的产物，适合观察的问题层级逐步从“高层语义”下沉到“目标设备 binary”。
+
+- **`ttir`** 最适合检查 Triton 语义本身：program/grid 映射后形成了什么控制流，pointer、mask、broadcast、reduction 和 `tl.dot` 是否符合预期。若这里已经出现错误地址或错误 shape，应先修用户 kernel，而不是继续研究后端。
+- **`ttadapter`** 是 TTIR 经 Ascend 后端 pass 整理和降低后的文本 IR，适合检查 structured/unstructured access、annotation、auto-blockify 及 Triton→Linalg 等转换是否支持并正确保留了语义。TTIR 正常而这一层异常，更像 lowering/pass 问题。
+- **`mlirbc`** 是可选的 MLIR Bytecode 序列化产物，主要用于确认 bytecode 工具链交接、override 或复现路径；它不是比文本 IR“更高级的新算法”，也不适合直接肉眼阅读数学语义。
+- **`npubin`** 是最终 NPU binary 阶段，适合回答“目标架构的设备产物是否成功生成、是否能被 Runtime 加载”，但已经不适合靠文本检查高层 pointer 公式。
+
+调试原则是从最靠近错误现象、且仍容易解释的一层开始。不要只因 `npubin` 生成失败就直接归因于 BiSheng；上游非法 IR 也可能直到后端才被拒绝。
+
+### 2. 为什么说 driver 问题和 compiler 问题不能混为一谈？
+
+**答案：**Compiler 负责把 kernel 源码/IR 转换成目标设备产物；driver 负责把产物、参数、grid 和 stream 组织起来并交给 CANN Runtime 执行。二者消费的数据、运行时刻和失败形式不同。
+
+Compiler 问题常表现为某个 Triton op 无法 lowering、pass 报错、目标架构编译失败、IR verification 失败或根本没有生成 `kernel.o/npubin`。Driver 问题则常发生在 binary 已存在之后，例如 launcher stub 编译/加载失败、参数打包或 ABI 错误、stream/context 不正确、`load_binary` 或 launch 失败。
+
+Cache 又会让边界更隐蔽：你可能复用了旧 binary，却重新生成了 launcher；也可能 launcher 已缓存，而新 kernel 编译失败。正确排查应分别确认“哪一阶段最后成功产出了什么文件”，而不是把从 JIT 到执行的所有故障都统称为“编译器问题”。
+
+### 3. `TRITON_COMPILE_ONLY` 和 `TRITON_ALWAYS_COMPILE` 分别在解决什么问题？
+
+**答案：**前者控制“编译完成后是否真正 launch”，后者控制“是否允许直接复用已有编译缓存”。它们作用在两个正交维度。
+
+`TRITON_COMPILE_ONLY=1` 让 `NPULauncher.__call__()` 跳过设备执行，只生成/定位编译产物并报告 cache。它适合把问题先切成两半：如果 compile-only 都失败，故障在编译或构建产物之前；如果 compile-only 成功而正常调用失败，再看 launcher、Runtime、stream 和设备环境。它不能证明 kernel 数学正确，因为 kernel 根本没有执行。
+
+`TRITON_ALWAYS_COMPILE=1` 用于强制触发重新编译，避免旧 cache 让源码修改、dump 开关或 compiler option 看起来没有生效。它并不禁止后续 launch，也不等价于清空所有 launcher/预编译头缓存。
+
+组合使用时，可以做到“强制重新编译，但先不运行”，很适合抓取新 IR；代价是失去缓存带来的启动速度，不能作为正常生产配置。
+
+### 4. `use_bytecode=True` 时，多出来的是哪两步？
+
+**答案：**在 `ttadapter` 产出的 Linalg/MLIR 文本与最终 binary 路径之间，多出“文本 IR 序列化为 MLIR Bytecode”和“Bytecode 再展开成后端可继续消费的 MLIR”两步。
+
+源码中对应：
+
+```text
+ttadapter
+  -> linalg_to_bc_by_triton_mlir_opt()      -> mlirbc
+  -> bc_to_linalg_by_bishengir_opt()        -> bcmlir
+  -> target binary path                     -> npubin
+```
+
+第一步调用 `triton-mlir-opt` 产生 bytecode，第二步由 `bishengir-opt` 等后端工具把 bytecode 转回可继续编译的 MLIR 文本/表示。它改变的是工具链交接格式和阶段，不表示 kernel 数学被额外执行一次，也不意味着出现了另一套独立算法。
+
+### 5. 为什么打开 dump 后还可能什么都看不到？
+
+**答案：**最常见原因是本次调用命中了已有 cache，编译阶段根本没有重新运行；dump 逻辑挂在编译/pass 路径上，没有执行自然不会产生新文件。
+
+还应依次检查：环境变量是否在导入/首次 JIT 之前设置、`TRITON_DUMP_DIR` 是否可写且检查的是正确绝对路径、当前变体的 dtype/meta-parameter 是否真的触发了新 cache key、错误是否发生在目标 dump 阶段之前，以及 dump 开关对应的是 kernel IR、launcher 还是其他产物。只打开 `MLIR_ENABLE_DUMP` 也不保证 Triton 自己的 dump manager 一定把文件写到你猜测的目录。
+
+稳妥做法是设置 `TRITON_ALWAYS_COMPILE=1`，使用一个明确的新 dump 目录，只运行最小复现一次，然后从 TTIR、ttadapter、binary、launcher 的实际生成顺序检查。若仍无输出，再根据日志判断是环境变量未被目标进程继承，还是编译在 dump hook 之前失败。
 
 ## 17. 下一步学什么
 

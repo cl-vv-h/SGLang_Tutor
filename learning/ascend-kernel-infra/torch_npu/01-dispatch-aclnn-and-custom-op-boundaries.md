@@ -375,14 +375,57 @@ Python torch.Tensor
 2. 在 `sgl-kernel-npu` 中各找一个例子，分别证明“custom op -> 自写 kernel”和“custom op -> ACLNN wrapper”这两条路径都真实存在。
 3. 假设 profiling 里看见 `aclnnLayerNormWithImplMode`，先写出你会如何判断这是 `torch_npu` 直接暴露的路径，还是某个扩展库包了一层 wrapper。
 
-## 14. 自测问题
+## 14. 自测问题与参考答案
 
-- `torch_npu` 为什么先要把 `PrivateUse1` 重命名成 `npu`？
-- `dispatcher`、`OpCommand`、`ACLNN` 分别负责哪一层？
-- 为什么 `torch.ops.npu.xxx` 的 namespace 不能直接说明实现归属？
-- 为什么“custom op”不自动等于“自写 device kernel”？
-- `GetWorkspaceSize`、`workspace`、`aclOpExecutor` 和 `stream` 四者之间是什么关系？
-- 如果某个扩展 Host 代码最终调用的是 `EXEC_NPU_CMD<aclnnFoo>`，最先该怀疑哪个层面的 bug？
+### 1. `torch_npu` 为什么先要把 `PrivateUse1` 重命名成 `npu`？
+
+**答案：**`PrivateUse1` 是 PyTorch 为外部设备后端预留的通用槽位名，不是用户友好的设备品牌。`torch_npu` 调用 `rename_privateuse1_backend("npu")` 后，PyTorch 才能把这个槽位以稳定、可读的 `npu` 名称暴露给 Python API，并进一步生成 `Tensor.npu()`、`Module.npu()` 等便利方法。
+
+重命名解决的是框架标识与用户接口问题，不会把硬件“转换”为另一种设备，也不改变底层 dispatch key 的机制。C++ 注册中仍经常看到 `PrivateUse1`，因为实现绑定依赖的是 PyTorch 预留 key；Python 中看到 `device="npu"`，则是该 key 的公开名称。
+
+初始化顺序很重要：应先注册/重命名 backend，再生成相关方法并加载依赖该名称的组件。否则用户代码、序列化或扩展注册可能看到不一致的设备名称。
+
+### 2. `dispatcher`、`OpCommand`、`ACLNN` 分别负责哪一层？
+
+**答案：**Dispatcher 负责“选哪个实现”，`OpCommand` 负责“在 `torch_npu` 框架层组织并提交一次 NPU op”，ACLNN 负责“提供可被 Host 调用的现成 NPU 算子接口与执行计划”。
+
+- **Dispatcher** 根据 operator schema、dispatch key、tensor device 等选择 `CPU`、`PrivateUse1/NPU` 或其他 backend implementation。它不负责具体 RMSNorm 数学或设备指令。
+- **`OpCommand`** 位于 `torch_npu` Host 框架层，在实现已被选中后组织输入输出、属性、stream、异步执行和 handler 等调用细节。
+- **ACLNN** 是 CANN 算子能力入口。典型接口先计算 workspace 并返回 executor，再用 workspace、executor 与 stream 执行已经存在的设备实现。
+
+三者是串联关系而不是同义词：dispatcher 可以选中一个完全不使用 `OpCommand` 的第三方 custom op；custom Host 函数也可以直接包装 ACLNN；只有追到最终 Host 调用才能知道实际走哪条路。
+
+### 3. 为什么 `torch.ops.npu.xxx` 的 namespace 不能直接说明实现归属？
+
+**答案：**PyTorch namespace 是动态注册表中的逻辑名字。`torch_npu` 可以向 `npu` 注册，`sgl-kernel-npu` 或其他 `.so` 被加载后同样可以用 `TORCH_LIBRARY_FRAGMENT(npu, m)` 追加 schema。
+
+因此，调用入口的完整名字只回答“dispatcher 中的 schema 名是什么”，不回答“谁注册、Host 函数在哪个仓库、最终调用 ACLNN 还是自写 kernel”。即使两个 op 都位于 `torch.ops.npu`，一个可能来自 `torch_npu`，另一个可能来自 `libsgl_kernel_npu.so`。
+
+判断归属要沿证据链查：Python import/load_library → `m.def` → 对应 dispatch key 的 `m.impl` → Host C++ 函数 → `EXEC_NPU_CMD`、`EXEC_KERNEL_CMD` 或 Triton launch。仅凭 namespace 猜测，会把调用合同和实现所有权混为一谈。
+
+### 4. 为什么“custom op”不自动等于“自写 device kernel”？
+
+**答案：**Custom op 只表示这个 operator schema/绑定不是当前 PyTorch 核心默认提供的；它描述框架扩展边界，不描述 device 计算的来源。
+
+扩展作者可以注册一个新 schema，Host 实现内部再调用 `aclnnLayerNorm` 等现成 ACLNN 接口。这仍是 custom op，因为 Python/dispatcher 入口由扩展定义，但数学 kernel 由供应方算子库提供。另一种 custom op 才可能用 `EXEC_KERNEL_CMD` 启动自己编译的 Ascend C kernel，或进入 Triton wrapper。
+
+这一区分影响维护和排错：ACLNN wrapper 的问题优先看参数转换、版本/符号、workspace 与 stream；自写 kernel 还要检查 tiling、地址、设备代码与构建产物。不能看到 `torch.ops.*` 就假设存在同名 `.cpp` device kernel。
+
+### 5. `GetWorkspaceSize`、`workspace`、`aclOpExecutor` 和 `stream` 四者之间是什么关系？
+
+**答案：**它们组成 ACLNN 常见的两阶段执行协议。
+
+第一阶段 `aclnnFooGetWorkspaceSize(...)` 检查/解析输入描述，生成本次调用的执行计划，返回所需临时空间字节数和 `aclOpExecutor*`。Host 随后在 NPU 上分配至少这么大的 workspace。第二阶段执行接口接收 workspace 地址与大小、同一个 executor 以及当前 stream，把任务异步提交到设备。
+
+`workspace` 是这次执行需要的 device scratch，不是输出 tensor，也不是 UB；executor 是 Host/Runtime 侧对已准备执行计划的句柄，不是工作内存；stream 决定任务与前后 NPU 操作的顺序和异步语义。四者必须属于同一轮调用契约，不能拿 A 输入生成的 executor 配 B 输入，也不能在异步任务完成前释放 workspace 或其依赖 storage。
+
+### 6. 如果某个扩展 Host 代码最终调用的是 `EXEC_NPU_CMD<aclnnFoo>`，最先该怀疑哪个层面的 bug？
+
+**答案：**先检查扩展 Host wrapper 与 ACLNN/CANN 接口边界，而不是先假设扩展仓库里有一个需要修改的自写 device kernel。
+
+优先核对输入 shape/dtype/layout、optional 参数转换、输出分配、ACLNN 符号与 CANN 版本、GetWorkspaceSize 返回值、workspace 生命周期、executor 是否有效以及当前 stream。若报 `...GetWorkspaceSize not found`，首先是动态库/版本/符号可用性；若 ACLNN 返回参数错误，先对照其接口合同；若只在异步执行时偶现，检查 stream 与 storage 生命周期。
+
+当然，上游也可能传错数据，ACLNN 本身也可能有缺陷，但源码证据表明 device 实现不在这个扩展中时，盲改扩展的 Ascend C/Triton 目录没有因果依据。应先构造最小 ACLNN wrapper 复现，确认问题位于参数胶水、运行环境还是供应方算子实现。
 
 ## 官方源码与文档
 

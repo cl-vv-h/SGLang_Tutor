@@ -380,13 +380,56 @@ task queue:
 3. 设计一个“先试 auto-blockify，再决定是否手写 persistent”的排查清单，至少写出三条前提条件。
 4. 假设 benchmark 里只改了 `TRITON_ENABLE_TASKQUEUE`，结果 wall time 降了很多。写出两个可能原因，并说明如何排除“只是 Host 提前返回”的误判。
 
-## 16. 自测问题
+## 16. 自测问题与参考答案
 
-- 逻辑 tile、物理核数、`num_programs(0)` 三者为什么不能混为一谈？
-- 普通 matmul 和 persistent matmul 的核心区别，究竟是“多了一层什么循环”？
-- `tile_id = start_pid - NUM_SMS` 为什么不是 bug？
-- `TRITON_ALL_BLOCKS_PARALLEL` / `enable_auto_blockify` 解决的问题与 task queue 有什么本质区别？
-- 在什么前提下，auto-blockify 比手写 persistent 更像第一选择？
+### 1. 逻辑 tile、物理核数、`num_programs(0)` 三者为什么不能混为一谈？
+
+**答案：**三者分别描述“总共有多少份算法工作”“设备能同时提供多少核心资源”和“本次 launch 在某个 grid 轴上创建了多少逻辑 program”。它们属于算法、硬件和 launch 三个层次。
+
+例如输出矩阵按 `BM×BN` 切分后可能有 10,000 个逻辑 tile，但设备只有几十个 AIC。普通写法可以让 `num_programs(0)=10,000`，由 Runtime 分多轮调度；persistent 写法则可能只 launch 32 个 program，让每个 program 循环领取多个 tile。两种写法覆盖同样 10,000 份逻辑工作，物理核数也没有变化。
+
+`tl.num_programs(0)` 只返回 grid 第 0 轴的 launch 数量，不查询“当前到底有多少核正在同时执行”，也不一定等于总 program 数——多维 grid 还要结合其他轴。把它当成物理核数会让任务步长、负载均衡和尾块判断依赖一个并不成立的调度假设。
+
+### 2. 普通 matmul 和 persistent matmul 的核心区别，究竟是“多了一层什么循环”？
+
+**答案：**普通 matmul 已经有 K 维循环，但这个循环只是在**同一个输出 tile 内**分段加载 A/B 并累加。Persistent matmul 新增的是**跨输出 tile 的任务循环**：一个 program 完成并写回当前 C tile 后，不退出，而是领取下一个 `tile_id`，重置 accumulator，再做一遍完整 K-loop。
+
+结构上可以写成：
+
+```text
+普通：program -> 固定一个 C tile -> K-loop -> store -> 结束
+persistent：program -> 多次执行 [领取 C tile -> K-loop -> store -> reset]
+```
+
+因此看到 `for k in ...` 不能证明 kernel 是 persistent；关键证据是 program 生命周期内 `tile_id` 会跨多个输出 tile 变化。忘记在切换 tile 时清空 accumulator，会把上一 tile 的部分和带到下一 tile，产生静默数值错误。
+
+### 3. `tile_id = start_pid - NUM_SMS` 为什么不是 bug？
+
+**答案：**因为官方状态机在第一次真正使用 `tile_id` 前，会在 `ki == 0` 分支执行 `tile_id += NUM_SMS`。两行合起来的第一次结果正好是：
+
+```text
+(start_pid - NUM_SMS) + NUM_SMS = start_pid
+```
+
+之后每完成一个输出 tile，`ki` 回到领取新任务的状态，再加一次 `NUM_SMS`，同一 program 依次处理 `start_pid`、`start_pid + NUM_SMS`、`start_pid + 2*NUM_SMS`。这是用统一的“先递增再使用”状态转移避免首轮单独特判。
+
+孤立地看初始化行确实像负数或越界；判断它是否为 bug 必须连同 `ki` 更新顺序、循环条件和第一次 dereference 一起读。若代码在第一次 `+= NUM_SMS` 之前就用它构造地址，那才会成为真实错误。
+
+### 4. `TRITON_ALL_BLOCKS_PARALLEL` / `enable_auto_blockify` 解决的问题与 task queue 有什么本质区别？
+
+**答案：**Auto-blockify 解决的是 device 工作映射：怎样让较少的物理/launch block 通过内层循环覆盖原本很大的逻辑 grid。Task queue 解决的是 Host 提交语义：launch 提交给 Runtime 后，Host 是立即返回继续排队，还是同步等待完成。
+
+Auto-blockify 需要 compiler 与 driver 协作：编译器生成覆盖多个逻辑 block 的循环，driver 将实际 launch block 数钳到物理资源附近。它会改变一个 program 负责多少逻辑工作，但不改变 Host 是否等待。
+
+`TRITON_ENABLE_TASKQUEUE` 则不重写 `tile_id` 或 kernel 内循环。开启后若计时没有正确同步，测到的可能只是 Host enqueue 时间；即使看起来更快，也不能说明 device kernel 计算更快。一个 kernel 可以同时使用 auto-blockify 和 task queue，它们不是互斥替代方案。
+
+### 5. 在什么前提下，auto-blockify 比手写 persistent 更像第一选择？
+
+**答案：**当各逻辑 block 彼此独立、没有跨 block 顺序或同步依赖，现有大-grid kernel 语义已经正确，而主要问题只是 program 数远超物理核数和多轮下发开销时，auto-blockify 更适合作为低改动的第一组对照实验。
+
+它尤其适合从 GPU 迁移来的规则 elementwise/tile kernel：开发者可以保留“一 tile 一 program”的清晰源码，让 compiler/driver 自动折叠调度，再通过 benchmark 判断收益。前提还包括当前 Triton-Ascend 版本支持该访问/控制流模式，且启用后确实重新编译而非命中旧 cache。
+
+若需要自定义 tile 领取顺序、跨 tile 复用片上状态、精确控制 accumulator 生命周期，或逻辑 block 存在依赖，手写 persistent 更可解释，也可能是唯一正确方案。无论哪种选择，都必须验证完整覆盖、负载均衡、数值正确性和同步后的真机性能，不能只凭 grid 变小下结论。
 
 ## 17. 下一步学什么
 

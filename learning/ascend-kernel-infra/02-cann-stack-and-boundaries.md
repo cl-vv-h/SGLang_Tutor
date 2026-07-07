@@ -301,14 +301,55 @@ w = torch.ops.npu.helloworld(x, y)
 2. 看到 `torch.ops.npu.some_op(...)` 时，不看函数名，只靠注册点判断它来自 `torch_npu` 还是某个扩展库。
 3. 假设某个 kernel 只在超长序列时报 UB overflow，先写出你会检查的三个 tiling 参数。
 
-## 13. 自测问题
+## 13. 自测问题与参考答案
 
-- 为什么说 CANN 是“整套软件栈”而不是一个普通库？
-- `AscendCL` 和 `torch_npu` 的边界是什么？
-- 为什么现成算子路径和 custom kernel 路径最终都要经过 runtime？
-- `Platform` 和 `Tiling` 分别回答什么问题？
-- 为什么 `torch.ops.npu.xxx` 不能直接等同于 `torch_npu` 仓库实现？
-- 多卡 AllReduce 卡住时，为什么优先看 HCCL，而不是先改单卡 Vector kernel？
+### 1. 为什么说 CANN 是“整套软件栈”而不是一个普通库？
+
+**答案：**普通库通常只解决一个相对明确的问题，例如提供一组数学函数；CANN 则覆盖了“代码怎样变成设备程序、程序怎样被加载执行、数据怎样管理、现成算子怎样调用、多卡怎样通信”等多个层次。
+
+从下到上看，CANN 相关能力至少涉及 Driver/Firmware、设备 Runtime、AscendCL、算子库与 ACLNN、图或算子编译工具链、Ascend C 开发接口、HCCL 通信以及 profiling/调试工具。它们的输入输出也不同：编译器消费源码或 IR 并产出设备 binary，Runtime 消费 binary、地址、stream 和 launch 参数，算子库提供已经编译和调优的实现，HCCL 管理 rank 间通信。
+
+因此排错时不能只说“CANN 报错”。要继续问错误发生在安装/驱动、编译、binary 加载、stream launch、算子执行还是通信层。把 CANN 当成一个普通 `.so`，会把完全不同的责任边界混到一起。
+
+### 2. `AscendCL` 和 `torch_npu` 的边界是什么？
+
+**答案：**AscendCL 是 CANN 面向应用的较底层执行接口，负责 device/context、内存、stream/event、模型或 kernel 执行等设备运行时能力；`torch_npu` 则把这些能力接进 PyTorch 的 tensor 与 dispatcher 体系。
+
+用户操作 NPU `torch.Tensor` 时，需要的不只是调用一个底层 launch API，还包括 allocator、storage 生命周期、PyTorch stream 语义、ATen 算子注册、dispatch key、随机数、autograd/graph/profiler 和分布式接口。`torch_npu` 负责这些 PyTorch 语义，并在内部继续依赖 CANN/AscendCL、ACLNN 等能力完成设备工作。
+
+所以二者不是并列替代品，也不能把 `torch_npu` 理解成 AscendCL 的简单 Python binding。AscendCL 更接近“怎样驱动设备执行”，`torch_npu` 更接近“怎样让 PyTorch 正确地使用这套设备能力”。
+
+### 3. 为什么现成算子路径和 custom kernel 路径最终都要经过 runtime？
+
+**答案：**因为无论设备 binary 是供应方预先编译的，还是开发者用 Triton-Ascend/Ascend C 自己生成的，真正执行时都必须完成同一类运行时动作：确定 device 和 stream、准备设备地址与参数、加载或定位 binary、提交任务、处理依赖并最终由 NPU 执行。
+
+两条路径的区别主要发生在 Runtime 之前：现成算子路径根据 ACLNN/算子库接口选择已有实现；custom 路径还要经过自定义源码、编译、注册和 Host tiling。进入执行阶段后，它们都不能绕过设备任务队列和内存/stream 管理。
+
+这也解释了为什么“已经成功编译”不等于“能够运行”：binary 仍可能因为目标架构不匹配、参数 ABI 错误、stream/context 错误或设备地址无效而在 Runtime/launch 阶段失败。
+
+### 4. `Platform` 和 `Tiling` 分别回答什么问题？
+
+**答案：**Platform 回答“这台目标设备拥有什么资源与能力”，Tiling 回答“针对这次具体输入，应该怎样使用这些资源”。
+
+Platform 提供相对稳定的硬件事实，例如 AIC/AIV 数量、UB/L1/L0 容量、架构型号和某些库能力。Tiling 同时读取这些事实和本次输入的 shape、dtype、layout，再计算 `blockDim`、每核工作量、tile 长度、循环次数、尾块、workspace 与 tiling key。
+
+可以把它们类比为“厂房参数”和“本批订单的生产计划”。同一 Platform 上，不同 shape 会产生不同 Tiling；同一 shape 换到资源不同的硬件上，也可能需要另一份 Tiling。Platform 不直接等于执行计划，Tiling 也不应凭空硬编码设备资源。
+
+### 5. 为什么 `torch.ops.npu.xxx` 不能直接等同于 `torch_npu` 仓库实现？
+
+**答案：**因为 `npu` 只是 PyTorch dispatcher 的 namespace，不是源码所有权证明。任何被当前进程加载的扩展库，只要使用 `TORCH_LIBRARY_FRAGMENT(npu, m)` 等注册 API，都可以向这个 namespace 添加 schema 和实现。
+
+例如导入 `sgl_kernel_npu` 时会加载 `libsgl_kernel_npu.so`；该动态库的静态注册代码可以让 `torch.ops.npu.apply_token_bitmask` 出现在进程中。调用外形虽然是 `torch.ops.npu.*`，实现却来自 `sgl-kernel-npu`。
+
+可靠的溯源顺序是：查谁调用 `torch.ops.load_library`，搜索 op 的 `m.def`，再找对应 dispatch key 下的 `m.impl`，最后进入 Host 函数确认它调用 ACLNN、Triton 还是 Ascend C kernel。Namespace 只能告诉你调用入口，不能告诉你仓库归属或 device 实现类型。
+
+### 6. 多卡 AllReduce 卡住时，为什么优先看 HCCL，而不是先改单卡 Vector kernel？
+
+**答案：**AllReduce 的核心契约是多个 rank 必须在兼容的 communicator、顺序、数据规格和通信拓扑下共同进入集合通信。任何 rank 缺席、调用顺序不一致、shape/count 不一致、通信域配置错误或网络链路异常，都可能让其余 rank 等待，表现为“卡住”。
+
+单卡 Vector kernel 只处理本卡计算，通常既不建立 communicator，也不决定其他 rank 是否进入同一个 collective。除非 profiling 已证明 AllReduce 前的某个 kernel 没有完成、写坏了通信输入，或者 stream 依赖让 collective 永远无法开始，否则先改 Vector kernel缺乏因果依据。
+
+更合理的顺序是先检查各 rank 日志和 collective 序列、world size/rank/group、tensor shape/dtype/count、HCCL 错误与超时、stream/event 依赖和网络拓扑；确认通信输入是被前序 kernel 阻塞或破坏后，再回到单卡 kernel 排查。
 
 ## 14. 官方资料
 

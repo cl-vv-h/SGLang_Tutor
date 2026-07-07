@@ -264,16 +264,62 @@ Host 在 launch 前对 working tensor 调用 `record_stream(npuStream)`，防止
 
 Reference 不需要快，它需要简单、独立、容易审查。
 
-## 17. 可以继续提出的优化问题
+## 17. 开放优化问题：当前结论与验证方法
 
-- `numRows < coreNum` 时，仅按行分核是否让大 vocab 单行缺少并行？
-- bit 展开能否批量 Vector 化？
-- padding 的额外 tensor 分配在非 256 对齐 vocab 下占多少时间？
-- optional indices 的 gather/scatter 成本何时超过少算的收益？
-- double buffer 是否在小 vocab 下仍有收益？
-- `.out`/预分配接口是否更适合 graph capture？
+这些问题的最终答案依赖硬件、shape 和 CANN 版本，但并不意味着只能留下问号。下面先给出源码静态分析能确定的机制，再说明需要怎样测量。
 
-这些是需要 benchmark 和 trace 回答的问题，不是读源码就能直接下结论。
+### 1. `numRows < coreNum` 时，仅按行分核是否让大 vocab 单行缺少并行？
+
+**分析答案：**会限制可用的核间并行度。当前 `blockDim=min(numRows,coreNum)`，每个 block 负责完整的一行；若只有 1 行，即使 vocab 很大，也只启动 1 个 block，再由该核沿 vocab 方向串行处理多个 tile。
+
+因为各 vocab 位置的 bitmask 应用彼此独立，可以评估二维切分 `(row, vocab_chunk)`，让多核共同处理同一行的互不重叠区间。代价是 block 数、地址计算和尾块增多，极小行或较短 vocab 可能反而更慢。
+
+验证时固定总元素数，分别扫描 `numRows={1,2,4,...}` 与 vocab，比较当前按行方案和二维分核方案的 kernel latency、AIV 利用率、每核工作量及 launch 开销；不能只测吞吐较大的多行 case。
+
+### 2. Bit 展开能否批量 Vector 化？
+
+**分析答案：**算法上可以尝试：把若干 packed INT32 广播/移位并生成 lane mask，再用 Vector compare/select 一次处理一批 logits。当前 `GetValue/SetValue` 双层循环明确把展开工作放在 Scalar 路径，长 vocab 或大量部分 mask word 时可能成为瓶颈。
+
+但能否更快取决于目标 Ascend C 版本对整数位运算、broadcast、select 与 mixed dtype 的支持，以及构造 unpacked mask 需要多少 UB 和指令。`packed==-1` 快速路径在大量全保留 word 时可能已经很便宜，Vector 化反而做了无用工作。
+
+应分别测试 all-unmasked、all-masked、随机稀疏和连续区间 mask，观察 Scalar/Vector 指令占比、UB 使用与 latency；不要只在随机 mask 上给出统一结论。
+
+### 3. Padding 的额外 tensor 分配在非 256 对齐 vocab 下占多少时间？
+
+**分析答案：**源码只能确认会发生额外 `zeros`、`narrow().copy_()` 和结果拷回，无法静态给出时间比例。开销同时受 batch、padding 差值、allocator 是否命中缓存、内存带宽和 graph 模式影响。
+
+Padding 的元素浪费上界小于每行 255 个 logits，但固定的分配/launch 开销在小 batch、小 vocab 时可能比新增字节更显著。大 vocab 时相对字节比例很小，额外全 tensor copy 却仍可能可见。
+
+验证应把 Host/wrapper 总时间与纯 device kernel 时间分开，成对测试 `vocab=256k` 和 `256k±1`，并覆盖冷 allocator、预热 allocator 与 graph capture。若只计 kernel 内部，就会完全漏掉 padding 创建成本。
+
+### 4. Optional indices 的 gather/scatter 成本何时超过少算的收益？
+
+**分析答案：**存在一个随“选中行比例”和每行 vocab 工作量变化的交叉点。选中行很少、每行很宽时，少运行大量 bitmask 计算通常值得；选中比例接近 100% 或行很短时，`index`/`index_put_`、临时 contiguous tensor 和额外内存流量可能超过收益。
+
+可以用近似成本模型理解：
+
+```text
+indices 路径 = gather + selected_rows_kernel + scatter
+全量路径    = all_rows_kernel
+```
+
+对每个真实 batch/vocab 扫描选中比例 `{1%,10%,25%,50%,75%,100%}`，同时记录 wrapper 总时间、额外显存和 kernel 时间。交叉点必须用端到端 wrapper 测量，不能只比较中心 kernel。
+
+### 5. Double buffer 是否在小 vocab 下仍有收益？
+
+**分析答案：**若每行只有一个 tile，几乎没有“下一 tile CopyIn 与当前 tile Compute 重叠”的稳态阶段，double buffer 很难发挥主要价值，却仍占两份 queue buffer。小任务还更容易由 launch、Scalar 控制和流水填充/排空主导。
+
+若多行循环能让编译器跨行形成重叠，或 CopyOut 与下一行 CopyIn 可以并行，仍可能有有限收益，所以不能只凭 tileCount=1 断言必然无效。减少 buffer 数还可能允许更大 tile，改变另一项变量。
+
+应为同一 tileLength 提供 buffer number 1/2 两个变体，按 `numRows×vocab` 网格测量，并检查 UB 占用、CopyIn/Compute/CopyOut 时间线。只有真机 trace 能证明是否实际重叠。
+
+### 6. `.out`/预分配接口是否更适合 graph capture？
+
+**分析答案：**通常更有利，因为调用者可以在 capture 前准备稳定地址和容量，避免 wrapper 每次动态分配 padding/output tensor；但它不是自动获得 graph 安全的充分条件。
+
+还必须保证 schema 正确标注 mutation/alias、输入输出 shape 在重放时满足合同、workspace/tiling storage 生命周期稳定、没有 capture 期间不允许的 Host 同步或分配，并且 stream 依赖正确。当前算子原地修改 logits，尤其要让 schema 与真实 mutation 行为一致。
+
+评估时应分别验证 eager 正确性、首次 capture、重复 replay、地址是否稳定以及不同 shape 是否正确拒绝或重建图；随后比较分配次数、capture 成功率和 replay latency。
 
 ## 18. 本章检查点与参考答案
 

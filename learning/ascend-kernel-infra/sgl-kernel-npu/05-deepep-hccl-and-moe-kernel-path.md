@@ -501,13 +501,47 @@ normal path 的优势是更透明。调试时先看：
 3. 对照 [`deep_ep.cpp#L287-L338`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/deepep/deep_ep.cpp#L287-L338)，解释为什么 normal dispatch 要先 `notify` 再 `dispatch normal`。
 4. 看 [`test_performance_compare.py#L79-L176`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/tests/python/deepep/test_performance_compare.py#L79-L176)，列出手工 HCCL baseline 相比 DeepEP 少了哪些“框架化封装”。
 
-## 19. 自测问题
+## 19. 自测问题与参考答案
 
-- 为什么说 `get_dispatch_layout()` 解决的是“路由意图 -> 通信计划”的转换，而不是“真正通信”？
-- dispatch 后的 `recv_x` 为什么不能直接当成原 token 顺序继续喂给模型？
-- `DeepEP` 和 `HCCL` 的边界分别在哪里？
-- `fused_deep_moe` 相比 normal path，真正减少的是什么，没改变的又是什么？
-- 为什么 combine 必须依赖 dispatch 阶段留下来的辅助张量？
+### 1. 为什么说 `get_dispatch_layout()` 解决的是“路由意图 → 通信计划”的转换，而不是“真正通信”？
+
+**答案：**Router 只给出每个 token 的 `topk_idx`；通信还需要知道这些 expert 分布在哪些 rank、本 rank 应向谁发送多少 token、每个 expert 会收到多少 token，以及哪些 token 属于某个目标 rank。`get_dispatch_layout()` 计算的正是这些 counts、membership mask 和辅助布局信息。
+
+此时业务 token `x` 还没有按目标 rank 重排并发出。真正 dispatch 需要消费 layout 结果，分配/选择发送与接收 buffer，执行 token permutation，并调用 HCCL/ACLNN 通信路径把数据送到目标设备。
+
+区分两步很重要：layout 错会产生错误通信计划，即使 HCCL 链路完全正常也会发错数据；layout 正确但 dispatch 卡住，则继续看 communicator、count、stream 和通信执行。不能只看到输出了 `num_tokens_per_rank` 就说通信已完成。
+
+### 2. Dispatch 后的 `recv_x` 为什么不能直接当成原 token 顺序继续喂给模型？
+
+**答案：**Dispatch 的目的就是把原本按 token 顺序排列的数据，重排成对本地 expert 计算友好的布局。来自不同源 rank、被不同 top-k expert 选中的 token 会按目标 rank/expert 分组，同一原 token 还可能因 top-k 路由出现多份 expert 副本。
+
+因此 `recv_x` 的第 0 行通常不再等于原输入第 0 个 token，它的 batch/段边界也应由 `num_recv_tokens_per_expert` 等元数据解释。正确路径是先按该布局执行本地 grouped expert FFN，再由 combine 使用 dispatch handle/辅助索引把结果送回源 rank、恢复 token 对应关系并按 top-k 权重聚合。
+
+若绕过 combine 直接把 `recv_x` 或 expert 输出接回模型，shape 可能看似兼容，语义却已经发生 permutation/duplication，属于最危险的静默错误之一。
+
+### 3. `DeepEP` 和 `HCCL` 的边界分别在哪里？
+
+**答案：**HCCL 提供 rank/communicator、collective 或点对点数据交换等底层多卡通信能力；DeepEP 在其上实现 MoE 专用协议，把 router 结果转成 layout、token permutation、dispatch、expert-friendly receive buffer、combine 与部分 fused 计算路径。
+
+HCCL 不理解“这个 token 的 top-k expert 是谁”，也不会自动生成 `src_idx`、`send_head` 或恢复 token 顺序。DeepEP 负责这些模型语义和 buffer contract，并通过 HCCL group 名称、communicator 或 ACLNN 通信算子完成真实传输。
+
+排错时，rank 建组、网络、collective 超时更偏 HCCL；token counts、expert mapping、handle/assist tensor 更偏 DeepEP；本地 grouped FFN 数值则属于 expert compute。三者相连，但不能互相替代。
+
+### 4. `fused_deep_moe` 相比 normal path，真正减少的是什么，没改变的又是什么？
+
+**答案：**它主要减少上层显式阶段边界：更少的 Python/C++ 调用、更少的独立 launch、可能更少的中间 tensor 落 GM 和 Host 往返，并给通信与两层 expert FFN/combine 提供更大的联合优化空间。
+
+没有改变的是 MoE 数学与分布式合同：router 仍决定 top-k expert 和权重，token 仍要到达持有对应 expert 权重的 rank，expert FFN 参数和激活仍要产生等价结果，最终仍要按原 token 关系与 top-k 权重 combine。HCCL 通信域、shape/dtype/量化约束也不会因为接口叫 fused 就消失。
+
+Fusion 还可能增加 workspace、单 op 复杂度和版本耦合，因此不能仅凭 launch 数少断言更快。官方测试用 baseline path 约束其正确性，真实收益仍需在目标 batch、拓扑和量化配置上 profiling。
+
+### 5. 为什么 combine 必须依赖 dispatch 阶段留下来的辅助张量？
+
+**答案：**Dispatch 是一个带复制、分组和跨 rank 发送的非平凡 permutation。仅有 expert 输出值，combine 无法推断每一行来自哪个原 token、属于哪个 top-k 槽位、应发回哪个源 rank，以及应用什么权重。
+
+`src_idx`、`send_head`、counts、top-k weight/handle 等辅助数据记录了这次 dispatch 的逆映射和通信计划。Combine 使用它们把 expert 输出按正确目的地回传，恢复原 token 位置，并对多个 expert 分支加权聚合。
+
+这些元数据必须与 expert 输出来自**同一轮 dispatch**。复用上一轮 handle、在中间改变顺序却不更新索引，或只保存 counts 不保存来源关系，都可能让通信成功但结果写回错误 token。它们是协议的一部分，不是可丢弃的调试信息。
 
 ## 20. 下一步学什么
 

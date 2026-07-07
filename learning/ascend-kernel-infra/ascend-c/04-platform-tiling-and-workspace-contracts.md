@@ -338,14 +338,55 @@ Host 计算一份“本次 launch 的计划”
 3. 解释为什么 `GetLibApiWorkSpaceSize()` 返回的是 workspace 大小，而不是 tile 大小。
 4. 解释为什么 `tiling key` 更像“变体编号”，而不是“内存预算”。
 
-## 15. 自测问题
+## 15. 自测问题与参考答案
 
-- `Platform` 和 `Tiling` 分别回答什么问题？
-- 为什么 `workspace` 不能和 UB/L1/L0 混为一谈？
-- 哪类算子更可能把 tiling 拆成几个标量，而不是单独传结构体？
-- `tiling tensor` 为什么常先在 CPU 侧构造，再拷到 device？
-- 为什么真实 Host 代码会关心 graph capture 和缓存，而不只是这一次 launch？
-- `tiling key` 与 `blockDim` 的职责差异是什么？
+### 1. `Platform` 和 `Tiling` 分别回答什么问题？
+
+**答案：**Platform 描述目标机器的资源事实，Tiling 生成本次输入的执行计划。
+
+Platform 查询的典型结果包括 AIV/AIC 数量、UB/L1/L0 容量、架构版本和库接口所需 workspace 等。它回答“可以用什么”。Tiling 再结合输入 shape、dtype、layout 与算子语义，决定 `blockDim`、每核行数、tile 长度、尾块、workspace 和 tiling key，回答“这一次具体怎么用”。
+
+二者的依赖方向通常是 `Platform + input metadata -> Tiling -> launch`。同一硬件上不同输入可能有不同计划；同一输入换到另一款硬件也可能重新 tiling。把 Platform 数值直接当作 tile 大小，或把某次 Tiling 结果硬编码成所有设备通用值，都会破坏这一边界。
+
+### 2. 为什么 `workspace` 不能和 UB/L1/L0 混为一谈？
+
+**答案：**Workspace 通常是 Host 在 launch 前分配的全局设备内存 scratch，跨核可按 ABI 传入；UB/L1/L0 是 AI Core 内容量更小、访问更近的片上 Local Memory，由 kernel/编译器按核管理。
+
+二者的容量、分配者和生命周期都不同。Workspace 可能有 MB/GB 级需求并作为 `at::Tensor`/设备地址存在，生命周期至少覆盖异步 kernel；UB/L1/L0 每核独立或按架构组织，常由 `TPipe/TQue/TBuf` 或 compiler 分配，kernel 结束后不作为普通输出保留。
+
+“把 workspace 放进 UB”通常在概念上就不成立：大 workspace 放不下，且 Host 不能像分配 NPU tensor 那样直接持有某核 UB 地址。正确模式是把需要高频计算的 tile 从 GM/workspace 搬到 Local Memory，计算后再按需写回。
+
+### 3. 哪类算子更可能把 tiling 拆成几个标量，而不是单独传结构体？
+
+**答案：**Tiling 状态很少、字段固定、没有复杂变体或版本演进需求的简单算子更适合直接传标量。
+
+例如按行切分的 Vector kernel 只需 `numRows`、`vocabSize`、`baseRows`、`extraCores` 和 `tileLength`，Host 可以让这些 `uint32_t` 与 kernel 入口参数一一对应。这样省去构造和复制小 tiling tensor，ABI 也直观。
+
+当字段很多、含嵌套 matmul tiling、多个 shape 分支、tiling key、workspace offset 或后续可能扩展时，结构体更容易保持 Host/Device 一致并集中做序列化。选择标准不是“结构体一定更高级”，而是 ABI 的复杂度、稳定性和传参成本；无论哪种方式都必须记录字段宽度、顺序和单位。
+
+### 4. `tiling tensor` 为什么常先在 CPU 侧构造，再拷到 device？
+
+**答案：**因为全局 shape 分析、硬件查询、变体选择和内存规划属于 Host 控制逻辑，CPU 已经持有 `at::Tensor` 元数据和 Platform 接口；让每个 AI Core 重复做这些工作既浪费，也难以统一全局计划。
+
+Host 先按共享结构体 ABI 写一块小的 CPU byte buffer，再把它复制到 device，kernel 入口才能通过 `GM_ADDR`/`__gm__ TilingData*` 读取。这里复制的是“计划说明书”，不是业务 workspace。
+
+复制方式还必须遵守当前 NPU stream、graph capture 与 allocator 语义。使用 `TorchNpuHelper::CopyTensorHostToDevice` 等框架路径，能让 tiling 数据的到达顺序与后续 launch 建立依赖；裸异步 memcpy 若没有正确 event/stream，kernel 可能读到尚未完成或已经失效的数据。
+
+### 5. 为什么真实 Host 代码会关心 graph capture 和缓存，而不只是这一次 launch？
+
+**答案：**生产推理会反复执行相同或相近 shape，并可能把执行序列捕获成图。一次 launch 正确，只能证明 eager 单次路径；图重放还要求地址、分配、stream 顺序和 Host 行为满足可重放约束。
+
+若 Host 每次都同步 CPU、动态分配不同大小的 tiling/workspace、产生不可捕获的拷贝，或让 tensor storage 在重放前失效，单次能跑也可能无法 capture。缓存 tiling 和 workspace 可以减少重复 shape 分析、Host 分配与 H2D 小拷贝，并提升图模式稳定性。
+
+但缓存必须有正确 key，至少覆盖影响计划的 shape、dtype、layout、设备/架构和相关 option；缓存对象的 storage 生命周期也要覆盖异步使用。错误缓存比不缓存更危险，因为它可能让新输入静默复用旧 blockDim、tile 或 workspace 大小。
+
+### 6. `tiling key` 与 `blockDim` 的职责差异是什么？
+
+**答案：**Tiling key 选择“运行哪一种 kernel/模板路径”，`blockDim` 决定“这次启动多少个逻辑核实例”。
+
+例如 tiling key 可以编码 transpose、数据格式、量化模式、split-K 或某套专用算法，使 Host/launch 选择匹配的编译变体；`blockDim=32` 则表示该变体启动 32 个 SPMD 实例，由 `GetBlockIdx()` 区分工作。
+
+同一个 tiling key 可以针对不同 shape 使用不同 blockDim，同一个 blockDim 也可能启动不同 tiling key 的 kernel。前者是实现/算法分支，后者是并行规模。把 key 当核数会选错 binary，把 blockDim 当算法变体则无法表达 Device 应执行哪套代码。
 
 ## 16. 官方资料
 
