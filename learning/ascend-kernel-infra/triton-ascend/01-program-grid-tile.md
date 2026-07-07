@@ -2,6 +2,8 @@
 
 本章用 Triton-Ascend 官方 `01-vector-add.py` 建立完整编程模型。源码基线：[`triton-lang/triton-ascend@be90ac7`](https://github.com/triton-lang/triton-ascend/tree/be90ac7e52267822c0ea83d20b705c1e4eaf586f)。
 
+阅读本章代码前，先记住：kernel 内的 `tl.tensor` 是编译器 IR value，不是 `torch.Tensor`。若“标量、block、pointer block”还不熟悉，请先读[代码阅读手册](../reference/code-reading-and-types.md)。本章每个核心变量都会同时标出 dtype、shape 与已知时刻。
+
 ## 1. Triton-Ascend 的定位
 
 Triton-Ascend 保留 Triton 的 Python DSL 和 JIT 使用方式，并增加 Ascend language extension、compiler backend 与 runtime driver。开发者描述 tile 级计算，编译器负责把 TTIR 等中间表示降低为 Ascend NPU 可执行对象。
@@ -33,24 +35,48 @@ Triton kernel
   └─ store output
 ```
 
-先看一个等价的教学缩写版：
+先看固定 commit 中 kernel 主体的等价源码摘录；只删除了注释，没有改 API 或补造变量：
 
 ```python
 @triton.jit
-def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offsets < n
+def add_kernel(
+    x_ptr,
+    y_ptr,
+    output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
-    tl.store(out_ptr + offsets, x + y, mask=mask)
+    output = x + y
+    tl.store(output_ptr + offsets, output, mask=mask)
 ```
+
+假设 wrapper 传入 FP16 tensor、`BLOCK_SIZE=1024`，变量类型沿源码传播如下。`[]` 表示零维标量，`[1024]` 表示一个静态 block；它们都是 `tl.tensor`，不是 Python list：
+
+| 变量 | Triton 类型 | 编译时还是运行时 | 含义 |
+|---|---|---|---|
+| `x_ptr/y_ptr/output_ptr` | `pointer<fp16>[]` | 地址值在 launch/device 运行时给出，pointee dtype 参与 JIT specialization | 三个 tensor 首元素的设备指针 |
+| `n_elements` | 整数标量 `tl.tensor` | 运行时 | 输入真实长度；具体整数位宽由实参推导 |
+| `BLOCK_SIZE` | `tl.constexpr` | 编译时 | 当前 program 的静态 lane 数 |
+| `pid` | `int32[]` | 运行时 | 逻辑 program ID |
+| `block_start` | `int32[]` | 运行时 | 当前 tile 的标量起始元素下标 |
+| `tl.arange(...)` | `int32[1024]` | IR 在编译时定 shape，lane 值在设备语义中使用 | tile 内相对下标 |
+| `offsets` | `int32[1024]` | 运行时 block value | 1024 个全局元素下标 |
+| `mask` | `int1[1024]` | 运行时 block value | 每个 lane 是否落在输入范围内 |
+| `x/y/output` | `fp16[1024]` | 运行时 block value | 加载值与逐元素相加结果 |
 
 ## 3. `@triton.jit`
 
 `@triton.jit` 表示这个函数不是普通 Python 函数。首次遇到某组参数和 meta-parameter 时，Triton 会编译 kernel；后续满足缓存键的调用可复用编译产物。
 
 Kernel 函数里只能使用 Triton 支持的语言构造。不要期待任意 Python 对象、动态容器和运行时反射都能进入 device code。
+
+更精确地说，Python 定义函数只提供语法外壳；JIT 前端把 `pid`、`offsets`、`x` 等名字绑定到 [`triton.language.core.tensor`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/core.py#L841-L883) 对象。这个类保存 IR `handle`、完整 `type`、静态 `shape` 和标量 `dtype`。因此 `x + y` 调用的是 DSL 重载并生成 IR，不是 CPython 在 NPU 数据上直接做加法。
 
 ## 4. Pointer 参数
 
@@ -63,7 +89,11 @@ x: torch.Tensor on NPU
 x_ptr: 指向 x 第一个元素的 device pointer
 ```
 
-`x_ptr + offsets` 不是立刻加载数据，而是得到一组元素地址。真正读取发生在 `tl.load`。
+`x_ptr + offsets` 不是立刻加载数据，而是得到一组元素地址。若 `x_ptr` 是 `pointer<fp16>[]`、`offsets` 是 `int32[1024]`，结果就是 `pointer<fp16>[1024]`。真正读取发生在 `tl.load`，其结果是 `fp16[1024]`。
+
+这里的 `+` 是 `tl.tensor.__add__` 的重载。Triton 的 [`binary_op_type_checking_impl`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L171-L206) 先把标量 pointer 广播成与 offsets 相同的 block shape，[`semantic.add`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L226-L255) 再生成 `create_addptr` IR。源码明确禁止 pointer 与 pointer 相加，也不允许 pointer 加浮点数；这里合法是因为 offsets 是整数元素偏移。
+
+偏移单位是**元素**而非字节：`pointer<fp16> + 3` 指向第 3 个 FP16 元素。这个规则解释了为什么 tensor stride 可以直接出现在地址公式里。
 
 ## 5. `tl.constexpr`
 
@@ -84,6 +114,8 @@ pid = tl.program_id(axis=0)
 
 当前使用一维 grid，所以读取 axis 0。若 grid 是 `(G0, G1)`，则可以分别读取 `program_id(0)` 和 `program_id(1)`。
 
+`pid` 的 Python 前端类是 `tl.tensor`，其值类型通常是零维 `int32[]`；它不是 Python `int`，也不是物理核编号。`axis=0` 则是编译函数时就能解析的 Python/constexpr 参数。
+
 Program 以 tile 为工作单位。假设 `BLOCK=4`：
 
 | pid | offsets |
@@ -98,7 +130,7 @@ Program 以 tile 为工作单位。假设 `BLOCK=4`：
 lane = tl.arange(0, BLOCK)
 ```
 
-它产生一个 Triton block tensor。后面的地址、mask、load 结果和加法结果也都是 block tensor：
+它产生一个 Triton block tensor。若 `BLOCK=256`，其完整教学类型为 `int32[256]`。[`semantic.arange`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L625-L644) 创建 `block_type(int32, [256])` 与 `make_range` IR；它不是 Python `range`。后面的地址、mask、load 结果和加法结果也都是 block tensor：
 
 ```text
 lane       shape=[BLOCK], integer offsets
@@ -116,6 +148,8 @@ x+y        shape=[BLOCK], values
 ```python
 mask = offsets < n
 x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
+result = x + y
 tl.store(out_ptr + offsets, result, mask=mask)
 ```
 
@@ -131,6 +165,8 @@ Mask 不只是防崩溃。错误 mask 可能静默地丢数据、污染结果或
 grid = lambda meta: (triton.cdiv(n, meta["BLOCK_SIZE"]),)
 add_kernel[grid](x, y, out, n, BLOCK_SIZE=1024)
 ```
+
+这一段运行在 Host 的 Python eager 阶段：`grid` 是 Python callable，`meta` 是包含编译 meta-parameter 的 Python mapping，返回值是单元素 Python tuple；`x/y/out` 是 NPU `torch.Tensor`，`n` 是 Python `int`。进入 kernel 后，它们才分别变成 pointer、运行时标量与 `tl.constexpr`。
 
 `triton.cdiv` 是向上整除：
 
@@ -159,18 +195,28 @@ Triton-Ascend 的 Vector 开发指南更推荐生产路径考虑：
 
 ```python
 @triton.jit
-def persistent_add(x, y, out, n, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    num_tiles = tl.cdiv(n, BLOCK)
+def persistent_add(
+    x_ptr,
+    y_ptr,
+    out_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    num_tiles = tl.cdiv(n_elements, BLOCK_SIZE)
 
     for tile_id in range(pid, num_tiles, num_programs):
-        offsets = tile_id * BLOCK + tl.arange(0, BLOCK)
-        mask = offsets < n
-        ...
+        offsets = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
+        tl.store(out_ptr + offsets, x + y, mask=mask)
 ```
 
 Host 端让 `grid=(num_vectorcore,)`。每个 program 处理 `pid, pid+num_programs, ...` 这些 tile。
+
+这里 `tile_id`、`num_tiles`、`num_programs` 都是运行时整数标量 `tl.tensor`；`BLOCK_SIZE` 仍是编译期值。循环体中的 `offsets` 每轮重新成为 `int32[BLOCK_SIZE]`。这段代码没有用省略号隐藏 load/store，因此可以直接看清 pointer block 的生成位置。
 
 这不是无条件更快：任务很小、负载不均或编译器优化能力变化时仍需 benchmark。但它揭示了 Ascend 与 GPU 迁移时最重要的差异之一——不要默认超大 grid 的调度成本可以忽略。
 
@@ -193,11 +239,19 @@ Device kernel 只有十几行，不代表完整算子只有十几行。
 至少覆盖：
 
 ```python
+def checked_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    assert x.device.type == "npu" and y.device == x.device
+    assert x.dtype == y.dtype and x.shape == y.shape
+    assert x.is_contiguous() and y.is_contiguous()
+    if x.numel() == 0:
+        return torch.empty_like(x)
+    return add(x, y)
+
+
 for n in [0, 1, 31, 32, 33, 1023, 1024, 1025, 98432]:
-    # 构造 NPU tensor
-    # reference = x + y
-    # actual = triton_add(x, y)
-    # torch.testing.assert_close(actual, reference)
+    x = torch.randn(n, device="npu", dtype=torch.float16)
+    y = torch.randn(n, device="npu", dtype=torch.float16)
+    torch.testing.assert_close(checked_add(x, y), x + y)
 ```
 
 还要覆盖支持的 dtype、非连续 tensor 是否拒绝或正确处理、极值/NaN/Inf 行为。

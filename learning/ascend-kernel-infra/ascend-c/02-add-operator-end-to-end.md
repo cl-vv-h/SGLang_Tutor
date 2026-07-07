@@ -2,6 +2,8 @@
 
 本章不追求复制某个 CANN 模板的全部样板代码，而是解释一个生产算子从 Python/PyTorch 调用到 device kernel 的每个边界。
 
+本章延续[代码阅读手册](../reference/code-reading-and-types.md)与上一章的完整 kernel：C++ 模板类型在编译时确定 dtype，tiling 字段使用固定宽度整数形成 Host/Device ABI，地址 offset 默认以元素为单位，buffer size 明确以字节为单位。
+
 ## 1. 先写规格，不要先写 Kernel
 
 ```text
@@ -36,11 +38,12 @@ add/
 
 ## 3. Tiling Data 是 Host/Device 协议
 
-教学版结构：
+下面给出字段宽度明确的 ABI 结构；Host 与 Device 必须包含同一份声明：
 
 ```cpp
 struct AddTilingData {
     uint32_t totalLength;
+    uint32_t blockDim;
     uint32_t blockLength;
     uint32_t tileLength;
     uint32_t tilesPerBlock;
@@ -82,56 +85,72 @@ xLocal + yLocal + zLocal
 
 ## 6. Device 侧初始化
 
-教学伪代码：
+下面使用完整 C++ 表达式，不再使用未声明的 `IsLastBlock`/`ComputeBlockOffset`：
 
 ```cpp
-void Init(GM_ADDR x, GM_ADDR y, GM_ADDR z, const AddTilingData& t) {
-    blockIdx = AscendC::GetBlockIdx();
-    blockLength = IsLastBlock(blockIdx) ? t.lastBlockLength : t.blockLength;
-    blockOffset = ComputeBlockOffset(blockIdx, t);
+__aicore__ inline void Init(
+    GM_ADDR x,
+    GM_ADDR y,
+    GM_ADDR z,
+    const AddTilingData &tiling
+) {
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+    bool isLastBlock = (blockIdx + 1U == tiling.blockDim);
+    this->blockLength = isLastBlock ? tiling.lastBlockLength : tiling.blockLength;
+    this->tileLength = tiling.tileLength;
+    uint32_t blockOffset = blockIdx * tiling.blockLength;
 
-    xGm.SetGlobalBuffer((__gm__ half*)x + blockOffset, blockLength);
-    yGm.SetGlobalBuffer((__gm__ half*)y + blockOffset, blockLength);
-    zGm.SetGlobalBuffer((__gm__ half*)z + blockOffset, blockLength);
+    xGm.SetGlobalBuffer((__gm__ half *)x + blockOffset, this->blockLength);
+    yGm.SetGlobalBuffer((__gm__ half *)y + blockOffset, this->blockLength);
+    zGm.SetGlobalBuffer((__gm__ half *)z + blockOffset, this->blockLength);
 
-    pipe.InitBuffer(inX, 2, t.tileLength * sizeof(half));
-    pipe.InitBuffer(inY, 2, t.tileLength * sizeof(half));
-    pipe.InitBuffer(outZ, 2, t.tileLength * sizeof(half));
+    constexpr uint8_t bufferCount = 2;
+    uint32_t tileBytes = this->tileLength * sizeof(half);
+    pipe.InitBuffer(inX, bufferCount, tileBytes);
+    pipe.InitBuffer(inY, bufferCount, tileBytes);
+    pipe.InitBuffer(outZ, bufferCount, tileBytes);
 }
 ```
 
 重点：每个核把 GlobalTensor 视图定位到自己的分片，后续 tile offset 可以从 0 开始计算。
 
+变量类型不能只看名字：`tiling` 是 Device 侧只读的 `const AddTilingData&`；`blockIdx/blockOffset/blockLength/tileLength/tileBytes` 是 `uint32_t`，但前四个 offset/length 使用元素单位，只有 `tileBytes` 使用字节；`isLastBlock` 是 C++ `bool`；`x/y/z` 是 ABI 地址，cast 后才成为 `__gm__ half*`；`xGm/yGm/zGm` 是 `GlobalTensor<half>` view。
+
 ## 7. Device 侧 Process
 
 ```cpp
-void Process() {
-    uint32_t tileCount = CeilDiv(blockLength, tileLength);
-    for (uint32_t tile = 0; tile < tileCount; ++tile) {
-        uint32_t actual = Min(tileLength, blockLength - tile * tileLength);
-        CopyIn(tile, actual);
+__aicore__ inline void Process() {
+    uint32_t tileCount = (blockLength + tileLength - 1U) / tileLength;
+    for (uint32_t tileIdx = 0; tileIdx < tileCount; ++tileIdx) {
+        uint32_t tileOffset = tileIdx * tileLength;
+        uint32_t remaining = blockLength - tileOffset;
+        uint32_t actual = remaining < tileLength ? remaining : tileLength;
+        CopyIn(tileIdx, actual);
         Compute(actual);
-        CopyOut(tile, actual);
+        CopyOut(tileIdx, actual);
     }
 }
 ```
 
 `actual` 是尾 tile 的真实长度。实际 API 可能要求对齐搬运并对尾块采用特殊参数，不能把所有非对齐场景都简化成普通 `DataCopy(..., actual)`。
 
+这里所有局部变量都是 Device Scalar 执行的 `uint32_t`，不是 tensor：`tileCount` 是向上整除后的循环次数，`tileIdx` 是核内 tile 编号，`tileOffset/remaining/actual` 的单位均为元素。它们负责控制和地址计算；批量数据仍通过 `LocalTensor` 与 Vector/DataCopy API 处理。
+
 ## 8. Kernel 入口
 
 ```cpp
 extern "C" __global__ __aicore__
 void add_custom(GM_ADDR x, GM_ADDR y, GM_ADDR z, GM_ADDR tilingGm) {
-    AddTilingData tiling;
-    LoadTiling(tiling, tilingGm);
-    KernelAdd op;
-    op.Init(x, y, z, tiling);
+    GET_TILING_DATA(tilingData, tilingGm);
+    KernelAdd<half> op;
+    op.Init(x, y, z, tilingData);
     op.Process();
 }
 ```
 
 入口函数尽量薄，具体逻辑放在 kernel class 中，便于模板化和测试不同实现。
+
+`tilingGm` 是指向 GM 中序列化 tiling bytes 的 `GM_ADDR`；`GET_TILING_DATA` 是 CANN 生成/提供的解析宏，展开后得到与注册 tiling 定义一致的 `tilingData` 对象；`KernelAdd<half>` 是已用 `half` 实例化的 C++ 类。宏名和生成方式必须与项目的 tiling 注册流程匹配，不能自行虚构一个 `LoadTiling` 函数。
 
 ## 9. Host Launch
 
@@ -156,6 +175,8 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m) {
     m.impl("add_custom", TORCH_FN(add_custom_host));
 }
 ```
+
+这段在 Host C++ 动态库加载时运行：`m` 是 PyTorch `torch::Library` 注册句柄；schema 中的 `Tensor` 对应 dispatcher 层的 `at::Tensor`；`PrivateUse1` 是 dispatch key；`TORCH_FN(add_custom_host)` 把 C++ 函数包装成可注册 callable。这里没有任何 `GlobalTensor` 或 `LocalTensor`，更没有在注册时执行 device kernel。
 
 随后 Python 可调用：
 

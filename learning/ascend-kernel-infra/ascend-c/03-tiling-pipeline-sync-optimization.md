@@ -2,6 +2,8 @@
 
 本章关注 Ascend C 的核心价值：当编译器自动策略不够时，开发者可以显式设计数据通路和流水。
 
+本章不把性能参数当作无类型的“数字”。请配合[代码阅读手册](../reference/code-reading-and-types.md)阅读：Host 的 Python/C++ 整数、tiling ABI 的固定宽度字段、Device Scalar 变量和 `LocalTensor` 数据块处在不同层，不能互换。
+
 ## 1. 性能优化从瓶颈分类开始
 
 ```text
@@ -35,6 +37,18 @@ extra = total % blockDim
 - 是否共享权重/KV；
 - 是否需要跨核 reduce；
 - 尾块比例。
+
+把这些量落到真实类型时，常见分工是：
+
+| 名字类别 | 推荐/常见类型 | 所在阶段 | 单位 |
+|---|---|---|---|
+| `blockDim` | Host `uint32_t`/Python `int`，再作为 launch 配置 | Host/runtime | 实例数 |
+| `tileLength/elementsPerCore` | tiling ABI `uint32_t` | Host 计算、Device Scalar 读取 | 元素 |
+| `tileBytes/workspaceSize` | `uint64_t` 或经过范围验证的 `uint32_t` | Host | 字节 |
+| `tilingKey` | 固定宽度整数或生成框架定义类型 | Host→编译/launch 选择 | 变体编号，不是长度 |
+| `LocalTensor<T>` | Ascend C template type | Device | typed local view |
+
+性能事故经常来自单位而非公式：把 `tileLength` 直接传给要求 bytes 的 `InitBuffer` 会少乘 `sizeof(T)`；把 `workspaceSize` 缩进 32 位可能溢出；把 Python 任意精度 `int` 传进固定宽度 ABI 前没有范围检查，也可能截断。
 
 ## 3. 核内 Tiling
 

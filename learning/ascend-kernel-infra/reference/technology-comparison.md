@@ -15,6 +15,7 @@
 | 开发入口 | Python/ATen/NPU API | Python tile DSL | C/C++ 风格 Host + Device |
 | 初始开发速度 | 最快，直接复用 | 较快 | 较慢 |
 | 硬件控制 | 最少 | 中等，部分交给 compiler | 最多 |
+| 源码类型视角 | `torch.Tensor/at::Tensor` 与现成 API 契约 | `tl.tensor` 的 scalar/value block/pointer block + `tl.constexpr` | `GM_ADDR`、`GlobalTensor<T>`、`LocalTensor<T>`、`TPipe/TQue` |
 | 工程代码量 | 少 | 中 | 多 |
 | 自定义融合 | 受已有 API 限制 | 强，适合快速融合 | 强，适合深度定制 |
 | 动态 shape | 取决于现有算子 | 可能产生多个 JIT 变体 | Host tiling 可动态，device 变体需设计 |
@@ -137,6 +138,9 @@ flowchart TD
 
 ## 9. 评审一个新 Kernel 的问题清单
 
+- 是否逐个写清变量属于 Host Python、Host C++、Triton IR 还是 Ascend C Device？
+- 每个 block 的元素 dtype、静态 shape、地址空间与 offset 单位是什么？
+- 哪一行只构造 view/pointer，哪一行才真正 load、DataCopy 或 compute？
 - 数学语义和 shape 契约是什么？
 - 真实 prefill/decode shape 分布是什么？
 - 现有算子为什么不够？证据是 profiler 还是猜测？

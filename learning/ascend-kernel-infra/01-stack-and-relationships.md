@@ -8,6 +8,8 @@
 
 > 名称说明：本文使用官方仓库名 `sgl-kernel-npu`。安装后的 Python 包通常写作 `sgl_kernel_npu`。
 
+> 类型说明：这一讲横跨 Python、C++ 和 device kernel。遇到同名的 tensor/pointer 时，按[代码阅读手册](./reference/code-reading-and-types.md)区分 `torch.Tensor`、`at::Tensor`、Triton `tl.tensor` 与 Ascend C typed view。
+
 ## 1. 先看结论：它们不是五层直线
 
 最容易产生的错误印象是：
@@ -161,6 +163,8 @@ z = x + y
 ```
 
 这里虽然只写了标准 PyTorch 加法，但 `x`、`y` 是 NPU tensor，PyTorch dispatcher 会选择 NPU backend，随后通过 `torch_npu`/CANN 路径在设备上执行。
+
+这段代码中的 `x/y/z` 都是 Host Python 对象 `torch.Tensor`，对象内记录 shape、stride、dtype、device 与 storage；真实元素位于 NPU memory。`x + y` 返回新的 `torch.Tensor`，不是 Triton `tl.tensor`，也没有在 Python 中暴露裸 `GM_ADDR`。只有继续追踪 dispatcher/Host launch，才会看到 C++ `at::Tensor` 和设备地址。
 
 它大致覆盖三类能力：
 

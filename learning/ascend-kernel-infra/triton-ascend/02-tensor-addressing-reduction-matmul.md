@@ -2,13 +2,18 @@
 
 Vector Add 只处理一维连续数据。本章把相同模型扩展到二维 tensor、RMSNorm 和矩阵乘，掌握读 `sgl-kernel-npu` Triton 源码所需的核心语法。
 
+本章沿用[代码阅读手册](../reference/code-reading-and-types.md)的记法：`int32[BM]` 是整数 value block，`pointer<fp16>[BM,BN]` 是地址 block。二者都是编译期前端类 `tl.tensor`，区别在其 `dtype` 和静态 `shape`。
+
 ## 1. 二维地址来自 Shape 与 Stride
 
 对 `X[M,N]`，元素 `(i,j)` 的线性地址是：
 
-```python
-ptr = x_ptr + i * stride_xm + j * stride_xn
+```text
+element_offset(i, j) = i * stride_xm + j * stride_xn
+element_pointer(i, j) = x_ptr + element_offset(i, j)
 ```
+
+这里用 `text` 表示数学寻址关系，而不冒充一段变量齐全的 Python 程序。`i/j/stride_xm/stride_xn` 都是整数；`element_offset` 的单位是元素；`x_ptr` 是 `pointer<x_dtype>`。pointer 加整数 offset 生成新地址，不读取数据。
 
 Contiguous 行主序通常有：
 
@@ -21,13 +26,38 @@ Transpose view 可能 shape 相同但 stride 不同。因此 wrapper 要么把 s
 
 ## 2. 用 `[:, None]` 和 `[None, :]` 构造地址矩阵
 
-假设一个 program 处理 `BLOCK_M × BLOCK_N` tile：
+下面是变量完整声明的 Triton kernel。它把输入二维 tile 原样复制到输出，用来单独观察寻址与类型传播：
 
 ```python
-offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+import triton
+import triton.language as tl
 
-ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_n[None, :] * stride_xn
+
+@triton.jit
+def copy_2d_kernel(
+    x_ptr,
+    out_ptr,
+    M,
+    N,
+    stride_xm,
+    stride_xn,
+    stride_om,
+    stride_on,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_n[None, :] * stride_xn
+    out_ptrs = out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+
+    values = tl.load(x_ptrs, mask=mask, other=0.0)
+    tl.store(out_ptrs, values, mask=mask)
 ```
 
 形状变化：
@@ -38,16 +68,27 @@ offs_n[None, :] -> [1, BLOCK_N]
 broadcast result -> [BLOCK_M, BLOCK_N]
 ```
 
-这不是创建一个 Python 嵌套列表，而是在 Triton IR 中表达一个 block tensor 地址网格。
+这不是创建一个 Python 嵌套列表，而是在 Triton IR 中表达一个 block tensor 地址网格。假设输入是 FP16、`BLOCK_M=16`、`BLOCK_N=32`，每个名字的类型是：
+
+| 变量 | 类型 | shape | 本质 |
+|---|---|---:|---|
+| `x_ptr/out_ptr` | `tl.tensor<pointer<fp16>>` | `[]` | 标量设备指针 IR value |
+| `M/N/stride_*` | 整数 `tl.tensor` | `[]` | launch 时传入的运行时标量 |
+| `BLOCK_M/BLOCK_N` | `tl.constexpr` | 不适用 | JIT 编译期 meta-parameter |
+| `pid_m/pid_n` | `tl.tensor<int32>` | `[]` | 逻辑 program 坐标 |
+| `offs_m` | `tl.tensor<int32>` | `[16]` | 全局行坐标 block |
+| `offs_n` | `tl.tensor<int32>` | `[32]` | 全局列坐标 block |
+| `offs_m[:,None]` | `tl.tensor<int32>` | `[16,1]` | 插入单例列轴；不访问内存 |
+| `offs_n[None,:]` | `tl.tensor<int32>` | `[1,32]` | 插入单例行轴；不访问内存 |
+| `x_ptrs/out_ptrs` | `tl.tensor<pointer<fp16>>` | `[16,32]` | 广播后的 512 个地址 |
+| `mask` | `tl.tensor<int1>` | `[16,32]` | 512 个逐地址有效位 |
+| `values` | `tl.tensor<fp16>` | `[16,32]` | `tl.load` 后才得到的数据 |
+
+关键链路是：`offs_m[:,None] * stride_xm` 先把标量 stride 广播成 `[16,1]`；再与 `[1,32]` 的列 offset 相加，广播为 `[16,32]`；最后标量 `x_ptr` 也被 splat 到 `[16,32]`，每个位置生成一次 `addptr`。具体实现见 [`broadcast_impl_value`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L767-L817) 和 [`semantic.add`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L226-L255)。
 
 ## 3. 二维 Mask
 
-```python
-mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-x = tl.load(ptrs, mask=mask, other=0.0)
-```
-
-每个维度都有自己的边界，最终通过逻辑与组合。复杂 kernel 最好给不同 mask 起名字：
+上一个完整 kernel 中，每个维度都有自己的边界，最终通过逻辑与组合。为看清中间类型，可以把同一行无损拆开：
 
 ```python
 row_mask = offs_m < M
@@ -55,7 +96,7 @@ col_mask = offs_n < N
 mask = row_mask[:, None] & col_mask[None, :]
 ```
 
-可读性本身就是正确性工具。
+`row_mask` 是 `int1[BLOCK_M]`，`col_mask` 是 `int1[BLOCK_N]`；插入维度并广播后，`mask` 是 `int1[BLOCK_M,BLOCK_N]`。[`tl.load`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/core.py#L2077-L2111) 规定 mask/other 广播到 pointer block 的 shape，`other=0.0` 再转换为 pointer 的元素 dtype。可读性本身就是正确性工具。
 
 ## 4. Reduction：从一块数据归约成较小结果
 
@@ -65,14 +106,31 @@ RMSNorm 对一行 `x[D]` 的核心是：
 rstd = \frac{1}{\sqrt{\frac{1}{D}\sum_i x_i^2 + \epsilon}}
 \]
 
-Triton 可表达为：
+下面给出变量闭合的单行 RMSNorm kernel；为突出归约，省略 weight/bias，但没有省略任何地址或 mask：
 
 ```python
-x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-mean_square = tl.sum(x * x, axis=0) / D
-rstd = tl.rsqrt(mean_square + eps)
-y = x * rstd
+@triton.jit
+def rmsnorm_row_kernel(
+    x_ptr,
+    y_ptr,
+    D,
+    eps,
+    BLOCK_D: tl.constexpr,
+):
+    row_id = tl.program_id(axis=0)
+    offsets = tl.arange(0, BLOCK_D)
+    mask = offsets < D
+    row_start = row_id * D
+
+    x = tl.load(x_ptr + row_start + offsets, mask=mask, other=0.0)
+    x_f32 = x.to(tl.float32)
+    mean_square = tl.sum(x_f32 * x_f32, axis=0) / D
+    rstd = tl.rsqrt(mean_square + eps)
+    y = x_f32 * rstd
+    tl.store(y_ptr + row_start + offsets, y, mask=mask)
 ```
+
+若输入为 FP16，`x` 是 `fp16[BLOCK_D]`，`x_f32/y` 是 `fp32[BLOCK_D]`；`mean_square/rstd` 是零维 `fp32[]`，与 `x_f32` 相乘时会广播回 `[BLOCK_D]`。`row_start` 是整数标量，不是 pointer；直到它与 `x_ptr` 相加才生成 pointer block。
 
 三个重要点：
 
@@ -99,38 +157,70 @@ square -> mean/reduce -> rsqrt/mul
 
 ## 6. 矩阵乘的三个 Tile
 
-`C[M,N] = A[M,K] @ B[K,N]`：
+`C[M,N] = A[M,K] @ B[K,N]`。下面给出一个假设 A/B/C 均为 FP16、FP32 累加的完整教学 kernel；它使用真实 Triton 语法，不用 `mask=...` 隐藏边界逻辑：
 
 ```python
-offs_m = pid_m * BM + tl.arange(0, BM)
-offs_n = pid_n * BN + tl.arange(0, BN)
-offs_k = tl.arange(0, BK)
+@triton.jit
+def matmul_fp16_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    offs_m = pid_m * BM + tl.arange(0, BM)
+    offs_n = pid_n * BN + tl.arange(0, BN)
+    offs_k = tl.arange(0, BK)
 
-a_ptrs = A + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
-b_ptrs = B + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
-acc = tl.zeros((BM, BN), tl.float32)
+    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+
+    for k_tile in range(0, tl.cdiv(K, BK)):
+        k_offsets = k_tile * BK + offs_k
+        a_mask = (offs_m[:, None] < M) & (k_offsets[None, :] < K)
+        b_mask = (k_offsets[:, None] < K) & (offs_n[None, :] < N)
+        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
+        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+        acc += tl.dot(a, b)
+        a_ptrs += BK * stride_ak
+        b_ptrs += BK * stride_bk
+
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, acc.to(tl.float16), mask=c_mask)
 ```
 
-沿 K 维循环：
-
-```python
-for k0 in range(0, K, BK):
-    a = tl.load(a_ptrs, mask=... , other=0.0)
-    b = tl.load(b_ptrs, mask=... , other=0.0)
-    acc += tl.dot(a, b)
-    a_ptrs += BK * stride_ak
-    b_ptrs += BK * stride_bk
-```
-
-最后把 `acc` 转成输出 dtype 并写到 C tile。
+若 `BM=16, BN=32, BK=64`，`a_ptrs/a` 分别是 `pointer<fp16>[16,64]` 与 `fp16[16,64]`，`b_ptrs/b` 是 `pointer<fp16>[64,32]` 与 `fp16[64,32]`，`acc` 是 `fp32[16,32]`，`c_ptrs` 是 `pointer<fp16>[16,32]`。`a_ptrs += BK * stride_ak` 是整个 pointer block 加同一个整数偏移，只更新下一轮的地址表达式，不搬运数据。
 
 ## 7. Grid 如何覆盖 C
 
-逻辑二维 grid：
+Host wrapper 在已经从 `a.shape/b.shape` 取得 `M/N/K` 后，可构造逻辑二维 grid：
 
 ```python
-grid = (triton.cdiv(M, BM), triton.cdiv(N, BN))
+def make_matmul_grid(M: int, N: int):
+    return lambda meta: (
+        triton.cdiv(M, meta["BM"]),
+        triton.cdiv(N, meta["BN"]),
+    )
+
+
+grid = make_matmul_grid(M=4096, N=4096)
 ```
+
+此处 `grid` 是 Python callable，`meta` 是 Python mapping，返回 Python `tuple[int,int]`；它们都不进入 device IR。`BM/BN` 只在 `matmul_fp16_kernel[grid](..., BM=..., BN=..., BK=...)` launch 时成为 `tl.constexpr`。
 
 也可以把 `(pid_m,pid_n)` 压成一维 `pid`，再解码：
 

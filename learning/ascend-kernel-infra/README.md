@@ -84,6 +84,7 @@
 
 | 内容 | 用途 |
 |---|---|
+| [代码阅读手册：变量类型、形状、地址与源码实现](./reference/code-reading-and-types.md) | 逐层区分 Python 对象、Triton IR 类型、pointer/value block、Ascend C Global/Local Tensor，并解释 pointer 为什么能与 offset 相加 |
 | [技术选型：何时复用、何时 Triton、何时 Ascend C](./reference/technology-comparison.md) | 特点、优劣势、决策树、评审清单 |
 | [术语表](./reference/glossary.md) | 集中解释 program、grid、tile、AI Core、GlobalTensor、流水等名词 |
 
@@ -126,4 +127,6 @@ flowchart LR
 - `kernel` 指在 NPU 设备侧执行的计算程序；“算子”还可能包含 host 侧 shape 推导、tiling、注册、workspace 管理和 Python wrapper。
 - 文中的目录和 API 会随仓库演进；源码学习必须记录 SGLang、sgl-kernel-npu、torch_npu、Triton-Ascend 与 CANN 的版本或 commit。
 - 本专题默认讨论 Ascend NPU，不把 CUDA Triton 的经验原样套用。相同 Triton 语法不代表相同的硬件核数、存储层级或最优切分。
-- 标为“教学版”或“伪代码”的片段用于解释结构，并非可直接复制的完整工程；官方源码片段按上述 commit 核对。当前工作区没有 Ascend NPU/CANN 运行环境，因此本轮只做了源码与 Markdown 校验，未声称实际执行了 NPU kernel。
+- 所有代码先按[代码阅读手册](./reference/code-reading-and-types.md)区分宿主语言类型、编译期/运行时、元素 dtype、静态 shape 与地址空间。Triton 的 `tl.tensor` 不等于 `torch.Tensor`；Ascend C 的 `GlobalTensor<T>`/`LocalTensor<T>` 是 typed view，不等于自动完成搬运的容器。
+- 代码块只使用“可运行最小例子”“固定 commit 的源码摘录”或“结构图/执行序列”三种标签。结构说明使用 `text`/Mermaid，不再把带有未声明 `...` 或虚构 API 的片段放进 Python/C++ 代码块。
+- 当前工作区没有 Ascend NPU/CANN 运行环境，因此可运行例子只完成源码、类型与 Markdown 静态校验，未声称实际执行了 NPU kernel。

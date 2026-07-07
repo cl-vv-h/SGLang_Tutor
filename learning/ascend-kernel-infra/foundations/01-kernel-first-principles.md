@@ -2,6 +2,8 @@
 
 本章先不写任何框架代码，只回答一个根问题：一条数学公式为什么会变成 `grid`、`program`、`tile`、搬运和同步？
 
+从本章开始，代码名字都按[代码阅读手册](../reference/code-reading-and-types.md)区分“Host Python 对象”和“Device IR value”。同样写成 `x`，wrapper 中可能是 `torch.Tensor`，Triton kernel 中则可能是 `tl.tensor<fp16>[BLOCK]`。
+
 ## 1. 算子、Kernel 和程序不是一回事
 
 假设要计算：
@@ -96,6 +98,8 @@ offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 
 如果 `BLOCK_SIZE=256`，`pid=3` 的 program 处理 `[768, 1024)`。`offsets` 是一组索引，后续 `tl.load` 和加法都作用于这一组元素。
 
+这两行都在 Triton device 语义中：`BLOCK_SIZE` 是编译期 `tl.constexpr`，`pid` 是运行时整数标量 `tl.tensor`，`tl.arange` 与 `offsets` 是 shape 为 `[256]` 的 `int32` block tensor。`offsets` 不是 Python list，也没有读取任何输入；只有它与 pointer 相加并传给 `tl.load` 后才发生访存。
+
 这也是 Triton 常说的 **blocked program**：程序员以一块 tensor 数据为思考单位，编译器再把块级表达降低到硬件执行。
 
 ## 6. Grid 是什么
@@ -108,6 +112,8 @@ offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 grid = (triton.cdiv(N, BLOCK_SIZE),)
 ```
 
+这行通常位于 Host wrapper：`N/BLOCK_SIZE` 是 Python 整数或从 meta mapping 取得的整数，`grid` 是 Python `tuple[int]`。它描述 launch 空间，不是 kernel 内的 `tl.tensor`。
+
 二维矩阵也可以使用二维 grid：
 
 ```python
@@ -116,6 +122,8 @@ grid = (
     triton.cdiv(N, BLOCK_N),
 )
 ```
+
+这里 `grid` 是 Python `tuple[int,int]`；进入 device 后，`tl.program_id(0/1)` 才分别产生两个运行时整数标量 IR value。不要因为两处都叫“二维”就把 Host tuple 与 device block tensor 混为一类。
 
 此时 `tl.program_id(0)` 选择行 tile，`tl.program_id(1)` 选择列 tile。
 

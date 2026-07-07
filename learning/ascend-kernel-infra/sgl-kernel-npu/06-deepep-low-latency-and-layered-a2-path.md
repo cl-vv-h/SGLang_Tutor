@@ -1,5 +1,7 @@
 # sgl-kernel-npu 06：DeepEP Low-Latency、A2 Layered 与小 Batch 推理路径
 
+本章会同时出现 Python `int`、NPU `torch.Tensor`、`deep_ep.Buffer`、路由 `handle` 与通信 event/hook。统一类型边界见[代码阅读手册](../reference/code-reading-and-types.md)；这些对象的生命周期和用途不同，不能只看它们都能作为函数参数传递。
+
 源码基线：[`sgl-kernel-npu@d5630df`](https://github.com/sgl-project/sgl-kernel-npu/tree/d5630dff41c8108216f835597e63f6d3a7445908)。本地参考仓库当前工作树仍停在 `b2378ee05769cf7df209ffc5e1b669728f435a7e`，但已存在 `origin/main -> d5630df` 的远端跟踪引用；本轮据此核对仓库根 [`README.md#L28-L34`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/README.md#L28-L34)、[`csrc/deepep/deep_ep.hpp`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/deepep/deep_ep.hpp)、[`csrc/deepep/deep_ep.cpp`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/deepep/deep_ep.cpp) 与 [`tests/python/deepep/`](https://github.com/sgl-project/sgl-kernel-npu/tree/d5630dff41c8108216f835597e63f6d3a7445908/tests/python/deepep)，并对 `README.md`、`csrc/deepep/`、`tests/python/deepep/` 做 `b2378ee..d5630df` 对象级 diff，确认本章聚焦的 low-latency 路径没有新增差异，因此可以把注意力集中在“这套 contract 本身怎么工作”。
 
 如果你还没读过 [`05-deepep-hccl-and-moe-kernel-path.md`](./05-deepep-hccl-and-moe-kernel-path.md)、[`../02-cann-stack-and-boundaries.md`](../02-cann-stack-and-boundaries.md)、[`../foundations/02-ascend-hardware.md`](../foundations/02-ascend-hardware.md)、[`../foundations/03-memory-pipeline-and-sync.md`](../foundations/03-memory-pipeline-and-sync.md) 和 [`../torch_npu/01-dispatch-aclnn-and-custom-op-boundaries.md`](../torch_npu/01-dispatch-aclnn-and-custom-op-boundaries.md)，先补上再回来。上一章讲清了 DeepEP normal path 的主骨架；这一章只补一个缺口：为什么小 batch 推理要换成 `low_latency_dispatch/low_latency_combine`，以及 A2 layered 路径到底比 normal path 多了哪层通信结构。
@@ -156,49 +158,71 @@ flowchart LR
 
 ## 10. 最小例子：先照着官方测试把顺序建立起来
 
-下面是教学伪代码，只保留官方测试 [`test_normal_and_low_latency.py#L13-L84`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/tests/python/deepep/test_normal_and_low_latency.py#L13-L84) 与 [`test_low_latency.py#L367-L395`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/tests/python/deepep/test_low_latency.py#L367-L395) 反复出现的最低限顺序：
+下面把官方测试 [`test_normal_and_low_latency.py#L13-L84`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/tests/python/deepep/test_normal_and_low_latency.py#L13-L84) 与 [`test_low_latency.py#L367-L395`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/tests/python/deepep/test_low_latency.py#L367-L395) 合成一个变量闭合的通信 roundtrip。它用 identity/simulated GEMM 数据验证 dispatch+combine，不虚构本地 FFN API：
 
 ```python
-# 教学伪代码：保留官方 tests 的调用顺序，不保证可直接运行
 import deep_ep
+import torch
+import torch.distributed as dist
+from utils import per_token_cast_back
 
-local_num_tokens = ...
-aligned_num_tokens = all_reduce_max_across_ranks(local_num_tokens)
+def low_latency_roundtrip(
+    local_num_tokens: int,
+    hidden: int,
+    num_experts: int,
+    num_topk: int,
+    buffer: deep_ep.Buffer,
+):
+    local_tokens_tensor = torch.tensor(
+        [local_num_tokens], dtype=torch.int32, device="npu"
+    )
+    dist.all_reduce(local_tokens_tensor, op=dist.ReduceOp.MAX)
+    aligned_num_tokens = local_tokens_tensor.item()
 
-num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-    aligned_num_tokens, hidden, num_ranks, num_experts
-)
+    x = torch.randn(
+        (local_num_tokens, hidden), dtype=torch.bfloat16, device="npu"
+    )
+    scores = torch.randn(
+        (local_num_tokens, num_experts), dtype=torch.float32, device="npu"
+    ).abs() + 1
+    topk_idx = torch.topk(scores, num_topk, dim=-1, sorted=False)[1]
+    topk_weights = torch.rand(
+        (local_num_tokens, num_topk), dtype=torch.float32, device="npu"
+    )
 
-buffer = deep_ep.Buffer(
-    ...,
-    num_rdma_bytes=num_rdma_bytes,
-    low_latency_mode=True,
-)
-
-packed_recv_x, packed_recv_count, handle, event, hook = buffer.low_latency_dispatch(
-    x,
-    topk_idx,
-    aligned_num_tokens,
-    num_experts,
-    use_fp8=True,
-    round_scale=False,
-    use_ue8m0=False,
-)
-
-simulated_gemm_x = per_token_cast_back(*packed_recv_x)
-local_expert_out = local_grouped_ffn(simulated_gemm_x, packed_recv_count, ...)
-
-combined_x, event, hook = buffer.low_latency_combine(
-    local_expert_out,
-    topk_idx,
-    topk_weights,
-    handle,
-)
+    packed_recv_x, packed_recv_count, handle, event, hook = (
+        buffer.low_latency_dispatch(
+            x,
+            topk_idx,
+            aligned_num_tokens,
+            num_experts,
+            use_fp8=True,
+            round_scale=False,
+            use_ue8m0=False,
+            async_finish=True,
+            return_recv_hook=False,
+        )
+    )
+    simulated_gemm_x = per_token_cast_back(*packed_recv_x)
+    combined_x, event, hook = buffer.low_latency_combine(
+        simulated_gemm_x,
+        topk_idx,
+        topk_weights,
+        handle,
+        async_finish=True,
+        zero_copy=False,
+        return_recv_hook=False,
+    )
+    return combined_x, packed_recv_count, event, hook
 ```
 
 你真正该背下来的不是参数名，而是这个顺序：
 
 `all_rank_max_tokens -> low_latency_dispatch -> local expert compute -> low_latency_combine`
+
+类型逐项看：`local_num_tokens/hidden/num_experts/num_topk/aligned_num_tokens` 是 Host Python `int`；`local_tokens_tensor` 是 shape `[1]` 的 NPU INT32 tensor，用于 all-reduce MAX；`.item()` 会把同步后的标量取回 Host。`x` 是 BF16 tensor，`scores/topk_weights` 是 FP32 tensor，`topk_idx` 是整数索引 tensor。`packed_recv_x` 在 FP8 路径是包含量化数据与 scale 的 tuple，解包给 `per_token_cast_back` 后得到普通 NPU tensor；`packed_recv_count` 是计数 tensor；`handle` 是 combine 所需的 tuple-like 路由元数据；`event/hook` 是异步完成对象，不是数值结果。
+
+真实模型把 `simulated_gemm_x` 替换为 expert FFN 输出，但 FFN 的权重、量化与 grouped-matmul API 属于模型计算层，不能用一个未声明的 `local_grouped_ffn(...)` 混入 DeepEP 通信源码。
 
 ## 11. `low_latency_dispatch()`：先固定边界，再发小批量 token
 

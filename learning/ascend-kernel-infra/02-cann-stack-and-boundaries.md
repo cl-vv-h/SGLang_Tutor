@@ -2,6 +2,8 @@
 
 本讲承接 [第一讲：五个关键对象如何组成 Ascend NPU 推理与算子栈](./01-stack-and-relationships.md)。上一讲回答“谁和谁是什么关系”；这一讲回答“CANN 这一个大名字内部到底分几层，每层分别负责什么”。
 
+本章跨越 Python、Host C++、runtime 与 Device，变量类型按[代码阅读手册](./reference/code-reading-and-types.md)分层阅读。
+
 如果这一步不弄清，后面读 `torch_npu`、Triton-Ascend、Ascend C 和 `sgl-kernel-npu` 源码时，最容易把“编译问题”“运行时问题”“通信问题”“算子库缺失问题”混成一句“CANN 出问题了”。
 
 > 前置章节：[`01-stack-and-relationships.md`](./01-stack-and-relationships.md)
@@ -158,7 +160,7 @@ Triton-Ascend 或 Ascend C / custom op
 
 ## 7. 最小例子：同样是 Python 调用，底层路径可能不同
 
-下面是**教学伪代码**，用于建立路径感，不声称当前工作区已经运行：
+下面使用真实 Python API 语法。它在安装匹配版本的 `torch_npu`、`sgl_kernel_npu`、CANN 且存在 NPU 的环境中才可执行；当前工作区只做静态解读：
 
 ```python
 import torch
@@ -181,6 +183,8 @@ w = torch.ops.npu.helloworld(x, y)
 5. 两条路最后都不是“Python 自己算完”，而是 Host 把工作提交给 CANN runtime，再由 runtime 送到 NPU。
 
 这就是为什么看到 `torch.ops.npu.xxx` 时，不能立刻说“这一定是 torch_npu 自己实现的”。它也可能是 import 某个扩展后动态注册进去的。
+
+变量类型也要分层：`x/y/z/w` 的 Python 类型都是 `torch.Tensor`；`x/y` 的元素 dtype 是 `torch.float16`、shape 是 `[4096]`、device 是 NPU。`torch.ops.npu.helloworld` 是 Python dispatcher 提供的可调用 op packet，不是 device kernel 函数对象；调用后 dispatcher 把 `torch.Tensor` 映射为 C++ `at::Tensor`，Host 实现再取得设备地址并 launch。`import sgl_kernel_npu` 返回 Python module，同时触发 `.so` 加载与静态注册，它本身不执行 `helloworld`。
 
 ## 8. 逐层源码解读：`import` 之后发生了什么
 

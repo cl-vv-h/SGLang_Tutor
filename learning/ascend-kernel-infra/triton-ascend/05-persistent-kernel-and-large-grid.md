@@ -24,6 +24,7 @@
 - [Triton-Ascend 04：TTIR、MLIR、Driver 与 Cache](./04-ttir-mlir-driver-and-cache.md)
 - [基础 02：Ascend NPU、AI Core 与存储层级](../foundations/02-ascend-hardware.md)
 - [基础 03：搬运、计算、同步与流水](../foundations/03-memory-pipeline-and-sync.md)
+- [代码阅读手册：变量类型、形状、地址与源码实现](../reference/code-reading-and-types.md)
 - [参考：术语表](../reference/glossary.md)
 
 ## 3. 先把五个新词就地讲清
@@ -102,21 +103,30 @@ flowchart LR
 
 ## 7. 最小例子：先用最简单的 persistent Vector 形式建立直觉
 
-在 [Triton-Ascend 01](./01-program-grid-tile.md) 里我们已经见过最基础的 persistent 风格。这里把它重新写成一段教学伪代码：
+在 [Triton-Ascend 01](./01-program-grid-tile.md) 里我们已经见过最基础的 persistent 风格。这里给出变量完整、没有省略 load/store 的 Triton 源码语法：
 
 ```python
-# 教学伪代码
 @triton.jit
-def persistent_add(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    num_tiles = tl.cdiv(n, BLOCK)
+def persistent_add(
+    x_ptr,
+    y_ptr,
+    out_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    num_tiles = tl.cdiv(n_elements, BLOCK_SIZE)
 
     for tile_id in range(pid, num_tiles, num_programs):
-        offsets = tile_id * BLOCK + tl.arange(0, BLOCK)
-        mask = offsets < n
-        ...
+        offsets = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+        y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
+        tl.store(out_ptr + offsets, x + y, mask=mask)
 ```
+
+若输入是 FP16、`BLOCK_SIZE=1024`：`pid/num_programs/num_tiles/tile_id` 都是运行时整数标量 `tl.tensor`；`BLOCK_SIZE` 是 `tl.constexpr`；`offsets` 是 `int32[1024]`；`x_ptr + offsets` 是 `pointer<fp16>[1024]`；`x/y` 是 `fp16[1024]`。`range(pid, ...)` 是 JIT 支持的 device 控制流，不是 CPython 在 launch 前把 tile 全部循环一遍。
 
 这段代码表达的不是“当前设备物理上一定有 `num_programs` 个核在跑”，而是：
 

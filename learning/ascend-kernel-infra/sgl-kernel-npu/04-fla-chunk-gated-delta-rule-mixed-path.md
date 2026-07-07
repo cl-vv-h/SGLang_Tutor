@@ -1,5 +1,7 @@
 # sgl-kernel-npu 04：FLA Chunk Gated Delta Rule 的双路径入口
 
+本章的 Python tensor、dispatcher op 和 device kernel 位于不同类型层。阅读前可先看[代码阅读手册](../reference/code-reading-and-types.md)，尤其注意 shape/dtype 是 `torch.Tensor` 元数据，`cu_seqlens` 的元素值才编码 packed 样本边界。
+
 源码基线：[`sgl-kernel-npu@b2378ee`](https://github.com/sgl-project/sgl-kernel-npu/tree/b2378ee05769cf7df209ffc5e1b669728f435a7e)。如果你还没读过 [`01-repository-and-op-lifecycle.md`](./01-repository-and-op-lifecycle.md)、[`02-triton-fused-split-qk-norm.md`](./02-triton-fused-split-qk-norm.md)、[`03-ascend-c-apply-token-bitmask.md`](./03-ascend-c-apply-token-bitmask.md) 和 [`../triton-ascend/05-persistent-kernel-and-large-grid.md`](../triton-ascend/05-persistent-kernel-and-large-grid.md)，先回去补上，再来看这一章会轻松很多。
 
 这一章不再精读“一个孤立 kernel”，而是精读一个真实生产入口：[`chunk_gated_delta_rule_npu()`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/chunk.py#L264)。它把同一套 FLA 语义分流到两条后端路径：
@@ -233,7 +235,7 @@ Host 实现在 [`tri_inv.cpp`](https://github.com/sgl-project/sgl-kernel-npu/blo
 
 ## 13. 最小例子：先用 packed 变长输入建立直觉
 
-下面这段是教学版伪代码，只保留最关键契约：
+下面使用真实 API 语法，并显式构造了所有输入。它要求匹配的 NPU/CANN/`sgl_kernel_npu` 环境；当前工作区只做静态解读：
 
 ```python
 import torch
@@ -266,6 +268,8 @@ o, final_state, h = chunk_gated_delta_rule_npu(
 - 虽然逻辑上有两条样本，但张量外层仍是 `B=1`；
 - `cu_seqlens=[0, 22, 1333]` 才是恢复样本边界的关键；
 - `initial_state.shape[0]` 必须等于样本数 `len(cu_seqlens) - 1`。
+
+逐类型看：`total_tokens/num_*_heads/head_dim` 是 Python `int`；`q/k/v/beta/initial_state` 是 NPU `torch.Tensor` 且元素 dtype 为 FP16；`g` 是 FP32 tensor；`cu_seqlens` 是 `torch.int64` tensor，shape 为 `[3]`，其两个相邻差值给出每条序列长度；`o/final_state/h` 仍是 Python `torch.Tensor` 返回对象。这里没有 Triton `tl.tensor`：只有继续进入 `chunk_gated_delta_rule_npu` 选择到 Triton 路径后，wrapper 才把这些高层 tensor 转换为 kernel pointer 实参。
 
 ## 14. 测试如何把两条路径钉到同一语义
 

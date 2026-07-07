@@ -2,6 +2,8 @@
 
 这一章把“能跑”变成“知道为什么这样跑，并能系统调优”。
 
+调试的第一步不只是打印数值，而是写出每个 IR value 的类型。这里沿用[代码阅读手册](../reference/code-reading-and-types.md)的四列：前端对象、编译期/运行时、dtype/shape、值或地址。
+
 ## 1. 编译链的心智模型
 
 Triton-Ascend 官方架构将核心组件分为 language extension、compiler 和 driver。简化链路：
@@ -49,6 +51,18 @@ Benchmark 首次调用时可能包含编译时间，不能拿第一次 wall time
 ```
 
 不要一上来就怀疑编译器。地址和边界错误的概率通常更高。
+
+第 4 步要具体到下面这种记录，而不是只写“这是一个 tensor”：
+
+| 检查对象 | 应记录的内容 | 典型错误 |
+|---|---|---|
+| kernel pointer 形参 | `pointer<element_dtype>[]` | wrapper 传错 dtype，导致 JIT 生成了不同变体 |
+| pointer arithmetic 结果 | `pointer<element_dtype>[block shape]` | 广播出意外二维/三维地址块，UB 预算暴涨 |
+| offset | 整数标量或整数 block，单位为元素 | 把字节 stride 当元素 stride，地址成倍偏移 |
+| mask | `int1[pointer block shape]` | shape 虽能广播，但保护了错误维度 |
+| `tl.load` 结果 | `element_dtype[pointer block shape]` | 误以为构造 pointer 时已经读了内存 |
+
+若报 `cannot add pointers together` 或 pointer 与 float 不兼容，这通常是 Triton 前端 [`semantic.add`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L226-L255) 的类型错误，尚未进入 Ascend lowering；若类型和 TTIR 都正确但 `ttadapter` 生成失败，才更像后端 pass 问题。
 
 ## 4. 编译期与运行时调试
 

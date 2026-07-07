@@ -2,6 +2,8 @@
 
 本章承接 [`../01-stack-and-relationships.md`](../01-stack-and-relationships.md)、[`../02-cann-stack-and-boundaries.md`](../02-cann-stack-and-boundaries.md)、[`../ascend-c/02-add-operator-end-to-end.md`](../ascend-c/02-add-operator-end-to-end.md) 和 [`../sgl-kernel-npu/01-repository-and-op-lifecycle.md`](../sgl-kernel-npu/01-repository-and-op-lifecycle.md)。
 
+本章重点是同一个输入怎样从 Python `torch.Tensor` 变成 C++ `at::Tensor`，再进入 ACLNN descriptor 或 custom kernel 地址参数。完整类型边界见[代码阅读手册](../reference/code-reading-and-types.md)。
+
 前几章已经解释了“有哪些层”。这一章往下再沉一层，回答一个初学者最容易混淆的问题：
 
 > 同样都是一行 PyTorch 风格调用，为什么有时是在复用现成 ACLNN 算子，有时是在走 `torch.ops.*` 注册的 custom op，有时又是“自己注册了一个 op，但底层仍然复用 ACLNN”？
@@ -163,15 +165,18 @@ flowchart TB
 
 ## 8. 最小例子：三种长得像 PyTorch 调用的 NPU op
 
-下面是**教学伪代码**，用于区分三条路径，不声称当前工作区已运行：
+下面把所有输入显式构造出来，使用真实 API 语法。它要求匹配版本的 `torch_npu`、`sgl_kernel_npu` 与 attention 扩展已经安装；当前工作区不具备 NPU 环境，因此只做静态解读：
 
 ```python
 import torch
 import torch_npu
 import sgl_kernel_npu
 
-x = torch.randn(4096, device="npu", dtype=torch.float16)
-y = torch.randn(4096, device="npu", dtype=torch.float16)
+x = torch.randn(1, 4096, device="npu", dtype=torch.float16)
+y = torch.randn_like(x)
+weight = torch.ones(4096, device="npu", dtype=torch.float16)
+bias = torch.zeros(4096, device="npu", dtype=torch.float16)
+bitmask = torch.full((1, 128), -1, device="npu", dtype=torch.int32)
 
 z = x + y
 u = torch_npu.npu_rms_norm(x, weight, 1e-6)[0]
@@ -191,6 +196,18 @@ w = torch.ops.attentions.layernorm(x, [4096], weight, bias, 1e-5, 0)[0]
    这是另一个扩展注册入口，但底层并不是自写 LayerNorm device kernel，而是包装现成 ACLNN 调用。
 
 这四行长得都像“PyTorch 调用”，但底层含义已经分成三类。
+
+从类型角度看，`x/y/weight/bias/bitmask` 都是 Python `torch.Tensor`，但 `bitmask` 的元素 dtype 是 `int32`，其 128 个整数各自打包 32 个词表位置；其余 tensor 是 FP16。`torch_npu.npu_rms_norm` 是 Python callable，返回 tuple-like 结果，所以 `[0]` 是取第一个返回 tensor；`torch.ops.npu.apply_token_bitmask` 与 `torch.ops.attentions.layernorm` 是 dispatcher op packet。它们的“Python 调用外形”不能说明 device 实现类型，必须继续追到 schema、dispatch key 和 Host 函数。
+
+这条跨层类型链应当能在脑中展开：
+
+```text
+Python torch.Tensor
+  -> Dispatcher 根据 schema/dispatch key 选择实现
+  -> C++ at::Tensor（仍携带 shape/stride/dtype/device）
+  -> ACLNN tensor descriptor，或 custom kernel 的 device address + 标量参数
+  -> NPU 执行
+```
 
 ## 9. 逐层源码解读
 

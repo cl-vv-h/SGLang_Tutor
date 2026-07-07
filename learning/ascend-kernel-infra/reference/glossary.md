@@ -2,6 +2,8 @@
 
 本表给出本课程中的工作定义。遇到具体硬件规格和 API 行为时，仍以目标 CANN/Triton-Ascend 版本文档为准。
 
+若一个术语涉及具体变量类型、shape 或 pointer arithmetic，请同时查[代码阅读手册](./code-reading-and-types.md)。
+
 ## A. 框架与运行时
 
 | 术语 | 解释 |
@@ -78,6 +80,14 @@
 | Tile | 从大 tensor 切下、一次在某核上处理的数据块 |
 | Logical Tile / Logical Block | 从数学输出空间切出来的一份逻辑工作单元；它说明“总共有多少块工作”，不等于“这次真的启动了多少物理核” |
 | Block Tensor | Triton program 内的一块 N 维值或指针集合 |
+| `tl.tensor` | Triton Python 前端表示 IR value 的核心类，保存 IR handle、完整 type、静态 shape 与标量 dtype；它不是 `torch.Tensor` 数据容器 |
+| `tl.constexpr` | JIT 编译时已知的值，用来决定 block shape、分支、循环展开与 kernel specialization；不同取值可能产生不同缓存变体 |
+| Value Block | 元素为数值的 Triton block tensor，例如 `fp16[128]`；通常由 `tl.load`、算术或 `tl.zeros` 产生 |
+| Pointer Block | 元素为地址的 Triton block tensor，例如 `pointer<fp16>[16,32]`；表示一块地址网格，构造它不等于读取内存 |
+| Pointer Type | Triton 中保存 pointee `element_ty` 与 address space 的标量类型；合法 pointer arithmetic 是 pointer 加整数元素 offset，pointer 不能与 pointer 相加 |
+| Element Offset | 以元素而非字节计数的地址偏移；Triton pointer addition、PyTorch stride 与 Ascend C `GlobalTensor[index]` 常使用这种单位 |
+| Byte Size | 以字节计数的容量；Ascend C `InitBuffer`、workspace、UB budget 常使用此单位，通常需要 `elements * sizeof(T)` |
+| Broadcast / 广播 | 把 scalar 或含长度 1 维度的 block 扩展到兼容 shape；Triton 二元运算会在 semantic 层完成兼容性检查并生成 broadcast/splat IR |
 | Persistent Kernel | 让有限 program 持续循环处理多个逻辑 tile，减少超大 grid 调度 |
 | Auto-blockify | Triton-Ascend 的大 grid 优化机制：编译期把 kernel 包进内层循环，运行期把 launch block 数钳到物理核数，用较少物理 block 覆盖更多逻辑 block |
 | Tail / 尾块 | 总长度不能整除 tile 或核数时剩余的数据部分 |
@@ -115,6 +125,7 @@
 | GM_ADDR | Ascend C kernel 的 Global Memory 地址参数类型 |
 | GlobalTensor | 对 GM 数据的类型化 device 侧视图，不代表数据已搬入片上 |
 | LocalTensor | 位于片上 Local Memory 的 tensor 抽象，供 Vector/Cube API 使用 |
+| Typed View / 类型化视图 | 保存地址、元素类型和可访问区域的轻量对象；`SetGlobalBuffer`、`operator[]` 或 `AllocTensor` 取得 view 不等于已经执行 DataCopy |
 | TPosition | LocalTensor/Queue 的逻辑存储位置，如 VECIN、A1、A2 |
 | TPipe | 管理 Pipe/Queue 范式中的片上 buffer 与 event 资源 |
 | TQue | 管理 LocalTensor buffer，并表达流水生产者/消费者同步 |

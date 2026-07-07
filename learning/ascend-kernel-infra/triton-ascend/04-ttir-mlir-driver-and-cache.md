@@ -13,6 +13,7 @@
 - [Triton-Ascend 01：Program、Grid、Tile 与第一个 Kernel](./01-program-grid-tile.md)
 - [Triton-Ascend 02：地址、广播、归约与矩阵分块](./02-tensor-addressing-reduction-matmul.md)
 - [Triton-Ascend 03：编译、调试与性能优化](./03-compile-debug-optimize.md)
+- [代码阅读手册：变量类型、形状、地址与源码实现](../reference/code-reading-and-types.md)
 - [参考：术语表](../reference/glossary.md)
 
 ## 1. 先把几个新名词就地讲清
@@ -67,17 +68,38 @@ flowchart LR
 ttir -> ttadapter -> (mlirbc -> bcmlir)? -> npubin
 ```
 
-教学伪代码：
+下面直接摘录固定 commit 的 `AscendBackend.add_stages()` 主体。这里的变量都是 Host 侧 Python 对象，不是 device `tl.tensor`：
 
 ```python
-# 教学伪代码：来自 add_stages() 的结构化转述，不是原样拷贝
-stages["ttir"] = make_ttir
-stages["ttadapter"] = ttir_to_linalg
-if options.use_bytecode:
-    stages["mlirbc"] = linalg_to_bc_by_triton_mlir_opt
-    stages["bcmlir"] = bc_to_linalg_by_bishengir_opt
-stages["npubin"] = linalg_to_bin_...(910_95 or A2_A3)
+def add_stages(self, stages, options, language):
+    if self.target.backend == "npu":
+        stages["ttir"] = lambda src, metadata: make_ttir(src, metadata, options)
+        if options.force_simt_only:
+            stages["npubin"] = lambda src, metadata: ttir_to_npubin(src, metadata, options)
+            return
+        stages["ttadapter"] = lambda src, metadata: ttir_to_linalg(
+            src, metadata, options, named_ops=True
+        )
+        if options.use_bytecode:
+            stages["mlirbc"] = lambda src, metadata: linalg_to_bc_by_triton_mlir_opt(
+                src, metadata, options
+            )
+            stages["bcmlir"] = lambda src, metadata: bc_to_linalg_by_bishengir_opt(
+                src, metadata, options
+            )
+        if options.compile_on_910_95:
+            stages["npubin"] = lambda src, metadata: linalg_to_bin_enable_npu_compile_910_95(
+                src, metadata, options
+            )
+        else:
+            stages["npubin"] = lambda src, metadata: linalg_to_bin_enable_npu_compile_A2_A3(
+                src, metadata, options
+            )
+    else:
+        raise NotImplementedError(f"Backend '{self.target.backend}' is not supported.")
 ```
+
+类型逐项看：`stages` 是“阶段名 → Python callable”的可变 mapping；`options` 是 `NPUOptions` 实例；`src` 是上一阶段产物对象；`metadata` 是编译元数据；每个 lambda 都是 Host 编译流水线的函数对象。它们不会进入 NPU kernel，也没有 block shape。`stages["ttir"] = ...` 的含义是注册转换函数，不是现在立刻执行 `make_ttir`。
 
 这段结构非常重要，因为它直接告诉你：
 
@@ -160,7 +182,7 @@ stages["npubin"] = linalg_to_bin_...(910_95 or A2_A3)
 - 因为你看到 `kernel.mlirbc` 时，不该误以为“编译器突然多发明了一份程序”。
 - 因为 `ir_override` 支持的文件后缀里，`mlirbc`、`bcmlir`、`npubin` 都被 Ascend patch 额外接管了；所以 override 调试时，后缀本身就代表你是在替换哪一层产物。
 
-教学伪代码：
+这一段是执行序列，不是可执行程序，因此明确使用 `text`：
 
 ```text
 文本 Linalg/TTAdapter
@@ -281,20 +303,15 @@ Triton-Ascend 源码里至少有三类东西在进 cache：
 
 ## 12. 最小调试例子：先学会“抓中间产物”，再谈改 kernel
 
-下面是教学伪代码，不承诺在当前工作区直接可运行；它的目标只是告诉你排查顺序。
+下面给出可直接用于 PowerShell 的执行模板。唯一需要替换的是最后一行真实测试文件路径；环境变量都是 `str -> str` 的进程环境配置，必须在启动测试进程前设置：
 
-```python
-# 教学伪代码
-import os
-
-os.environ["TRITON_ALWAYS_COMPILE"] = "1"
-os.environ["TRITON_KERNEL_DUMP"] = "1"
-os.environ["TRITON_DUMP_DIR"] = "./triton_dump"
-os.environ["MLIR_ENABLE_DUMP"] = "1"
-os.environ["TRITON_REPRODUCER_PATH"] = "./triton_reproducer.mlir"
-
-# 然后再调用你的 triton kernel wrapper
-run_my_kernel()
+```powershell
+$env:TRITON_ALWAYS_COMPILE = "1"
+$env:TRITON_KERNEL_DUMP = "1"
+$env:TRITON_DUMP_DIR = (Resolve-Path ".").Path + "\triton_dump"
+$env:MLIR_ENABLE_DUMP = "1"
+$env:TRITON_REPRODUCER_PATH = (Resolve-Path ".").Path + "\triton_reproducer.mlir"
+python .\tests\test_your_real_kernel.py
 ```
 
 预期学习目标不是“必须出现某个固定文件名”，而是按这条顺序检查：

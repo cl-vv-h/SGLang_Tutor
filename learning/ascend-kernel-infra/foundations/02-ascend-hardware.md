@@ -2,6 +2,8 @@
 
 本章建立一个“够用但不假装所有芯片都一样”的硬件模型。不同 Ascend 产品和架构版本的核数、容量、数据通路会变化，写生产 kernel 时必须查目标硬件规格；这里先学习稳定的共同概念。
 
+本章涉及的“Tensor”有时是数据、有时只是地址 view。先读[代码阅读手册](../reference/code-reading-and-types.md)可以避免把 PyTorch tensor、Triton block tensor 与 Ascend C `GlobalTensor/LocalTensor` 混为一谈。
+
 ## 1. 从服务器到计算单元
 
 几个容易混用的名词：
@@ -123,6 +125,8 @@ cube_cores = properties["num_aicore"]
 ```
 
 这比在源码里写死“某卡有 40 个核”稳健。
+
+这三行在 Host Python 上执行：`device` 是 runtime 接受的设备标识；`properties` 是 Python mapping；`vector_cores/cube_cores` 是 Python `int`。它们不是 `tl.tensor`，不会自动进入 kernel。wrapper 可以用它们计算 Python grid，或把值作为 launch 标量显式传给 kernel。
 
 ## 7. 对齐为什么反复出现
 

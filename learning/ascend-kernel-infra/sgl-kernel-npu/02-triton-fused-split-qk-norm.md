@@ -2,6 +2,8 @@
 
 源码：[`norm/fused_split_qk_norm.py`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/norm/fused_split_qk_norm.py)。这是一个很好的入门案例：只有约百行，却包含 grid、tile、地址、归约、constexpr 分支和 Python wrapper。
 
+本章逐个变量使用[代码阅读手册](../reference/code-reading-and-types.md)的类型记法。尤其要区分 wrapper 中的 `torch.Tensor/Python int` 与 kernel 中的 `pointer tl.tensor/value block/tl.constexpr`。
+
 ## 1. 它解决什么问题
 
 MLA 路径中的融合投影输出可抽象为：
@@ -38,11 +40,29 @@ split -> Q RMSNorm -> K RMSNorm -> reshape
 
 ## 3. Grid：一行一个 Program
 
-Wrapper 使用：
+Wrapper 的真实 launch 源码是：
 
 ```python
-fused_split_qk_norm_kernel[(B,)](...)
+fused_split_qk_norm_kernel[(B,)](
+    fused_qkv_a_proj_out,
+    q_lora,
+    k_nope,
+    k_pe,
+    q_a_layernorm.weight,
+    q_a_layernorm.bias if hasattr(q_a_layernorm, "bias") else None,
+    kv_a_layernorm.weight,
+    kv_a_layernorm.bias if hasattr(kv_a_layernorm, "bias") else None,
+    total_hidden,
+    q_lora_rank,
+    kv_lora_rank,
+    qk_rope_dim,
+    eps,
+    hasattr(q_a_layernorm, "bias") and q_a_layernorm.bias is not None,
+    hasattr(kv_a_layernorm, "bias") and kv_a_layernorm.bias is not None,
+)
 ```
+
+在 wrapper 中，`B/total_hidden/q_lora_rank/...` 是 Python `int`，输入输出是 NPU `torch.Tensor`，两个 `HAS_BIAS` 实参是 Python `bool`。进入 JIT kernel 后，tensor 实参变成带元素 dtype 的标量 pointer，所有声明为 `tl.constexpr` 的整数/布尔值成为编译期常量。
 
 所以：
 
@@ -50,7 +70,7 @@ fused_split_qk_norm_kernel[(B,)](...)
 grid = (B,)
 pid 0 -> 第 0 行
 pid 1 -> 第 1 行
-...
+其余 pid 依次对应其余行
 ```
 
 Kernel 中 [`pid = tl.program_id(0)`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/norm/fused_split_qk_norm.py#L24)；行首地址：
@@ -65,10 +85,16 @@ base = pid * total_hidden
 
 ```python
 q_offs = tl.arange(0, q_lora_rank)
-q = tl.load(fused_ptr + base + q_offs, ...).to(tl.float32)
+q = tl.load(
+    fused_ptr + base + q_offs,
+    mask=q_offs < q_lora_rank,
+    other=0.0,
+).to(tl.float32)
 ```
 
 一个 program 把当前行 Q 段当成一维 tile。`q_lora_rank` 是 `tl.constexpr`，编译器在编译期知道 tile 长度。
+
+若输入是 FP16：`pid/base` 是整数标量 `tl.tensor`；`q_lora_rank` 是编译期整数；`q_offs` 是 `int32[q_lora_rank]`；`fused_ptr` 是 `pointer<fp16>[]`；三者相加得到 `pointer<fp16>[q_lora_rank]`；`tl.load` 先返回 `fp16[q_lora_rank]`，`.to(tl.float32)` 再生成 `fp32[q_lora_rank]`。构造地址不会访问 GM，`tl.load` 才发生读取。
 
 地址范围：
 
@@ -92,13 +118,15 @@ q = q * q_rstd * qw
 
 ```python
 if Q_HAS_BIAS:
-    qb = tl.load(...)
+    qb = tl.load(q_rms_b_ptr + q_offs, mask=q_offs < q_lora_rank)
     q += qb
 ```
 
 `Q_HAS_BIAS` 是 `tl.constexpr`。有 bias 和无 bias 会形成编译变体；无 bias 版本可在编译期删除整个分支，而不是每行运行一次动态判断。
 
 Wrapper 通过 LayerNorm/RMSNorm 对象是否含非空 `bias` 传入该常量。
+
+`Q_HAS_BIAS` 是 `tl.constexpr<bool>`；`q_rms_b_ptr` 在有 bias 变体中是标量 pointer；`qb` 是与 `q_offs` 同 shape 的 value block。`q` 已是 FP32 block，二元运算类型规则会把 `qb` 转换到计算类型后相加。无 bias 变体在编译期删除 load 和 add。
 
 ## 7. K NOPE Tile
 
@@ -125,9 +153,37 @@ k_offs = tl.arange(0, kv_lora_rank)
 ```python
 pe_base = k_base + kv_lora_rank
 pe_offs = tl.arange(0, qk_rope_dim)
-k_pe = tl.load(fused_ptr + pe_base + pe_offs, ...)
-tl.store(k_pe_ptr + pid * qk_rope_dim + pe_offs, k_pe, ...)
+k_pe = tl.load(
+    fused_ptr + pe_base + pe_offs,
+    mask=pe_offs < qk_rope_dim,
+)
+tl.store(
+    k_pe_ptr + pid * qk_rope_dim + pe_offs,
+    k_pe,
+    mask=pe_offs < qk_rope_dim,
+)
 ```
+
+`pe_base` 是当前行 PE 段的整数标量起点，`pe_offs` 是 `int32[qk_rope_dim]`，`k_pe` 是输入 dtype 的 value block，输出地址是同 shape 的 pointer block。因为这段不转 FP32也不归约，所以 load 的元素 dtype 直接流到 store。
+
+## 8.1 全 kernel 类型账本
+
+假设输入/输出为 FP16：
+
+| 名字 | kernel 内类型 | shape/已知时刻 | 含义 |
+|---|---|---|---|
+| `fused_ptr/q_lora_ptr/k_nope_ptr/k_pe_ptr` | `pointer<fp16>` 标量 `tl.tensor` | `[]`，运行时地址 | 四个 GM tensor 首元素地址 |
+| `q_rms_w_ptr/k_rms_w_ptr` | `pointer<fp16>` 标量 | `[]` | 两组 weight 地址 |
+| bias pointer | `pointer<fp16>` 标量，仅有 bias 变体使用 | `[]` | 两组可选 bias 地址 |
+| ranks、`total_hidden/eps/HAS_BIAS` | `tl.constexpr` | 编译时 | 决定 block shape、地址段和分支变体 |
+| `pid/base/k_base/pe_base` | 整数标量 `tl.tensor` | `[]`，运行时 | 行号与元素起点 |
+| `q_offs/k_offs/pe_offs` | `int32` block | 各 rank 对应的一维 shape | 三段元素 offset |
+| `q/k` | `fp32` block | Q/K rank | Norm 中间值 |
+| `q_var/q_rstd/k_var/k_rstd` | `fp32` 标量 `tl.tensor` | `[]` | block reduction 结果 |
+| `qw/kw/qb/kb` | 输入 dtype block，运算时提升 | 对应 Q/K rank | 参数值 |
+| `k_pe` | `fp16` block | PE rank | 直接复制值 |
+
+注意 `q_var` 不是 Python `float`：它仍是 device 运行时的零维 `tl.tensor`。它和 `q` 相乘时，semantic 层将标量广播到 Q block shape。
 
 三段地址必须严格拼接。理论上应该满足：
 
@@ -183,9 +239,19 @@ total\_hidden = q\_lora\_rank + kv\_lora\_rank + qk\_rope\_dim
 Reference 可写为：
 
 ```python
+def rms_norm_ref(x, weight, bias, eps):
+    x_f32 = x.float()
+    rstd = torch.rsqrt(x_f32.square().mean(dim=-1, keepdim=True) + eps)
+    out = x_f32 * rstd * weight.float()
+    if bias is not None:
+        out = out + bias.float()
+    return out.to(x.dtype)
+
+
 q, k, pe = torch.split(fused, [q_rank, kv_rank, rope_dim], dim=-1)
-q_ref = rms_norm(q, q_weight, q_bias, eps)
-k_ref = rms_norm(k, k_weight, k_bias, eps)
+q_ref = rms_norm_ref(q, q_weight, q_bias, eps)
+k_ref = rms_norm_ref(k, k_weight, k_bias, eps)
+pe_ref = pe
 ```
 
 测试矩阵：

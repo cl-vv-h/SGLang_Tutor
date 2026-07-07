@@ -2,6 +2,8 @@
 
 高性能 kernel 不是“先把所有数据复制完，再全部计算，最后全部写回”。它更像工厂流水线：前一块在计算时，后一块可以搬入，前前一块可以搬出。
 
+本章的 Ascend C 类型按[代码阅读手册](../reference/code-reading-and-types.md)解释：`TQue/TPipe` 是资源与同步对象，`GlobalTensor/LocalTensor` 才是 typed view；构造 view 不等于搬运数据。
+
 ## 1. 三个最基本阶段
 
 Vector kernel 常抽象为：
@@ -71,11 +73,25 @@ AscendC::TPipe pipe;
 AscendC::TQue<AscendC::TPosition::VECIN, 1> inQueue;
 AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQueue;
 
-pipe.InitBuffer(inQueue, 2, tileBytes);
-pipe.InitBuffer(outQueue, 2, tileBytes);
+constexpr uint8_t bufferCount = 2;
+constexpr uint32_t tileBytes = 32 * 1024;
+pipe.InitBuffer(inQueue, bufferCount, tileBytes);
+pipe.InitBuffer(outQueue, bufferCount, tileBytes);
 ```
 
 这里模板参数里的 `1` 是队列深度；`InitBuffer` 的第二个参数 `2` 是分配两个 buffer，从而开启 double buffer。二者不是同一个概念。
+
+逐个对象看：
+
+| 名字 | C++ 静态类型 | 是否业务数据 | 含义 |
+|---|---|---|---|
+| `pipe` | `AscendC::TPipe` | 否 | 初始化 local buffer 并管理流水资源 |
+| `inQueue` | `TQue<TPosition::VECIN,1>` | 否 | Vector 输入位置、模板深度为 1 的队列对象 |
+| `outQueue` | `TQue<TPosition::VECOUT,1>` | 否 | Vector 输出位置的队列对象 |
+| `bufferCount` | `constexpr uint8_t` | 否 | 编译期 buffer 数量 2 |
+| `tileBytes` | `constexpr uint32_t` | 否 | 每个 buffer 的容量，单位明确为字节 |
+
+`InitBuffer` 只配置/分配资源，不从 GM 复制输入。后续 `AllocTensor<T>()` 得到 `LocalTensor<T>` view，`DataCopy` 才触发搬运，`EnQue/DeQue` 表达 buffer 就绪和所有权交接。
 
 ## 5. Double Buffer
 

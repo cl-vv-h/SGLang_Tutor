@@ -2,6 +2,8 @@
 
 本章以官方仓库 [`b2378ee`（2026-07-02）](https://github.com/sgl-project/sgl-kernel-npu/tree/b2378ee05769cf7df209ffc5e1b669728f435a7e) 为源码基线。仓库更新很快，目录或 API 变化时应以自己的 checkout 为准。
 
+这一章的难点不是某一行语法，而是同一个输入跨越多套类型系统。请配合[代码阅读手册](../reference/code-reading-and-types.md)跟踪：Python `torch.Tensor`、dispatcher schema `Tensor`、C++ `at::Tensor`、Triton pointer 或 Ascend C `GM_ADDR/GlobalTensor<T>`。
+
 ## 1. 它是混合 Kernel 仓库
 
 `sgl-kernel-npu` 不是“Triton 算子目录”，也不是“Ascend C 算子目录”。它把 SGLang 需要的多种实现统一成可安装、可测试的 kernel 包：
@@ -96,6 +98,8 @@ torch.ops.load_library(so_path)
 
 加载 `.so` 时，静态注册代码运行，`torch.ops.npu.*` 中才出现该库定义的算子。
 
+这里 `so_path` 是 Python `str`/path-like，`torch.ops.load_library` 是 Host Python callable，返回值不包含 device tensor。它让操作系统加载 shared library，并执行库内注册初始化；既不 launch kernel，也不把 `.so` 内容复制到 UB。
+
 这解释了一个常见现象：
 
 ```python
@@ -108,11 +112,18 @@ import sgl_kernel_npu
 
 ## 6. Schema 与 Implementation
 
-`pytorch_extensions.cpp` 使用两个关键宏：
+`pytorch_extensions.cpp` 中可以直接看到一组真实 schema/implementation：
 
 ```cpp
-TORCH_LIBRARY_FRAGMENT(npu, m) { /* m.def(schema) */ }
-TORCH_LIBRARY_IMPL(npu, PrivateUse1, m) { /* m.impl(...) */ }
+TORCH_LIBRARY_FRAGMENT(npu, m)
+{
+    m.def("helloworld(Tensor x, Tensor y) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
+{
+    m.impl("helloworld", TORCH_FN(sglang::npu_kernel::helloworld));
+}
 ```
 
 可分别理解为：
@@ -121,6 +132,8 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m) { /* m.impl(...) */ }
 - `m.impl`：告诉 dispatcher，NPU/PrivateUse1 tensor 应调用哪个 C++ Host 函数。
 
 Schema 中的 `Tensor(a!)` 表示有别名标记的可变 tensor。Mutation 契约会影响 graph、functionalization 和调用者对输出的理解，不能随意删改。
+
+`m` 的 C++ 类型是 PyTorch 注册 API 提供的 `torch::Library` 句柄；schema 字符串中的 `Tensor` 是 dispatcher 类型语法，Host 实现签名中通常对应 `at::Tensor`；`PrivateUse1` 是枚举式 dispatch key；`TORCH_FN(...)` 产生可注册的 C++ function wrapper。这些全是 Host/dispatcher 类型，不是 Ascend C device 对象。
 
 ## 7. Host 函数的职责
 

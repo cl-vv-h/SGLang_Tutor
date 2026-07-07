@@ -11,6 +11,7 @@
 | Kernel 第一性原理：operator、kernel、Host/Device、SPMD、grid、tile | 01-02 | 已完成 | [`foundations/01-kernel-first-principles.md`](./foundations/01-kernel-first-principles.md) |
 | Ascend 硬件与存储层级：AI Core、AIC/AIV、Cube、Vector、GM/L0/L1/UB | foundations/01 | 已完成 | [`foundations/02-ascend-hardware.md`](./foundations/02-ascend-hardware.md) |
 | 搬运、计算、同步与流水：TPipe、TQue、double buffer、算术强度 | foundations/01-02 | 已完成 | [`foundations/03-memory-pipeline-and-sync.md`](./foundations/03-memory-pipeline-and-sync.md) |
+| 全课程代码类型导读：Python/Host/Device 边界、Triton value/pointer block、pointer arithmetic、Ascend C typed view 与字节/元素单位 | foundations/01 | 已完成 | [`reference/code-reading-and-types.md`](./reference/code-reading-and-types.md) |
 | Triton-Ascend 基础到调优 | 01-02，foundations/01-03 | 已完成 | [`triton-ascend/`](./triton-ascend/) |
 | Triton-Ascend persistent kernel 与大 grid 调度：固定物理核数、program 内循环、auto-blockify、task queue 边界 | Triton-Ascend 01-04，foundations/02-03 | 已完成 | [`triton-ascend/05-persistent-kernel-and-large-grid.md`](./triton-ascend/05-persistent-kernel-and-large-grid.md) |
 | Ascend C 基础到调优 | 01-02，foundations/01-03 | 已完成 | [`ascend-c/`](./ascend-c/) |
@@ -32,3 +33,5 @@
 - 新增章节前，先检查它是否填补了主线中的真实缺口，而不是重复已有总结。
 - 如果某一主题开始膨胀到同时覆盖多个新概念，就拆章，不把所有细节堆进一篇。
 - 每次补新章节时，都要更新本文件中的“前置知识、当前状态、对应文件”。
+- Python/C++ 代码块不得用未声明的 `...`、虚构 helper 或 `mask=...` 隐藏关键类型与边界；若只表达结构，改用 `text`/Mermaid；若摘录真实源码，明确固定 commit 与省略的上下文。
+- 新代码第一次出现时必须说明主要变量的语言层、编译期/运行时、dtype/shape、地址空间与 offset 单位。

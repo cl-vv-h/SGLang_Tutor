@@ -1,5 +1,7 @@
 # Ascend C 04：Platform、Tiling、Workspace 与 Host/Device 契约
 
+本章横跨 Host C++、launch ABI 和 Device C++。请先按[代码阅读手册](../reference/code-reading-and-types.md)建立类型边界：`at::Tensor` 是 Host 框架对象，`uint32_t/uint64_t` 是 tiling 标量，`GM_ADDR` 是 Device ABI 地址，三者不能因为都能“传给 kernel”就视为同一种类型。
+
 本章承接 [`01-global-local-tensor-pipe-queue.md`](./01-global-local-tensor-pipe-queue.md)、[`02-add-operator-end-to-end.md`](./02-add-operator-end-to-end.md) 和 [`03-tiling-pipeline-sync-optimization.md`](./03-tiling-pipeline-sync-optimization.md)。
 
 前几章已经解释了 device kernel 内部怎样搬运、计算和同步。这一章往前再退半步，专门回答 Host 侧最关键的五个问题：
@@ -97,39 +99,60 @@ flowchart LR
 - `workspace` 是 launch 前分配的 device tensor，不是 kernel 内部自己“顺手申请一下”；
 - Device kernel 拿到的是“已经定好的计划”，不是自己重新做一次全局资源规划。
 
-## 6. 最小例子：先写成教学伪代码
+## 6. 真实 Host 源码：Platform 查询如何变成 launch 参数
 
-下面是**教学伪代码**，用于建立调用链，不对应某个仓库的逐字源码：
+下面摘自固定 commit 的 `apply_token_bitmask.cpp`。为聚焦 Platform/Tiling，省略的是此前已经完成的输入校验、padding 和 contiguous 处理；被省略部分产生的 `workingLogits/workingBitmask` 是 `at::Tensor`，`numIndices/paddedVocabSize` 是 `int64_t`。下列 API、变量声明与算术保持真实源码语法：
 
 ```cpp
-platform = PlatformAscendCManager::GetInstance()
+int64_t dtypeSize = static_cast<int64_t>(workingLogits.element_size());
 
-blockDim = min(platform.GetCoreNumAiv(), numRows)
-ubSize = platform.GetCoreMemSize(UB)
-tileLength = choose_tile(ubSize, dtypeSize, alignUnit)
+auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
+int64_t coreNum = ascendcPlatform->GetCoreNumAiv();
 
-tiling = {
-  numRows,
-  vocabSize,
-  baseRows,
-  extraCores,
-  tileLength,
-  tilingKey,
-}
+uint32_t blockDim = static_cast<uint32_t>(
+    std::min(static_cast<int64_t>(numIndices), coreNum)
+);
+if (blockDim == 0) blockDim = 1;
 
-workspaceSize = platform.GetLibApiWorkSpaceSize()  // 若该算子需要
-workspace = empty(workspaceSize bytes on device)   // 若该算子需要
-tilingTensor = copy_host_struct_to_device(tiling)  // 若 ABI 选择传 struct
+uint32_t baseRows = static_cast<uint32_t>(numIndices) / blockDim;
+uint32_t extraCores = static_cast<uint32_t>(numIndices) % blockDim;
 
-launch(kernel, blockDim, inputs, workspace, tilingTensor or scalar args)
+constexpr int32_t hostBufferNum = 2;
+constexpr int64_t ALIGN_UNIT = 256;
+uint64_t ubSize = 0;
+ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+uint64_t usableUb = (ubSize > 16384) ? (ubSize - 16384) : ubSize;
+
+int64_t bytesPerUnit = static_cast<int64_t>(hostBufferNum) *
+    (2 * ALIGN_UNIT * dtypeSize +
+     (ALIGN_UNIT / 32) * static_cast<int64_t>(sizeof(int32_t)));
+uint32_t tileLength = static_cast<uint32_t>(
+    (usableUb / static_cast<uint64_t>(bytesPerUnit)) *
+    static_cast<uint64_t>(ALIGN_UNIT)
+);
 ```
 
-这段伪代码想表达的不是 API 名字，而是四层责任：
+这段真实源码体现四层责任：
 
 1. 查硬件能力；
 2. 生成本次输入的执行计划；
 3. 把计划编码成 kernel ABI 能吃的参数；
 4. 在当前 stream 上启动 kernel。
+
+逐类型读：
+
+| 名字 | C++ 类型 | 单位/角色 | 为什么这样选 |
+|---|---|---|---|
+| `workingLogits` | `at::Tensor` | Host 框架对象，storage 在 NPU | 从它读取 element size，并作为 launch tensor 实参 |
+| `dtypeSize` | `int64_t` | bytes/element | 与 shape 乘法前保留足够范围 |
+| `ascendcPlatform` | manager pointer/smart handle（由 `auto` 推导） | Host 服务对象 | 查询硬件，不进入 kernel |
+| `coreNum` | `int64_t` | AIV 数 | 先与 `numIndices` 同宽比较，再显式窄化 |
+| `blockDim/baseRows/extraCores/tileLength` | `uint32_t` | launch/tiling 标量 | 与 Device kernel 参数签名完全一致 |
+| `ubSize/usableUb` | `uint64_t` | bytes | UB 容量计算不能用元素单位，也应避免 32 位溢出 |
+| `hostBufferNum/ALIGN_UNIT` | `constexpr` 整数 | 编译期策略常量 | 分别代表 buffer 份数与元素对齐单位 |
+| `bytesPerUnit` | `int64_t` | bytes per 256 elements | 把 logits、bitmask、输出和 double buffer 一起计入 |
+
+尤其注意显式 cast 的位置：Host 先用 64 位完成资源计算，确认值可表示后再转成 Device ABI 需要的 `uint32_t`。这不是多余样板，而是在阻止 shape/容量截断。
 
 ## 7. 真实路径 A：`apply_token_bitmask` 只传标量，不显式传 workspace/tiling tensor
 
