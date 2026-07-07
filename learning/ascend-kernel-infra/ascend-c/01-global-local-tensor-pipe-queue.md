@@ -246,14 +246,55 @@ globalOffset = blockIdx * elementsPerCore + tileIdx * tileLength;
 | 版本耦合 | 需要匹配 CANN、编译器和目标架构 |
 | 适用场景 | 复杂融合、专用 layout、极致性能、Triton 当前难以表达的能力 |
 
-## 15. 本章检查点
+## 15. 本章检查点与参考答案
 
-- `GlobalTensor` 是否意味着数据已经在 UB？
-- `LocalTensor` 的生命周期由哪些操作构成？
-- `TPosition` 为什么是逻辑概念？
-- `TQue` 比普通 buffer 多了什么？
-- `TPipe.InitBuffer(..., 2, ...)` 中的 2 与队列模板深度有何区别？
-- `blockIdx` 和 `tileIdx` 分别切哪一层任务？
+### 1. `GlobalTensor` 是否意味着数据已经在 UB？
+
+**答案：**不意味着。`GlobalTensor<T>` 只是 device 侧对 GM 地址建立的类型化视图。
+
+`SetGlobalBuffer()` 告诉 kernel：“从这个全局地址开始，把内容解释成 T 类型，并按给定长度/offset 访问。”它不会触发 GM→UB 搬运，也不会占用 TPipe 管理的 Local Memory。
+
+只有执行 `DataCopy(local, global[offset], length)` 等操作后，相应数据才进入 LocalTensor 所在的 UB/L1/L0 路径。把“建立地址视图”和“实际搬数据”分开理解，是阅读 Init 与 CopyIn 的第一步。
+
+### 2. `LocalTensor` 的生命周期由哪些操作构成？
+
+**答案：**典型 Queue 管理生命周期是 `AllocTensor → 生产数据 → EnQue → DeQue → 消费数据 → FreeTensor`。
+
+CopyIn 先从输入 Queue 分配 LocalTensor，把 GM 数据搬入，再 EnQue 表示输入就绪；Compute DeQue 输入，分配输出 LocalTensor，完成计算后 EnQue 输出，并释放已经消费完的输入；CopyOut DeQue 输出，写回 GM 后释放输出。
+
+关键是释放时机必须落在最后一个消费者之后。过早 Free 会让 buffer 被下一 tile 复用并覆盖仍在使用的数据；忘记 Free 则资源无法循环使用，可能造成 buffer 枯竭或流水停顿。
+
+### 3. `TPosition` 为什么是逻辑概念？
+
+**答案：**它描述 tensor 在计算流水中的角色，而不是直接承诺某个产品上的唯一物理存储实现。
+
+例如 `VECIN` 表示 Vector 输入位置，`A1/B1` 表示 Cube 输入的第一级逻辑位置。编译器依据目标架构把它们映射到 UB、L1 等实际资源和合法数据通路。
+
+这样同一种 API 能适配耦合/分离架构及不同产品，但开发者做性能预算时仍需查目标架构的映射表。逻辑抽象提高可移植性，物理规格决定容量和性能，两者不能混为一谈。
+
+### 4. `TQue` 比普通 buffer 多了什么？
+
+**答案：**TQue 同时增加了资源周转和生产者—消费者同步语义。
+
+普通 buffer 只是一段地址，开发者要自行保证谁可以写、谁可以读、何时复用。TQue 通过 Alloc/Free 管理 LocalTensor buffer，通过 EnQue/DeQue 表达数据何时就绪以及哪个流水阶段可以消费，并借助 TPipe 管理相关 event。
+
+这让按顺序写出的 `CopyIn(); Compute(); CopyOut();` 有机会被编译器组织成跨 tile 流水。代价是必须遵守 Queue 生命周期；它不是可以随意随机访问和永久保存数据的容器。
+
+### 5. `TPipe.InitBuffer(..., 2, ...)` 中的 2 与队列模板深度有何区别？
+
+**答案：**`2` 是分配给该 Queue 的 buffer number，常用于 ping/pong 双缓冲；模板深度是允许连续入队而未出队的数量。
+
+例如 `TQue<VECIN,1>` 配合 `InitBuffer(queue,2,tileBytes)`：Queue depth 仍为 1，但底层有两块内存可在相邻 tile 间轮换，使 MTE 搬下一块时 Vector 计算上一块。
+
+如果写成 `TQue<VECIN,2>`，它表达允许两份数据排队，不自动保证已经分配两块适合双缓冲的 buffer。两者服务于不同问题：depth 是队列协议，buffer number 是存储资源配置。
+
+### 6. `blockIdx` 和 `tileIdx` 分别切哪一层任务？
+
+**答案：**`blockIdx` 选择当前核实例负责的全局大分片，`tileIdx` 选择该实例内部正在处理的片上小块。
+
+Host 通过 `blockDim` 启动多个实例；每个实例用 `GetBlockIdx()` 得到 blockIdx，例如分别负责不同 row。由于一整 row 可能仍放不进 UB，该实例再在 `Process()` 中沿 vocab/hidden 维循环 tileIdx。
+
+常见全局地址为 `blockOffset(blockIdx) + tileIdx*tileLength`。前者决定多核并行和负载均衡，后者决定 Local Memory 占用、搬运粒度和流水，两级 tiling 的调优目标不同。
 
 ## 官方资料
 

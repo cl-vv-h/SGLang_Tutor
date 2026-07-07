@@ -174,13 +174,49 @@ Reference：同时验证数值正确性
 | 适用场景 | 规则 Vector、归约、融合 epilogue、可 tile 化算子、快速验证 |
 | 风险 | 编译缓存、动态 shape、UB overflow、版本兼容和 compiler limitation |
 
-## 13. 本章检查点
+## 13. 本章检查点与参考答案
 
-- 为什么首次运行时间不能作为 kernel latency？
-- 哪些问题属于用户 kernel，哪些更可能属于 compiler/driver？
-- 为什么 autotune 前要先做 UB 和硬件约束裁剪？
-- Microbenchmark 变快后还必须做什么验证？
-- NPU 迁移中 grid 为什么是第一批检查对象？
+### 1. 为什么首次运行时间不能作为 kernel latency？
+
+**答案：**首次调用可能混入 JIT 编译、动态库加载、runtime 初始化、缓存创建和内存池准备，而稳定 kernel latency 只想测设备执行及必要 launch 开销。
+
+对于新的 dtype/meta-parameter 组合，Triton 需要生成 IR、运行 lowering、调用后端编译器并缓存产物；这些过程可能比 kernel 本身慢几个数量级。第一次创建 NPU context、stream 或 allocator 也有额外成本。
+
+正确 benchmark 应先 warmup，确保目标变体已编译，再在正确的 stream 同步边界内重复计时并报告中位数/分位数。部署评估可以另行记录冷启动/JIT 时间，但不能把它与稳态 kernel latency 混成一个指标。
+
+### 2. 哪些问题属于用户 kernel，哪些更可能属于 compiler/driver？
+
+**答案：**可以按“语义 → lowering → launch/runtime”三层定位。
+
+- **用户 kernel**：pointer/stride 公式、mask、归约单位元、dtype cast、grid、输出 shape 或 wrapper 契约错误。通常能在特定 shape 稳定复现，与简单 reference 不一致。
+- **compiler/backend**：合法 Triton op 无法 lowering、某 IR pass 崩溃、生成代码在特定组合下错误、资源估算异常。需要最小 Triton reproducer、IR 和版本信息。
+- **driver/runtime**：kernel object 加载失败、stream/device/context 错误、launch 参数 ABI、缓存文件或 CANN 环境问题。
+
+定位顺序应先缩小输入并审查用户地址/边界，再确认 IR/编译，最后排查 runtime。因为用户 kernel 错误最常见，也最容易通过独立 reference 证伪。
+
+### 3. 为什么 autotune 前要先做 UB 和硬件约束裁剪？
+
+**答案：**autotune 只会在候选中测快慢，不会把本质非法或明显不合理的候选变成可用实现。
+
+过大的 BLOCK 可能使输入、输出、FP32 accumulator 和 double buffer 超过 UB/L1/L0；不满足 Cube 基本块或 dtype 约束的 config 可能编译失败；grid 与物理核极不匹配的候选即使能跑也没有搜索价值。把这些全扔给 autotune 会增加编译时间、缓存、失败噪声，甚至触发 OOM/编译器错误。
+
+应先根据 Local Memory 预算、对齐、基本块和真实 shape 删除非法候选，再让 autotune 在一个小而有意义的空间中比较。这叫“用硬件知识约束搜索”，不是用手工判断替代测量。
+
+### 4. Microbenchmark 变快后还必须做什么验证？
+
+**答案：**至少还要做完整正确性矩阵、真实 shape 分布和 SGLang 端到端验证。
+
+Microbenchmark 可能只测了一个对齐 shape、热缓存和单 stream，遗漏尾块、动态 batch、graph capture、并发、内存峰值和 fallback。还可能出现单 kernel 快了，但前后新增 format cast/contiguous copy，整体反而变慢。
+
+端到端应观察 TTFT、TPOT、吞吐、显存、CPU launch gap、graph replay、分布式和不同模型配置，并用 profiler 确认调用确实进入新 kernel。只有收益在目标业务分布中仍存在，才能称为有效优化。
+
+### 5. NPU 迁移中 grid 为什么是第一批检查对象？
+
+**答案：**grid 决定逻辑 program 数、每个 program 工作量和任务下发轮次，而 GPU 上常见的“大量小 program”策略未必适合 Ascend 的物理核规模和启动模型。
+
+若直接复用 GPU grid，可能生成远多于 AIV/AIC 数量的 program，每个只处理很少数据，导致多轮下发、Scalar 初始化和调度开销占比过高。反过来，grid 太小又会让物理核空闲。
+
+所以迁移初期应同时查看 `num_programs`、每 program tile、物理 Vector/Cube Core 数和负载均衡。常见修正是固定到物理核数量并在 program 内循环，但最终仍要根据小任务、尾块和真实 shape benchmark。
 
 ## 官方源码与文档
 

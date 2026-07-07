@@ -190,13 +190,47 @@ pid_n = pid % num_pid_n
 6. fused matmul epilogue：理解 CV fusion 价值；
 7. attention：组合 matmul、softmax、mask 与 streaming reduction。
 
-## 12. 本章检查点
+## 12. 本章检查点与参考答案
 
-- 为什么 shape 相同的两个 tensor 可能需要不同地址计算？
-- `offs_m[:,None] + offs_n[None,:]` 在做什么？
-- Reduction padding 为什么常用 `other=0`？最大值归约也能无脑用 0 吗？
-- `tl.dot` 为什么不能简单等同于一条 Cube 指令？
-- Decode 和 prefill 为什么可能选择不同 matmul tile？
+### 1. 为什么 shape 相同的两个 tensor 可能需要不同地址计算？
+
+**答案：**shape 只规定逻辑维度大小，不规定底层元素排列；stride、storage offset 和 layout 才决定地址。
+
+两个 `[M,N]` tensor 中，一个可能是 contiguous，地址公式为 `i*N+j`；另一个可能来自 slice 或 transpose 后再 view，行与列的 stride 不同，甚至首元素还有非零 storage offset。如果 kernel 写死 contiguous 公式，它只能正确处理第一种布局。
+
+因此 custom kernel 必须明确契约：要么 wrapper 检查 `is_contiguous()` 并在必要时复制，要么把每维 stride 传入 kernel。支持任意 stride 更通用，但地址计算和访存模式也可能更复杂、性能更差。
+
+### 2. `offs_m[:,None] + offs_n[None,:]` 在做什么？
+
+**答案：**它利用广播把两个一维坐标轴组合成二维坐标网格。
+
+`offs_m` 的 shape 是 `[BM]`，加上新维后成为 `[BM,1]`；`offs_n[None,:]` 是 `[1,BN]`。广播结果为 `[BM,BN]`：每一行使用一个 m 坐标，每一列使用一个 n 坐标。
+
+真正的二维地址通常还会乘 stride：`base + offs_m[:,None]*stride_m + offs_n[None,:]*stride_n`。这一次构造出整个 tile 的 pointer block，使后续 `tl.load`、mask 和计算都以二维 block tensor 进行。
+
+### 3. Reduction padding 为什么常用 `other=0`？最大值归约也能无脑用 0 吗？
+
+**答案：**padding 值必须是该归约运算的**单位元**或至少不影响有效结果的值；0 只适合部分运算。
+
+Sum 的单位元是 0，因此无效 lane 取 0 不改变总和。乘积归约通常用 1。Max 若用 0，当所有有效元素都为负数时，padding 0 会错误成为最大值；应使用该 dtype 可表示的 `-inf` 或足够小的值。Min 则对应 `+inf`。
+
+RMSNorm 的平方和可以用 `other=0`，但分母仍必须除以真实维度而不是 padding 后的 block 长度。可见 mask、other 和归约公式需要一起审查。
+
+### 4. `tl.dot` 为什么不能简单等同于一条 Cube 指令？
+
+**答案：**`tl.dot` 是 block matrix multiplication 的高层 IR 语义，而硬件执行需要一整套数据准备、分块和指令序列。
+
+后端要检查 dtype 与 tile 合法性，将 A/B 从 GM 搬入合适的 L1/L0 位置，必要时转换 layout，沿 K 维执行多轮 Cube 矩阵乘加，在 accumulator 中累积，再通过输出通路转换和写回。一个较大的 `tl.dot` 通常降低为多条搬运、同步和矩阵指令，而不是“一行 DSL 对应一条机器指令”。
+
+这个区别很重要：`tl.dot` 语义正确不代表 tile 一定高效。BM/BN/BK、对齐、layout、K 尾块和流水仍决定实际 Cube 利用率。
+
+### 5. Decode 和 prefill 为什么可能选择不同 matmul tile？
+
+**答案：**两阶段的矩阵形状和优化目标不同。
+
+Prefill 一次处理大量 prompt token，matmul 的 M 通常较大，有足够输出 tile 填满多核，适合较大的 BM/BN 来提高数据复用和吞吐。Decode 每个活跃序列通常只产生一个新 token，M 很小；过大的 BM 会产生大量 padding 和无效计算，或让可并行 tile 数不足。
+
+Decode 更关注单步延迟、小 M 利用率和减少 launch，prefill 更关注大矩阵吞吐。即便 K/N 相同，也常需不同 config、persistent 策略或直接选择不同 vendor kernel。最佳选择必须覆盖真实 batch 和并发分布，而不是只测一个方形矩阵。
 
 ## 官方源码与文档
 

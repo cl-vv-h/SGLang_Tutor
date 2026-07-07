@@ -202,13 +202,47 @@ for n in [0, 1, 31, 32, 33, 1023, 1024, 1025, 98432]:
 
 还要覆盖支持的 dtype、非连续 tensor 是否拒绝或正确处理、极值/NaN/Inf 行为。
 
-## 13. 本章检查点
+## 13. 本章检查点与参考答案
 
-- `program_id` 返回的是物理核 ID 吗？为什么只能近似关联？
-- `tl.arange` 为什么意味着 kernel 在处理一块数据？
-- `tl.constexpr` 带来什么优化机会和缓存代价？
-- `mask` 为什么必须同时考虑 load 和 store？
-- 为什么官方入门 grid 正确，但生产 NPU kernel 仍可能改成固定物理核数？
+### 1. `program_id` 返回的是物理核 ID 吗？为什么只能近似关联？
+
+**答案：**不是。`tl.program_id(axis)` 返回当前 program instance 在逻辑 launch grid 某一轴上的编号。
+
+Runtime 会把逻辑 program 调度到可用的物理 AIV/AIC 上。物理核数量少于 program 数时，一个核会先后执行多个 program；调度关系也不应被用户 kernel 当作稳定 ABI。`pid=7` 的含义是“处理第 7 份逻辑数据”，不是“我永远运行在 7 号 Vector Core”。
+
+之所以说只能近似关联，是因为当 grid 恰好按物理核数设置并采用 persistent 写法时，运行时通常可以让每个 program 占用一份核资源处理多轮任务。但这种性能策略仍不赋予 `pid` 查询物理核身份的语义。
+
+### 2. `tl.arange` 为什么意味着 kernel 在处理一块数据？
+
+**答案：**`tl.arange(0, BLOCK)` 产生的不是一个循环迭代器，而是一个包含 `BLOCK` 个整数的 Triton block tensor。
+
+当它与 pointer 相加时会得到一组地址，`tl.load` 一次表达对这组地址的加载，`x+y` 也一次表达整组元素的逐元素加法。Kernel 的中间值因而带有静态 block shape，而不是单一标量。
+
+例如 `offsets = pid*256 + tl.arange(0,256)` 表示当前 program 的 256 个逻辑 lane。编译器根据目标硬件把这块语义降低为向量指令、搬运和必要的内部循环，这正是 Triton blocked programming model 的核心。
+
+### 3. `tl.constexpr` 带来什么优化机会和缓存代价？
+
+**答案：**它让参数在编译期已知，从而允许 specialization；代价是不同取值可能生成不同 kernel 变体。
+
+编译器知道 `BLOCK_SIZE=1024` 后，可以确定 `tl.arange` 形状、估算 UB/临时资源、展开循环、删除常量条件分支并选择特定 lowering。例如 `if HAS_BIAS:` 中 `HAS_BIAS` 是 constexpr 时，无 bias 版本可以完全移除该路径。
+
+但若把频繁变化的序列长度、batch size 等都作为 constexpr，每个新组合都可能触发 JIT 和缓存项，造成首次请求抖动、编译时间和缓存膨胀。原则是：把真正决定代码结构或 tile 的少量 meta-parameter constexpr 化；普通数据长度尽量作为运行时参数配合 mask。
+
+### 4. `mask` 为什么必须同时考虑 load 和 store？
+
+**答案：**输入越界和输出越界是两个独立风险，保护其中一侧不能自动保护另一侧。
+
+Load mask 防止读取 tensor 范围外的地址，并用 `other` 为无效 lane 提供安全值。如果只 mask load，却不 mask store，尾 program 仍会把计算结果写到输出边界外，破坏相邻内存。反之，只 mask store 也不能阻止之前的非法读取。
+
+Reduction 还要求选择正确的 `other`：sum 常用 0，max 常用 `-inf`。所以 mask 不只是内存安全开关，也是数学语义的一部分。
+
+### 5. 为什么官方入门 grid 正确，但生产 NPU kernel 仍可能改成固定物理核数？
+
+**答案：**入门写法优先展示一一映射的正确性，生产写法还要控制任务下发成本。
+
+`grid=ceil(N/BLOCK)` 让每个逻辑 tile 对应一个 program，容易理解、负载划分直接，并且结果完全正确。但当 N 很大、BLOCK 较小时，grid 可能远大于物理 Vector Core 数，runtime 要多轮启动和初始化 program。
+
+固定 `grid=num_vectorcore` 后，每个 program 通过 `for tile_id in range(pid,num_tiles,num_programs)` 处理多块数据，可减少逻辑 program 数和下发开销。代价是 kernel 内循环更长，负载均衡和小任务行为可能不同。它是需要 benchmark 验证的 NPU 亲和优化，不是对入门实现正确性的否定。
 
 ## 官方源码与文档
 

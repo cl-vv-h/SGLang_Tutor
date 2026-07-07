@@ -182,13 +182,47 @@ Padding 是“用多一点计算换更规则搬运”，是否划算要用真实
 - 缺少 NPU 测试与性能回归环境；
 - 团队无法维护 CANN/硬件版本分支。
 
-## 14. 本章检查点
+## 14. 本章检查点与参考答案
 
-- 多核 tiling 与核内 tiling 分别优化什么？
-- 哪些 tensor 真正需要 double buffer？
-- 为什么全核 barrier 往往比核内 event 更昂贵？
-- CV fusion 为什么可能被 AIV 阶段拖慢？
-- 静态 Tensor 编程用什么复杂度换取什么收益？
+### 1. 多核 tiling 与核内 tiling 分别优化什么？
+
+**答案：**多核 tiling 优化任务在核之间的并行和均衡，核内 tiling 优化单核 Local Memory、搬运粒度和流水。
+
+多核层决定 `blockDim`、每核负责哪些 row/head/token，以及尾核是否负载过少。目标是让足够多物理核有工作，同时避免过细任务和跨核同步。
+
+核内层决定每轮从 GM 搬多少数据、UB/L1/L0 是否放得下、能否 double buffer，以及计算与 CopyIn/CopyOut 能否重叠。多核切得再均匀，如果单核 tile 频繁做微小 DataCopy，仍可能很慢；单核 tile 很高效但只启动一个核，也无法利用整卡。两层需要联合设计。
+
+### 2. 哪些 tensor 真正需要 double buffer？
+
+**答案：**只有生命周期允许跨 tile 轮换、且对应阶段值得与其他阶段重叠的 tensor 才应优先双缓冲。
+
+典型输入 tile 在“当前 tile 被 Compute 消费”时，可以让 MTE 把下一 tile 搬进另一块 buffer，因此适合 ping/pong。输出若 CopyOut 是明显瓶颈，也可能准备两块，使上一结果写回时下一结果正在计算。
+
+长期跨循环保存的 accumulator、只初始化一次并复用的权重 tile、很小的临时标量未必适合双份。Double buffer 会占用额外 UB/L1，可能迫使 tile 变小；判断应基于 trace 中阶段重叠机会和内存预算，而不是把所有 Queue 的 buffer number 一律设成 2。
+
+### 3. 为什么全核 barrier 往往比核内 event 更昂贵？
+
+**答案：**同步范围越大，需要等待的参与者越多，慢者拖住所有人的概率越高。
+
+核内 event 通常只约束同一核的两条指令通路，例如 MTE 完成某 buffer 搬入后 Vector 才消费。没有参与该数据依赖的其他核可以继续执行。
+
+全核 barrier 要求相关核全部到达同步点；任一核因尾块、cache miss 或负载不均晚到，其他核都空闲等待。它还需要跨核协调机制。因此能用局部 queue/event 表达的依赖不应升级成全核 barrier；只有算法真的需要全局阶段一致时才使用大范围同步。
+
+### 4. CV fusion 为什么可能被 AIV 阶段拖慢？
+
+**答案：**融合减少了 GM 中间流量，但 AIC 与 AIV 仍形成有依赖的生产者—消费者流水，整体吞吐由较慢一侧限制。
+
+例如 AIC matmul 10 微秒产生一块输出，而 AIV 完成 dequant、bias、activation 和 RoPE 需要 35 微秒。AIV 来不及消费时，AIC 的结果 buffer 和同步队列会积压，最终 AIC 等待 AIV，Cube 峰值再高也不能提高整体速度。
+
+优化要看 AIC:AIV 资源比例、tile 粒度、数据交换和同步，可能拆分/重排 Vector epilogue、增加 AIV 并行、调整两侧 tile 或减少 Vector 工作。融合的收益来自少写 GM，但必须与核间负载平衡一起验证。
+
+### 5. 静态 Tensor 编程用什么复杂度换取什么收益？
+
+**答案：**它用手工 buffer 地址、生命周期、double buffer 和同步管理，换取更低的 TPipe 初始化/动态资源管理开销以及更精确的布局控制。
+
+对于只有数微秒的固定小 kernel，数百纳秒级初始化和通用 Queue 管理可能占明显比例；静态 Tensor 可以预先规划片上地址并减少这部分开销。但开发者必须自己保证 ping/pong 不冲突、event 完整、对齐正确，并且可用 API 范围可能更受限制。
+
+因此它适合已经通过 profiling 证明管理开销是瓶颈的成熟热点，不适合作为初学者和动态复杂算子的默认起点。收益是更低固定开销，代价是更高正确性风险、维护成本和架构耦合。
 
 ## 官方资料
 

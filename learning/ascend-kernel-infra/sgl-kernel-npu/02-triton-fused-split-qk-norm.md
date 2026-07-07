@@ -210,13 +210,51 @@ k_ref = rms_norm(k, k_weight, k_bias, eps)
   -> 统计 GM 读写和最终输出
 ```
 
-## 14. 本章检查点
+## 14. 本章检查点与参考答案
 
-- 为什么说一个 program 负责一行，而不是一个 Q 元素？
-- 这个 kernel 没有 `BLOCK_SIZE`，为什么仍然有三个 tile？
-- Bias 分支为什么没有每行动态判断开销？
-- FP32 reduction 解决什么问题？
-- 哪个 shape 等式是源码调用契约的一部分？
+### 1. 为什么说一个 program 负责一行，而不是一个 Q 元素？
+
+**答案：**因为 launch grid 是 `(B,)`，`pid` 选择 batch/token 行，而行内元素由 `tl.arange` 组成 block tensor 一次处理。
+
+`pid=2` 时，`base=2*total_hidden` 定位到输入第 2 行。随后 `q_offs=tl.arange(0,q_lora_rank)` 生成这一行 Q 段的全部逻辑 offset，K 与 PE 段同理。没有第二维 program ID 为每个元素创建独立 program。
+
+因此并行层次是“program 间并行处理不同行，program 内以 block tensor 处理一行的三个片段”。编译器会进一步把行内 block 降低到 Vector 指令，但这不改变 program 的逻辑职责。
+
+### 2. 这个 kernel 没有 `BLOCK_SIZE`，为什么仍然有三个 tile？
+
+**答案：**tile 是算法一次处理的数据块，不要求变量必须叫 `BLOCK_SIZE`。
+
+该 kernel 的三个 `tl.arange` 分别定义 Q、K-nope 和 K-PE 的 block shape，长度是 `q_lora_rank`、`kv_lora_rank` 和 `qk_rope_dim`。每组 offsets 对应 fused row 中一个连续片段，也对应一个输出片段。
+
+这里模型 rank 本身充当编译期 tile 参数。阅读 Triton 源码时应寻找 `tl.arange`、block pointer 和 tensor shape，而不是依赖变量命名判断是否存在 tiling。
+
+### 3. Bias 分支为什么没有每行动态判断开销？
+
+**答案：**`Q_HAS_BIAS` 和 `K_HAS_BIAS` 是 `tl.constexpr`，分支在 JIT specialization 时已经确定。
+
+有 bias 的配置会生成包含 bias load/add 的 kernel 变体；无 bias 配置在 IR 优化时删除整段分支。运行每个 pid 时不需要从 device memory 读取布尔值，也不需要每行做动态 branch。
+
+代价是有/无 bias 与不同 rank 组合可能生成多个缓存变体。它用更多编译与缓存项换取更简单的运行时代码。
+
+### 4. FP32 reduction 解决什么问题？
+
+**答案：**它降低 FP16/BF16 平方和累加的舍入误差、下溢/上溢风险，使 RMSNorm 的方差和缩放更稳定。
+
+RMSNorm 要累加一整行的 `x²`。低精度类型尾数较短，逐项累加误差会随 rank 增大；平方还扩大了数值动态范围。源码先将输入转成 FP32，再执行平方、`tl.sum`、除法和 `rsqrt`。
+
+最终 store 可以转换回输入/输出 dtype，因此不是所有中间 tensor 都需要以 FP32 写入 GM。代价是 FP32 临时 block 占用更多片上资源，tile 和性能仍需权衡。
+
+### 5. 哪个 shape 等式是源码调用契约的一部分？
+
+**答案：**输入最后一维应由三个连续片段恰好组成：
+
+\[
+total\_hidden=q\_lora\_rank+kv\_lora\_rank+qk\_rope\_dim
+\]
+
+Kernel 依据这个顺序计算 `base`、`k_base` 和 `pe_base`。若 total_hidden 更小，会越界读取；若更大，尾部数据被忽略；若片段顺序不同，输出会语义错位。
+
+当前源码主要依赖上游模型配置保证该关系，因此它属于调用契约。若把函数做成更通用的公共 API，wrapper 应显式断言该等式，并检查输入二维且最后一维 contiguous，使错误在 Host 侧尽早暴露。
 
 ## 对应源码
 

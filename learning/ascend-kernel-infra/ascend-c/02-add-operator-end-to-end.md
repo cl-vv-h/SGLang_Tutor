@@ -217,13 +217,49 @@ effective\ bandwidth = \frac{bytes(x)+bytes(y)+bytes(z)}{kernel\ time}
 - 是否包含首次加载/JIT/初始化；
 - 是否正确同步 stream。
 
-## 15. 本章检查点
+## 15. 本章检查点与参考答案
 
-- Tiling data 为什么是一份 ABI/协议？
-- Host 为什么比 Device 更适合依据 shape 选择 blockDim？
-- `.so` 加载、schema 注册、backend 实现分别在哪一步？
-- `torch.ops.npu.*` 为什么不能单凭 namespace 判断源码归属？
-- 尾 tile 为什么不仅是一个 `min()` 就一定处理正确？
+### 1. Tiling data 为什么是一份 ABI/协议？
+
+**答案：**因为它跨越 Host 与 Device 两个独立编译和执行边界，双方必须对同一段字节的字段顺序、类型、大小和语义达成一致。
+
+Host 可能把 `totalLength、tileLength、loops` 序列化到一块 GM 内存，Device 按同一个结构体读取。如果 Host 新增一个 64 位字段而 Device 仍按旧布局解析，后续字段 offset 都会错位；这类问题可能不会在 C++ 编译时报错，而会表现为错误地址甚至越界。
+
+因此 tiling struct、version/tiling key、对齐和生成代码共同构成 ABI。修改时要同时更新 Host、kernel、注册/生成步骤和测试，不能把它当作普通的内部临时变量。
+
+### 2. Host 为什么比 Device 更适合依据 shape 选择 blockDim？
+
+**答案：**Host 已知运行时 shape、dtype、目标设备核数和内存规格，并且只需为整次 launch 计算一次策略。
+
+如果让每个 Device 实例重复查询和推导 blockDim，不仅浪费 Scalar 控制开销，而且 Device 已经是被 `blockDim` 启动后的参与者，无法倒过来改变本次 launch 创建多少实例。Host 则可以在 launch 前比较任务量与物理核数，选择 blockDim、计算每核分片和尾核参数。
+
+Device 仍会根据 blockIdx 解析自己负责的数据，但“启动多少实例”必须在 launch 边界之前决定。这是 Host 控制面与 Device 数据面的自然分工。
+
+### 3. `.so` 加载、schema 注册、backend 实现分别在哪一步？
+
+**答案：**它们组成从“代码存在”到“dispatcher 能调用”的三个阶段。
+
+1. 构建生成 shared library，其中包含 Host 函数、注册代码以及链接/嵌入的 device kernel。
+2. Python 执行 `torch.ops.load_library()` 加载 `.so`；加载过程运行 `TORCH_LIBRARY...` 静态注册代码。
+3. `m.def` 注册算子 schema，声明名称、参数、返回值和 alias/mutation 契约；`m.impl` 为 `PrivateUse1` 等 dispatch key 绑定实际 Host function。
+
+未加载 `.so` 时 namespace 下找不到该 op；只有 schema 没有对应 NPU implementation 时，调用 NPU tensor 会报 backend dispatch 错；实现存在但 schema 错时，则可能在参数绑定、图编译或 mutation 推理阶段出问题。
+
+### 4. `torch.ops.npu.*` 为什么不能单凭 namespace 判断源码归属？
+
+**答案：**namespace 是 dispatcher 的逻辑命名空间，不是仓库所有权标记。
+
+`torch_npu` 可以往 `npu` namespace 注册算子，`sgl-kernel-npu` 加载自己的 `.so` 后也可以使用 `TORCH_LIBRARY_FRAGMENT(npu,...)` 向同一 namespace 追加 schema。最终用户都写成 `torch.ops.npu.xxx`。
+
+要判断归属，应搜索具体 op 名称的 `m.def`、`m.impl`、shared library 加载位置和构建文件。只有这条证据链能说明实现来自哪个仓库，以及它最终进入 CANN 内置算子还是自定义 Ascend C kernel。
+
+### 5. 尾 tile 为什么不仅是一个 `min()` 就一定处理正确？
+
+**答案：**`min(tileLength, remaining)` 只算出了有效元素数，没有自动满足硬件搬运、计算和写回的全部约束。
+
+DataCopy 可能要求地址和字节数对齐；Vector API 可能按固定 block 处理；读取 padding 时需要安全值；输出只能写真实范围；bitmask、stride 或二维行尾还可能有各自的换算单位。如果直接把非对齐 `actual` 传给只支持对齐路径的 API，可能报错、越界或产生低效隐式处理。
+
+常见方案包括 Host padding、使用非对齐 DataCopy 参数、对齐搬入后用 mask 计算、或为尾块选择专门 kernel。正确性测试必须覆盖 `对齐值-1、对齐值、对齐值+1`，不能只测整 tile shape。
 
 ## 官方资料
 

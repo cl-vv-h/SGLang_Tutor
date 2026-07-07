@@ -186,14 +186,59 @@ Kernel 多核层：grid / blockDim 启动多个实例
 
 优化某一层不一定改善另一层。例如 kernel 快 10%，但它只占端到端时间的 2%，整体收益不足 0.2%；反过来，减少一次大 tensor 的中间写回可能同时降低 kernel 数和 GM 流量，收益会更明显。
 
-## 11. 本章检查点
+## 11. 本章检查点与参考答案
 
-- 能否用自己的话区分算子、算子工程和 device kernel？
-- `program` 为什么不是一个标量线程？
-- `grid=(1000,)` 是否表示设备有 1000 个物理核？
-- `tile` 为什么既不能无限增大，也不能无限缩小？
-- `blockDim` 和 `BLOCK_SIZE` 分别控制什么？
-- 为什么 transpose 后只看 shape 不够，还要看 stride？
+### 1. 能否用自己的话区分算子、算子工程和 device kernel？
+
+**答案：**三者分别回答“做什么”“怎样作为软件交付”“设备具体怎样执行”。
+
+- **算子语义**只描述数学关系，例如 `z = x + y` 或 RMSNorm。它不规定输出由谁分配、是否原地更新，也不规定使用多少个 NPU 核。
+- **算子工程**把数学语义变成可以被框架稳定调用的软件组件，包括 Python/C++ 接口、shape 和 dtype 检查、输出与 workspace 分配、tiling、设备分发、构建、注册、测试和版本兼容。
+- **device kernel**是算子工程中的设备侧执行程序。它接收已经准备好的地址和参数，在 AI Core 上完成搬运、计算与写回。
+
+三者不是一一对应关系。一个算子可能先后启动多个 kernel；一个融合 kernel 也可能同时完成 split、norm、activation 等多个算子语义。因此看到“减少了 kernel 数”不等于删除了数学步骤，而是把这些步骤放进更少的设备程序中执行。
+
+### 2. `program` 为什么不是一个标量线程？
+
+**答案：**Triton 的核心抽象是 **blocked program**。一个 program instance 通常用 `tl.arange` 生成一组索引，并对一整块元素执行 `load → compute → store`，而不是只负责一个标量。
+
+例如 `BLOCK_SIZE=256` 时，`pid=3` 的 program 可以一次表达 `[768,1024)` 这 256 个元素的计算。编译器再把这块计算降低到目标硬件的 Vector 指令、数据搬运和执行 lane。程序员面对的是 block tensor，硬件如何把 block 分发到更细粒度执行资源由后端负责。
+
+这与 CUDA 中“先从单线程标量代码出发，再由 thread block 组织线程”的常见心智模型不同。二者最终都利用大量并行硬件，但编程抽象的起点不同。
+
+### 3. `grid=(1000,)` 是否表示设备有 1000 个物理核？
+
+**答案：**不表示。`grid=(1000,)` 只表示这次 launch 的第 0 维包含 1000 个**逻辑 program instance**。
+
+如果设备只有几十个可执行此类任务的物理核，runtime 会把这些 program 分批调度到物理核上。一个物理核可以先执行 program 0，完成后再执行 program 40；逻辑 ID 只标识任务分片，不是稳定的硬件核编号。
+
+这也解释了为什么超大 grid 未必高效：逻辑任务过细时，调度、初始化和多轮下发的开销可能超过新增并行带来的收益。Triton-Ascend 中常见的另一种策略是只启动接近物理 Vector Core 数量的 program，让每个 program 在内部循环处理多个 tile。
+
+### 4. `tile` 为什么既不能无限增大，也不能无限缩小？
+
+**答案：**tile 大小同时影响片上存储、数据复用、并行度和固定开销，是一个资源平衡问题。
+
+- tile **太大**：可能放不进 UB/L1/L0；临时值和 accumulator 占用过高；可同时执行的 program 变少；尾块浪费也可能变大。
+- tile **太小**：DataCopy 粒度太碎；循环、地址计算和同步次数增加；每个 program 有效计算不足；Cube/Vector 基本块利用率降低。
+
+理想 tile 通常是“在满足对齐和硬件基本块的前提下，尽量增加复用与搬运粒度，但仍能放进 Local Memory，并保留足够多的并行任务”。它依赖 shape、dtype、硬件和同时存活的临时 tensor，不存在脱离场景的统一最优值。
+
+### 5. `blockDim` 和 `BLOCK_SIZE` 分别控制什么？
+
+**答案：**它们位于不同切分层次。
+
+- Ascend C launch 的 `blockDim` 控制启动多少个逻辑核实例。每个实例用 `GetBlockIdx()` 获得自己的编号，通常负责不同的行、token 或数据大分片。
+- Triton 示例中的 `BLOCK_SIZE` 通常是编译期 tile 大小，控制一个 program 通过 `tl.arange(0, BLOCK_SIZE)` 一次处理多少元素。
+
+前者更接近“把总任务分给多少个工人”，后者更接近“每个工人每一轮搬多少件货物”。虽然名字都有 `block`，但不能互换：增加 `blockDim` 不会自动增大每轮 tile，增大 `BLOCK_SIZE` 也不会自动增加物理核数量。
+
+### 6. 为什么 transpose 后只看 shape 不够，还要看 stride？
+
+**答案：**shape 只说明逻辑坐标空间，stride 才说明逻辑坐标如何映射到线性内存。
+
+一个 contiguous 的 `x[M,N]` 通常有 stride `[N,1]`，地址为 `base + i*N + j`。执行 `x.T` 后，view 的 shape 变为 `[N,M]`，stride 通常变为 `[1,N]`；数据没有真的搬家，只是地址解释改变了。
+
+如果 kernel 仍假设最后一维 stride 为 1，就会按错误顺序读取元素。解决方式有两类：把真实 stride 传给 kernel 并按它计算地址，或在 wrapper 中要求/生成 contiguous tensor。`shape 正确但值错位` 是典型的 stride 契约错误。
 
 ## 官方资料
 

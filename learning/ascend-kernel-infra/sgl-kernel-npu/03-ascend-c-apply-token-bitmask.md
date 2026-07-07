@@ -226,14 +226,58 @@ Reference 不需要快，它需要简单、独立、容易审查。
 
 这些是需要 benchmark 和 trace 回答的问题，不是读源码就能直接下结论。
 
-## 18. 本章检查点
+## 18. 本章检查点与参考答案
 
-- 为什么对齐单元恰好选 256 elements？
-- BlockDim 与 tileLength 分别按什么资源计算？
-- 三个 TQue 如何对应 CopyIn/Compute/CopyOut？
-- `record_stream` 解决什么类型的正确性问题？
-- 为什么 `packed == -1` 可以快速跳过？
-- 从哪里能证明 `torch.ops.npu.apply_token_bitmask` 属于 sgl-kernel-npu？
+### 1. 为什么对齐单元恰好选 256 elements？
+
+**答案：**它同时让 logits 和 packed bitmask 的一段数据满足 32 字节搬运粒度。
+
+Bitmask 每个 INT32 表示 32 个 vocabulary position。256 个 position 对应 `256/32=8` 个 INT32，也就是 `8×4=32` 字节。Logits 一侧，256 个 FP16/BF16 是 512 字节，FP32 是 1024 字节，也都能被 32 字节整除。
+
+所以 256 是两种输入表示的公共友好粒度，而不是 NPU 对所有 tensor 的普适 tile。换一种 bit packing 或 dtype 集合，合适的共同对齐单元可能不同。
+
+### 2. BlockDim 与 tileLength 分别按什么资源计算？
+
+**答案：**BlockDim 主要按可用 AIV 核数与行任务数计算，tileLength 主要按单核 UB 容量和每 tile 同时存活的 buffer 计算。
+
+Host 使用 `min(numRows,coreNum)`，避免启动比行数更多的核，并把多余行均匀分给各核。这解决核间并行与负载均衡。
+
+TileLength 则预算双缓冲的 logits input、bitmask input 和 logits output，扣除管理开销后用可用 UB 反推最大长度，再按 256 对齐并限制不超过 vocab。它解决单核一轮能安全搬入多少数据。一个控制“多少核”，另一个控制“每核每轮多少元素”。
+
+### 3. 三个 TQue 如何对应 CopyIn/Compute/CopyOut？
+
+**答案：**两个 VECIN Queue 连接 CopyIn 与 Compute，一个 VECOUT Queue 连接 Compute 与 CopyOut。
+
+CopyIn 分别为 logits 和 bitmask 分配 LocalTensor，完成 GM→UB 后 EnQue；Compute 从两个输入 Queue DeQue，生成 outLocal 并 EnQue 到输出 Queue，同时释放输入；CopyOut 从输出 Queue DeQue，执行 UB→GM，再释放输出。
+
+三条 Queue 把两输入一输出的数据依赖显式化。每条都分配两个 buffer，使相邻 tile 有机会在搬运、计算和写回之间形成 ping/pong 流水。
+
+### 4. `record_stream` 解决什么类型的正确性问题？
+
+**答案：**它解决 Host tensor 对象生命周期与异步 NPU 执行生命周期不一致导致的 storage 过早复用问题。
+
+Kernel launch 提交到 stream 后会立即返回 Host。局部 `workingLogits`/`workingBitmask` Python/C++ 引用可能很快离开作用域，但 NPU 仍在读取它们。Caching allocator 若不知道该 stream 仍使用 storage，可能把内存分配给其他 tensor，造成偶发数据污染。
+
+`record_stream` 告诉 allocator：这块 storage 在指定 NPU stream 完成相关工作前不能安全回收复用。它不替代算子间数据依赖同步，而是保护异步内存所有权。
+
+### 5. 为什么 `packed == -1` 可以快速跳过？
+
+**答案：**在二进制补码 INT32 中，`-1` 的 32 个 bit 全部为 1，即 `0xFFFFFFFF`。
+
+该算子约定 bit=1 表示保留对应 logit，因此一个 packed word 为 -1 时，这 32 个位置都无需修改。跳过内层逐 bit 检查与 `SetValue` 不会改变结果。
+
+这个优化依赖两个前提：bitmask dtype 是 INT32，语义确实是 1=保留。如果协议改成 1=屏蔽或使用其他位宽，快速路径条件也必须一起改变。
+
+### 6. 从哪里能证明 `torch.ops.npu.apply_token_bitmask` 属于 sgl-kernel-npu？
+
+**答案：**需要建立“加载、注册、实现、构建”四段证据链，不能只看 namespace。
+
+1. `sgl_kernel_npu/__init__.py` 加载包内 `libsgl_kernel_npu.so`。
+2. 本仓 `csrc/pytorch_extensions.cpp` 用 `m.def` 声明 `apply_token_bitmask`，并用 PrivateUse1 `m.impl` 绑定到 `sglang::npu_kernel::apply_token_bitmask`。
+3. Host 文件进一步通过 `EXEC_KERNEL_CMD` 启动本仓 `csrc/apply_token_bitmask/op_kernel/` 中的 FP16/FP32/BF16 Ascend C 入口。
+4. `csrc/CMakeLists.txt` 把 Host 和 device 源码编入 `libsgl_kernel_npu.so`。
+
+这四处共同证明实现归属。`torch.ops.npu` 只是注册后的调用名称，同一 namespace 也可以包含 torch_npu 或其他扩展注册的算子。
 
 ## 对应源码
 
