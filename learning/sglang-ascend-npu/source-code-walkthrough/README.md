@@ -166,7 +166,7 @@ flowchart TB
 | 12 | `12-speculative-decoding.md` | Speculative decoding | EAGLE/MTP、draft graph、tree build、verify、cache location |
 | 13 | `13-sampling-and-constrained-decoding.md` | Sampling / Constraint | top-k/top-p、greedy verify、token bitmask、grammar 分支 |
 | 14 | `14-model-specific-and-multimodal-components.md` | 模型与多模态适配 | Qwen/GLM/DeepSeek、processor、ViT graph、模型专用融合算子 |
-| 15 | `15-distributed-hccl-and-communication.md` | 分布式通信 | TP/EP group、HCCL、NPUCommunicator、collective 与压缩通信 |
+| 15 | [15-distributed-hccl-and-communication.md](./15-distributed-hccl-and-communication.md) | 分布式通信 | `LayerCommunicator`、TP/EP group、HCCL、NPUCommunicator、collective 与压缩通信 |
 | 16 | `16-pd-disaggregation-and-kv-transfer.md` | PD 与 KV 传输 | backend registry、transfer engine、sender/receiver、SDMA/RDMA |
 | 17 | `17-utility-kernels-and-memory-optimization.md` | 工具与内存优化 | lightning indexer、tri-inv、batch matmul、CMO/prefetch |
 | 18 | `18-build-registration-tests-and-cross-repo-development.md` | 构建与开发闭环 | wheel、custom op 注册、tests、benchmark、双仓联调与 PR 边界 |

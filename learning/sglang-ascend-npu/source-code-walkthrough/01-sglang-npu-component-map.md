@@ -186,7 +186,7 @@ csrc/
 | C11 | Speculative decoding | `speculative/`、EAGLE NPU graph runners | `sample/`、`speculative.py`、`csrc/build_tree` | 12 |
 | C12 | Sampling 与约束解码 | `layers/sampler.py`、`constrained/` | `sample/`、`apply_token_bitmask/`、`torch_npu` | 13 |
 | C13 | 模型专用与多模态适配 | `npu/modules/`、`models/` | MLA preprocess、batch matmul、模型专用算子 | 14 |
-| C14 | 分布式与 HCCL | `parallel_state.py`、`npu_communicator.py` | HCCL、`torch.distributed`、`torch_npu` | 15 |
+| C14 | 分布式与 HCCL | `layers/communicator.py`、`parallel_state.py`、`npu_communicator.py` | HCCL、`torch.distributed`、`torch_npu` | 15 |
 | C15 | PD 分离与 KV 传输 | `disaggregation/ascend/` | memfabric、SDMA/RDMA、KV transfer ops | 16 |
 | C16 | 工具算子与内存优化 | `npu/cmo.py`、模型 indexer 分支 | lightning indexer、tri-inv、batch matmul | 17 |
 | C17 | 构建、注册、测试与 benchmark | `pyproject_npu.toml`、SGLang tests | `build.sh`、CMake、`pytorch_extensions.cpp`、tests/benchmark | 18 |
