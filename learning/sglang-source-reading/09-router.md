@@ -2053,10 +2053,10 @@ routed experts capturer:
 
 ## 30. 下一讲预告
 
-下一讲可以继续看 **Structured Output / Grammar 约束生成**：
+下一讲继续深入 **独立 Rust `sgl-router` 源码**：
 
-- regex / JSON schema / grammar 如何进入请求；
-- grammar backend 如何初始化；
-- Scheduler 如何维护每个请求的 grammar 状态；
-- sampling 阶段如何用 grammar mask 限制 token；
-- grammar 约束如何影响 streaming、batching 和 speculative decoding。
+- 启动期如何组装 `TokenizerRegistry`、`WorkerRegistry`、`PolicyRegistry` 与 `KvEventIndex`；
+- discovery event 如何通过 worker manager 进入注册表；
+- `/v1/chat/completions` 如何选择 Plain / Prefill / Decode worker；
+- `cache_aware_zmq` 如何借助 tokenizer、KV event 和 `HashTree` 做 prefix cache-aware routing；
+- PD 分离场景下 prefill/decode 两个 worker 之间传递哪些 bootstrap 信息。

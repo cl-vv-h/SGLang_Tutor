@@ -14,7 +14,8 @@ flowchart TD
   F --> G["第 7 讲：Disaggregation / PD 分离"]
   G --> H["第 8 讲：LoRA Serving / Adapter 热加载"]
   H --> I["第 9 讲：Router 架构与源码解析"]
-  I --> J["第 10 讲：Structured Output / Grammar 约束生成"]
+  I --> J["第 10 讲：sgl-router 源码深潜"]
+  J --> K["后续：Structured Output / Grammar 约束生成"]
 ```
 
 ## 已生成内容
@@ -29,6 +30,7 @@ flowchart TD
 - [07-disaggregation-pd.md](./07-disaggregation-pd.md)：理解 Prefill/Decode 分离部署、bootstrap/prealloc/transfer 队列、KV sender/receiver 和 transfer backend。
 - [08-lora-serving.md](./08-lora-serving.md)：理解 LoRA adapter 注册、热加载/卸载、Scheduler 混批约束、LoRAMemoryPool、LoRABatchInfo 和 LoRA kernel 执行路径。
 - [09-router.md](./09-router.md)：理解 SGLang 中多层 router 的含义，包括 SmartRouter、调度模拟路由、PD bootstrap route、MoE expert router 和 routed experts 返回链路。
+- [10-sgl-router-source-deep-dive.md](./10-sgl-router-source-deep-dive.md)：深入阅读 `experimental/sgl-router`，讲清楚启动期 discovery、worker registry、KV-aware routing、PD prefill/decode 调度、Proxy/SSE 与 SGLang worker 的通信边界。
 
 ## 怎么使用这些笔记
 
