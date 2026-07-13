@@ -78,7 +78,9 @@ chmod +x "$PERF_ROOT/scripts/env.sh"
 | 模型 | 模型路径、参数规模、dtype、量化方式。 |
 | 启动参数 | `--device npu`、`--attention-backend ascend`、`--tp-size`、graph、chunked prefill、PD 参数。 |
 | workload | prompt 长度、输出长度、并发、request rate、请求数、streaming。 |
-| 结果 | QPS、input tokens/s、output tokens/s、TTFT、ITL、P50/P95/P99、error rate。 |
+| 结果 | QPS、request rate、concurrency、input tokens/s、output tokens/s、total tokens/s、TTFT、TPOT、ITL、P50/P95/P99、error rate、timeout rate、SLA goodput。 |
+| 服务端状态 | running batch size、queue length、graph 命中、KV cache 使用率、prefix cache 命中率。 |
+| 资源与通信 | NPU 利用率、HBM 使用量、HCCL 时间、KV transfer 时间、router/worker timeout。 |
 
 建议每次压测前保存服务启动命令：
 
@@ -88,17 +90,147 @@ ps -ef | grep -E "sglang serve|sgl-router" | grep -v grep | tee "$LOG_ROOT/perf/
 
 ### 0.3 性能指标解释
 
-| 指标 | 含义 | 优先关联路径 |
-|---|---|---|
-| QPS | 每秒完成请求数 | 调度、batching、服务总体容量。 |
-| input tokens/s | 每秒处理输入 token | prefill attention、chunked prefill、KV 写入。 |
-| output tokens/s | 每秒生成输出 token | decode attention、NPU graph、sampler。 |
-| TTFT | 首 token 延迟 | 排队、prefill、router、PD transfer。 |
-| ITL | token 间延迟 | decode kernel、graph replay、batch 稳定性。 |
-| P95/P99 latency | 尾延迟 | 抖动、OOM retry、HCCL、router upstream timeout。 |
-| error rate | 请求失败率 | OOM、timeout、worker crash、router 状态。 |
+性能指标不要只看一个平均值。SGLang 推理服务至少要同时观察 **请求级延迟**、**token 级吞吐**、**流式生成体验**、**调度与缓存状态**、**NPU/HCCL/网络资源**。同一个 QPS 结果，可能对应“低延迟稳定服务”，也可能对应“高并发堆积后的尾延迟失控”，所以必须成组解读。
 
-短输入短输出主要看 serving overhead；长输入短输出主要看 prefill；短输入长输出主要看 decode；长输入长输出会同时放大 prefill 和 decode。
+#### 0.3.1 请求级指标
+
+| 指标 | 常见写法 | 含义 | 怎么计算 | 优先关联路径 |
+|---|---|---|---|---|
+| 请求数 | requests、num prompts | 本轮压测发出的总请求数。 | 压测脚本输入。 | workload 规模。 |
+| 成功请求数 | ok、success | 正常返回的请求数。 | HTTP 2xx 且响应可解析。 | 服务稳定性。 |
+| 失败请求数 | failed、errors | 超时、连接失败、HTTP 错误、worker crash、router upstream error 等失败请求。 | `failed = total - ok`。 | OOM、timeout、router、worker。 |
+| 错误率 | error rate | 失败请求占比。 | `failed / total`。 | 容量上限、OOM、超时、服务崩溃。 |
+| QPS | requests/s、RPS | 每秒完成的成功请求数，衡量服务整体请求吞吐。 | `ok_requests / elapsed_s`。 | scheduler、batching、router、整体容量。 |
+| 请求注入速率 | request rate、arrival rate | 压测端每秒向服务发起多少请求。 | 压测器控制值。 | 是否接近线上流量模型。 |
+| 并发数 | concurrency、in-flight requests | 同一时刻最多有多少请求在服务端处理中或排队。 | 压测器控制值，也可从服务日志观察。 | batch 形成、排队、显存/KV cache 压力。 |
+| 端到端延迟 | latency、E2E latency | 从客户端发出请求到收到完整响应的时间。非流式压测最容易采到这个指标。 | `response_done_time - request_start_time`。 | 排队、prefill、decode、网络、序列化。 |
+| 平均延迟 | avg latency、mean latency | 所有成功请求端到端延迟的平均值。 | `sum(latency) / ok_requests`。 | 粗略趋势。 |
+| 中位延迟 | P50 latency、median | 50% 请求不超过该延迟，表示典型用户体验。 | latency 排序后取 50 分位。 | 常规体验。 |
+| 尾延迟 | P90/P95/P99 latency | 90%、95%、99% 请求不超过该延迟，表示慢请求和抖动。 | latency 排序后取对应分位。 | HCCL、OOM retry、graph miss、router、KV transfer。 |
+| 最大延迟 | max latency | 本轮最慢请求耗时。 | `max(latency)`。 | 极端抖动、单点阻塞。 |
+| 超时率 | timeout rate | 因客户端或服务端 timeout 失败的比例。 | `timeout_requests / total`。 | SLA、router upstream timeout、服务饱和。 |
+
+`QPS` 和 `request rate` 容易混淆：`request rate` 是压测器“发出去”的速度，`QPS` 是服务“成功完成”的速度。当 request rate 高于系统容量时，QPS 会变平，而 P95/P99 和 timeout rate 会快速上升。
+
+#### 0.3.2 流式生成体验指标
+
+在线大模型服务通常使用 streaming。流式场景下，端到端 latency 不能完整描述用户体验，还要拆成首 token 和后续 token。
+
+| 指标 | 常见写法 | 含义 | 怎么计算 | 优先关联路径 |
+|---|---|---|---|---|
+| 首 token 延迟 | TTFT、time to first token | 客户端发出请求到收到第一个输出 token 的时间。 | `first_token_time - request_start_time`。 | 排队、prefill、chunked prefill、router、PD KV transfer。 |
+| token 间延迟 | ITL、inter-token latency | 相邻两个输出 token 到达客户端的时间间隔。 | `token_i_time - token_(i-1)_time`。 | decode kernel、NPU graph、sampler、batch 稳定性。 |
+| 每输出 token 时间 | TPOT、time per output token | 输出阶段平均每个 token 消耗的时间，常用来衡量 decode 体验。 | `(last_token_time - first_token_time) / max(output_tokens - 1, 1)`。 | decode attention、MoE、graph replay。 |
+| 生成阶段延迟 | generation latency | 首 token 之后到完整输出结束的耗时。 | `response_done_time - first_token_time`。 | decode 长输出性能。 |
+| 首 token P95/P99 | P95 TTFT、P99 TTFT | 首 token 的尾延迟。 | 对所有请求 TTFT 取分位。 | prefill 抖动、排队、PD transfer。 |
+| TPOT P95/P99 | P95 TPOT、P99 TPOT | 每请求平均输出 token 时间的尾部分位。 | 对每个请求 TPOT 取分位。 | decode 抖动、graph miss、HCCL。 |
+| ITL P95/P99 | P95 ITL、P99 ITL | 单 token 间隔的尾部分位。 | 汇总所有 token 间隔后取分位。 | decode step 抖动、batch 变化。 |
+
+非流式请求只能准确得到端到端 latency 和 tokens/s，不能准确拆出 TTFT/ITL/TPOT。要测这些指标，压测脚本必须打开 `stream=true`，并记录每个 chunk 到达时间。做 SGLang-NPU 性能结论时，建议至少跑一组 streaming workload，否则无法判断用户首字响应和连续出字体验。
+
+#### 0.3.3 token 吞吐指标
+
+token 吞吐比 QPS 更适合比较不同输入/输出长度下的模型执行能力。
+
+| 指标 | 常见写法 | 含义 | 怎么计算 | 优先关联路径 |
+|---|---|---|---|---|
+| 输入 token 吞吐 | input tokens/s、prompt tok/s | 每秒处理多少 prompt/input token。主要衡量 prefill 能力。 | `sum(prompt_tokens) / elapsed_s`。 | prefill attention、chunked prefill、KV 写入、prefix cache。 |
+| 输出 token 吞吐 | output tokens/s、decode tok/s | 每秒生成多少 completion/output token。主要衡量 decode 能力。 | `sum(completion_tokens) / elapsed_s`。 | decode attention、NPU graph、sampler、MoE。 |
+| 总 token 吞吐 | total tokens/s | 输入 token 和输出 token 合计吞吐。 | `(prompt_tokens + completion_tokens) / elapsed_s`。 | 总体算力利用。 |
+| 单卡 token 吞吐 | tokens/s/card | 平均到每张 NPU 的 token 吞吐。 | `tokens/s / npu_count`。 | 多卡扩展效率。 |
+| prefill 吞吐 | prefill tokens/s | prefill 阶段每秒处理 prompt token 的速度。 | `prefill_tokens / prefill_time`。 | 长输入、chunked prefill、attention backend。 |
+| decode 吞吐 | decode tokens/s | decode 阶段每秒产出 token 的速度。 | `generated_tokens / decode_time`。 | 长输出、graph、batch 稳定性。 |
+| 平均输入长度 | avg input tokens | 每个请求平均 prompt token 数。 | `sum(prompt_tokens) / ok_requests`。 | workload 是否一致。 |
+| 平均输出长度 | avg output tokens | 每个请求平均 completion token 数。 | `sum(completion_tokens) / ok_requests`。 | decode 压力是否一致。 |
+| 有效 token 吞吐 | useful tokens/s | 去掉失败请求、warmup、padding 后的有效吞吐。 | 按报告口径定义。 | 真实业务收益。 |
+
+同一个 QPS 下，`短输入短输出` 和 `长输入长输出` 的 token 计算量完全不同。因此比较优化前后性能时，要固定输入/输出长度，并同时报告 QPS、input tokens/s、output tokens/s。
+
+#### 0.3.4 调度、batch 与缓存指标
+
+这些指标通常来自 SGLang 服务日志、metrics endpoint 或 profiling，不一定由简单 HTTP 压测脚本直接产生。
+
+| 指标 | 含义 | 为什么重要 | 优先关联路径 |
+|---|---|---|---|
+| 排队时间 | 请求进入服务后等待 scheduler 处理的时间。 | 高并发下 TTFT 可能主要花在排队，而不是模型计算。 | scheduler、router、worker 负载。 |
+| active requests | 当前正在处理的请求数。 | 判断服务是否饱和、batch 是否稳定。 | scheduler。 |
+| waiting requests | 当前等待调度的请求数。 | 队列持续增长说明 request rate 超过容量。 | scheduler、router。 |
+| running batch size | 单次 forward 中包含的请求数。 | batch 太小会导致 NPU 利用率不足，太大可能增加尾延迟。 | batching、graph shape。 |
+| batch token 数 | 单次 forward 中的 token 数。 | prefill 看 input token，decode 通常每请求 1 个 query token。 | prefill/decode 调度。 |
+| prefill/decode 混合比例 | batch 中 prefill 与 decode 工作占比。 | chunked prefill 或长 prompt 会影响 decode 出字稳定性。 | scheduler、chunked prefill。 |
+| graph 命中率 | decode 或固定 shape 是否命中 NPU Graph replay。 | graph miss 会让 decode 退回 eager，ITL 抖动。 | NPU Graph runner。 |
+| KV cache 使用率 | KV pool 已使用 block/page 占比。 | 接近上限时容易出现抢占、OOM 或请求失败。 | memory pool、radix cache。 |
+| prefix cache 命中率 | prompt 前缀复用命中比例。 | 命中后 input tokens/s、TTFT 会显著变化，必须单独记录。 | radix cache、prefix cache。 |
+| cache eviction 次数 | KV/radix cache 被淘汰次数。 | 淘汰过多会造成重复 prefill 和延迟抖动。 | cache policy。 |
+
+如果只看客户端 latency，很难区分“模型算得慢”和“请求排队久”。做瓶颈归因时，应把客户端压测结果和服务端 scheduler 日志放在一起看。
+
+#### 0.3.5 NPU 与系统资源指标
+
+资源指标用于解释为什么吞吐没有继续提升。
+
+| 指标 | 含义 | 解读方式 |
+|---|---|---|
+| NPU 利用率 | NPU AI Core/计算单元忙碌程度。 | 利用率低且 QPS 低，可能是 batch 太小、CPU 调度或通信阻塞。 |
+| HBM/显存使用量 | 模型权重、KV cache、临时 buffer 占用。 | 接近上限时关注 OOM、KV cache eviction、batch 限制。 |
+| HBM 带宽 | NPU 高带宽内存读写压力。 | RMSNorm、KV cache、MoE、采样等可能受带宽影响。 |
+| AICPU/Host 开销 | CPU/AICPU 辅助任务耗时。 | tokenization、JSON、采样后处理、shape 调度可能造成 overhead。 |
+| kernel 时间占比 | NPU 算子在 timeline 中的耗时比例。 | 判断瓶颈在 attention、MLP/MoE、norm、sampler 还是 cache。 |
+| HCCL 通信时间 | all-reduce/all-gather/reduce-scatter 耗时。 | TP/CP/DP 扩展效率低时重点看。 |
+| HCCL 等待时间 | 设备等待其它 rank 到达 collective 的时间。 | rank 不均衡、batch 分布不均或某卡慢会放大尾延迟。 |
+| Host CPU 使用率 | 服务进程 CPU 消耗。 | 高 CPU 可能导致调度、HTTP、tokenizer 或日志成为瓶颈。 |
+| 网络带宽 | 跨机 PD、router、KV transfer 的网络吞吐。 | PD multi-node 中 TTFT/P99 异常时重点看。 |
+| 磁盘/模型加载耗时 | cold start 和首次请求相关耗时。 | 不应混入 steady-state 性能。 |
+
+资源指标必须和 workload 一起解读。短输入短输出场景中 CPU/HTTP overhead 占比会更高；长输入场景中 prefill attention 和 KV 写入占比更高；长输出场景中 decode graph、attention、sampler 和 HCCL 更关键。
+
+#### 0.3.6 分布式与 PD 分离指标
+
+多卡和 PD 分离场景下，单机单进程指标不够，需要额外观察跨 rank、跨服务的指标。
+
+| 指标 | 含义 | 适用场景 | 优先关联路径 |
+|---|---|---|---|
+| TP 扩展效率 | TP 从 1 增加到 N 后，吞吐提升接近多少。 | TP2/TP4/TP8 对比。 | HCCL、算子切分、batch size。 |
+| 单 rank 耗时差异 | 不同 TP rank 同一阶段耗时是否一致。 | 多卡 profiling。 | rank/device 映射、负载不均。 |
+| all-reduce 时间 | TP/attention/MoE all-reduce 总耗时。 | TP 性能分析。 | `LayerCommunicator`、linear/MoE row-parallel。 |
+| all-gather 时间 | token 或 latent gather 耗时。 | DP attention、CP、attn input scattered。 | `LayerCommunicator`、DP/CP。 |
+| reduce-scatter 时间 | 汇总并切分输出的耗时。 | DP padding、CP、部分 MoE。 | `should_use_reduce_scatter`。 |
+| router 排队时间 | 请求在 router 等待可用 worker 的时间。 | PD 或多实例 serving。 | router 调度。 |
+| prefill worker 时间 | prefill server 从收到请求到完成 KV 发送的时间。 | PD 分离。 | prefill attention、KV 写入、KV transfer。 |
+| decode worker 时间 | decode server 等待 KV 并生成输出的时间。 | PD 分离。 | KV 接收、decode batch、graph。 |
+| KV transfer 时间 | prefill 到 decode 的 KV 传输耗时。 | PD 分离、跨机。 | `ASCEND_MF_*`、SDMA/RDMA、网络。 |
+| upstream timeout | router 调用 worker 超时次数。 | PD 或多 worker。 | worker 健康、网络、服务饱和。 |
+
+PD 的性能不能只看总 QPS。常见情况是 TTFT 因 prefill 独立扩容而下降，但 P99 因 router 或 KV transfer 抖动上升；也可能 prefill 很快，decode worker 数量不足导致 output tokens/s 下降。
+
+#### 0.3.7 派生效率指标
+
+派生指标用于比较配置或 PR 的收益，但它们依赖前面的基础指标，不能单独使用。
+
+| 指标 | 含义 | 公式或口径 | 适用问题 |
+|---|---|---|---|
+| SLA goodput | 满足延迟 SLA 的成功请求吞吐。 | `latency <= SLA` 的成功请求数 / elapsed。 | “吞吐高但尾延迟不可用”时更可信。 |
+| token goodput | 满足 TTFT/TPOT SLA 的输出 token 吞吐。 | 满足 SLA 请求的 output tokens / elapsed。 | 流式服务体验。 |
+| TP scaling efficiency | 多卡扩展效率。 | `throughput_TPN / (throughput_TP1 * N)`。 | 判断 TP 是否被 HCCL 或 batch 限制。 |
+| graph speedup | NPU Graph 带来的加速比。 | `eager_latency / graph_latency` 或 `graph_tokens/s / eager_tokens/s`。 | graph 是否值得打开。 |
+| prefill/decode 时间占比 | 请求耗时中 prefill 与 decode 的比例。 | profiling 或服务日志统计。 | 判断优化方向。 |
+| 每百万 token NPU 小时 | 处理固定 token 量消耗多少 NPU 时间。 | `npu_count * elapsed_hours / (tokens / 1e6)`。 | 成本评估。 |
+| 性能回归百分比 | 新旧版本差异。 | `(new - old) / old`，延迟类越低越好，吞吐类越高越好。 | PR 验证。 |
+
+报告性能收益时要说明指标方向：吞吐、goodput、利用率越高越好；延迟、错误率、超时率、NPU 小时/token 越低越好。不要把这些指标混成一个“综合分数”，否则很难定位真实瓶颈。
+
+#### 0.3.8 四象限 workload 与指标优先级
+
+| Workload | 最优先指标 | 次级指标 | 常见瓶颈 |
+|---|---|---|---|
+| 短输入短输出 | QPS、P50/P95 latency、error rate | CPU 使用率、scheduler 排队 | HTTP/JSON、调度、batch 太小。 |
+| 长输入短输出 | input tokens/s、TTFT、P95 TTFT | KV cache 使用率、chunked prefill 日志 | prefill attention、KV 写入、prefix cache。 |
+| 短输入长输出 | output tokens/s、TPOT、ITL P95/P99 | graph 命中率、sampler 耗时 | decode attention、NPU Graph、batch 稳定性。 |
+| 长输入长输出 | TTFT、output tokens/s、P99 latency、error rate | HBM 使用、HCCL、KV cache | prefill + decode 互相干扰，内存压力。 |
+| TP 多卡 | tokens/s/card、TP scaling efficiency、HCCL 时间 | rank 耗时差异、P99 | all-reduce、all-gather、rank 不均衡。 |
+| PD 分离 | TTFT、P95/P99、KV transfer time | router queue、worker timeout | router、KV 传输、decode worker 不足。 |
+
+短输入短输出主要看 serving overhead；长输入短输出主要看 prefill；短输入长输出主要看 decode；长输入长输出会同时放大 prefill 和 decode。只有把 workload 类型和指标优先级绑定起来，性能结论才不会跑偏。
 
 ## 1. 启动性能测试服务
 
@@ -533,8 +665,8 @@ python3 "$PERF_ROOT/scripts/summarize_reports.py"
 
 ## 结果
 
-| case | ok | failed | QPS | input tok/s | output tok/s | P95 |
-|---|---:|---:|---:|---:|---:|---:|
+| case | ok | failed | QPS | input tok/s | output tok/s | TTFT P95 | TPOT P95 | P95 latency | error rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 
 ## 结论
 
@@ -546,4 +678,4 @@ python3 "$PERF_ROOT/scripts/summarize_reports.py"
 
 ## 本讲小结
 
-性能测试的核心是可复现：固定模型、启动参数、workload 和结果格式。SGLang-NPU 的性能分析要把 prefill、decode、batching、graph、TP/HCCL、PD/router/KV transfer 分开观察。性能结论不要只看平均 QPS，必须同时看 tokens/s、TTFT、P95/P99、error rate 和服务日志。发现瓶颈后，再进入第 12 讲 profiling 做 timeline 级归因。
+性能测试的核心是可复现：固定模型、启动参数、workload 和结果格式。SGLang-NPU 的性能分析要把 prefill、decode、batching、graph、TP/HCCL、PD/router/KV transfer 分开观察。性能结论不要只看平均 QPS，必须同时看 input/output tokens/s、TTFT、TPOT、ITL、P95/P99、error rate、timeout rate、SLA goodput、资源指标和服务日志。发现瓶颈后，再进入第 12 讲 profiling 做 timeline 级归因。
