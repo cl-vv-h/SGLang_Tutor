@@ -30,21 +30,24 @@
 
 目录：[`learning/sglang-source-reading/`](./learning/sglang-source-reading/)
 
-这个专题按 SGLang online serving 的真实执行链路展开，从 HTTP 请求进入，到 Scheduler 调度、KV Cache、ModelRunner、分布式、PD 分离、LoRA 和 Router。适合在读 `python/sglang/srt/` 源码时作为总导航。
+这个专题按 SGLang online serving 的真实执行链路展开，并已经按源码层次归档：全局组件、入口/路由、调度运行时、KV/cache、模型执行、layer/通信和高级特性。适合在读 `python/sglang/srt/` 源码时作为总导航。
 
-| 讲次 | 文件 | 摘要 |
+| 层级 | 文件 | 摘要 |
 |---|---|---|
 | 入口 | [`README.md`](./learning/sglang-source-reading/README.md) | 源码阅读路线、使用方法、CodeGraph 校准说明。 |
-| 第 0 讲 | [`00-feature-map.md`](./learning/sglang-source-reading/00-feature-map.md) | SGLang 特性地图，解释 dLLM、HiCache、PD disaggregation、Speculative Decoding、LoRA 等概念。 |
-| 第 1 讲 | [`01-request-lifecycle.md`](./learning/sglang-source-reading/01-request-lifecycle.md) | 一次 `/v1/chat/completions` 请求从 HTTP 入口、tokenize、Scheduler、GPU forward 到返回响应的完整生命周期。 |
-| 第 2 讲 | [`02-scheduler-core.md`](./learning/sglang-source-reading/02-scheduler-core.md) | Scheduler 如何排队、组 prefill/decode batch，并支撑 continuous batching。 |
-| 第 3 讲 | [`03-kv-cache-radix-cache.md`](./learning/sglang-source-reading/03-kv-cache-radix-cache.md) | KV cache memory pool、Radix prefix cache、HiCache 与 Scheduler 的协作方式。 |
-| 第 4 讲 | [`04-model-runner-attention.md`](./learning/sglang-source-reading/04-model-runner-attention.md) | `ForwardBatch`、`ModelRunner`、`RadixAttention` 与 attention backend 如何读写 KV cache。 |
-| 第 5 讲 | [`05-speculative-decoding.md`](./learning/sglang-source-reading/05-speculative-decoding.md) | Draft/target verify、`spec_info`、EAGLE/NGRAM、spec v1/v2 与接受 token 后处理。 |
-| 第 6 讲 | [`06-multiprocess-distributed.md`](./learning/sglang-source-reading/06-multiprocess-distributed.md) | Engine 如何拉起 Tokenizer/Scheduler/Detokenizer，TP/PP/DP/DP attention 如何组织 rank 与通信。 |
-| 第 7 讲 | [`07-disaggregation-pd.md`](./learning/sglang-source-reading/07-disaggregation-pd.md) | Prefill/Decode 分离部署、bootstrap/prealloc/transfer 队列、KV sender/receiver 与 transfer backend。 |
-| 第 8 讲 | [`08-lora-serving.md`](./learning/sglang-source-reading/08-lora-serving.md) | LoRA adapter 注册、热加载/卸载、Scheduler 混批约束、LoRA memory pool 和 LoRA kernel。 |
-| 第 9 讲 | [`09-router.md`](./learning/sglang-source-reading/09-router.md) | SGLang 中多层 router 的含义，包括 SmartRouter、PD bootstrap route、MoE expert router 和 Rust `sgl-router`。 |
+| 全局总览 | [`00-overview/01-public-components-code-walkthrough.md`](./learning/sglang-source-reading/00-overview/01-public-components-code-walkthrough.md) | SGLang 高频公共组件、调用关系、关键函数定位和端到端 code walkthrough。 |
+| 特性地图 | [`00-overview/00-feature-map.md`](./learning/sglang-source-reading/00-overview/00-feature-map.md) | SGLang 特性地图，解释 dLLM、HiCache、PD disaggregation、Speculative Decoding、LoRA 等概念。 |
+| 入口/路由 | [`01-entry-routing/01-request-lifecycle.md`](./learning/sglang-source-reading/01-entry-routing/01-request-lifecycle.md) | 一次 `/v1/chat/completions` 请求从 HTTP 入口、tokenize、Scheduler、GPU forward 到返回响应的完整生命周期。 |
+| 入口/路由 | [`01-entry-routing/09-router.md`](./learning/sglang-source-reading/01-entry-routing/09-router.md) | SGLang 中多层 router 的含义，包括 SmartRouter、PD bootstrap route、MoE expert router 和 Rust `sgl-router`。 |
+| 入口/路由 | [`01-entry-routing/10-sgl-router-source-deep-dive.md`](./learning/sglang-source-reading/01-entry-routing/10-sgl-router-source-deep-dive.md) | Rust `sgl-router` 的 discovery、worker registry、KV-aware routing、PD 调度、Proxy/SSE 通信边界。 |
+| 调度运行时 | [`02-scheduler-runtime/02-scheduler-core.md`](./learning/sglang-source-reading/02-scheduler-runtime/02-scheduler-core.md) | Scheduler 如何排队、组 prefill/decode batch，并支撑 continuous batching。 |
+| 调度运行时 | [`02-scheduler-runtime/06-multiprocess-distributed.md`](./learning/sglang-source-reading/02-scheduler-runtime/06-multiprocess-distributed.md) | Engine 如何拉起 Tokenizer/Scheduler/Detokenizer，TP/PP/DP/DP attention 如何组织 rank 与通信。 |
+| 缓存/内存 | [`03-cache-memory/03-kv-cache-radix-cache.md`](./learning/sglang-source-reading/03-cache-memory/03-kv-cache-radix-cache.md) | KV cache memory pool、Radix prefix cache、HiCache 与 Scheduler 的协作方式。 |
+| 模型执行 | [`04-model-execution/04-model-runner-attention.md`](./learning/sglang-source-reading/04-model-execution/04-model-runner-attention.md) | `ForwardBatch`、`ModelRunner`、`RadixAttention` 与 attention backend 如何读写 KV cache。 |
+| Layer/通信 | [`05-layer-communication/01-layer-communicator-and-common-layers.md`](./learning/sglang-source-reading/05-layer-communication/01-layer-communicator-and-common-layers.md) | DecoderLayer、LayerCommunicator、TP/EP/CP 通信、attention backend、linear/MoE kernel 的配合。 |
+| 高级特性 | [`06-advanced-features/05-speculative-decoding.md`](./learning/sglang-source-reading/06-advanced-features/05-speculative-decoding.md) | Draft/target verify、`spec_info`、EAGLE/NGRAM、spec v1/v2 与接受 token 后处理。 |
+| 高级特性 | [`06-advanced-features/07-disaggregation-pd.md`](./learning/sglang-source-reading/06-advanced-features/07-disaggregation-pd.md) | Prefill/Decode 分离部署、bootstrap/prealloc/transfer 队列、KV sender/receiver 与 transfer backend。 |
+| 高级特性 | [`06-advanced-features/08-lora-serving.md`](./learning/sglang-source-reading/06-advanced-features/08-lora-serving.md) | LoRA adapter 注册、热加载/卸载、Scheduler 混批约束、LoRA memory pool 和 LoRA kernel。 |
 
 ## 2. AI Infra 基础专题
 
@@ -128,11 +131,12 @@
 如果你是第一次读这个仓库，建议按下面节奏走：
 
 1. 先读 [`learning/ai-infra-basic/Inference_Basics/README.md`](./learning/ai-infra-basic/Inference_Basics/README.md)，建立 prefill/decode、KV cache、batching、吞吐和延迟的基础模型。
-2. 再读 [`learning/sglang-source-reading/01-request-lifecycle.md`](./learning/sglang-source-reading/01-request-lifecycle.md)，把一次请求的主链路串起来。
-3. 接着读 Scheduler、KV Cache、ModelRunner 三讲：[`02-scheduler-core.md`](./learning/sglang-source-reading/02-scheduler-core.md)、[`03-kv-cache-radix-cache.md`](./learning/sglang-source-reading/03-kv-cache-radix-cache.md)、[`04-model-runner-attention.md`](./learning/sglang-source-reading/04-model-runner-attention.md)。
+2. 再读 [`learning/sglang-source-reading/00-overview/01-public-components-code-walkthrough.md`](./learning/sglang-source-reading/00-overview/01-public-components-code-walkthrough.md)，建立公共组件和调用层次。
+3. 接着读请求生命周期、Scheduler、KV Cache、ModelRunner 四讲：[`01-request-lifecycle.md`](./learning/sglang-source-reading/01-entry-routing/01-request-lifecycle.md)、[`02-scheduler-core.md`](./learning/sglang-source-reading/02-scheduler-runtime/02-scheduler-core.md)、[`03-kv-cache-radix-cache.md`](./learning/sglang-source-reading/03-cache-memory/03-kv-cache-radix-cache.md)、[`04-model-runner-attention.md`](./learning/sglang-source-reading/04-model-execution/04-model-runner-attention.md)。
 4. 想深入执行层，就进入 [`learning/tp-worker-model-runner/`](./learning/tp-worker-model-runner/)；想深入调度层，就进入 [`learning/scheduler-architecture/`](./learning/scheduler-architecture/)。
-5. 想学习高级 serving 优化，再读 [`05-speculative-decoding.md`](./learning/sglang-source-reading/05-speculative-decoding.md)、[`07-disaggregation-pd.md`](./learning/sglang-source-reading/07-disaggregation-pd.md)、[`08-lora-serving.md`](./learning/sglang-source-reading/08-lora-serving.md)、[`09-router.md`](./learning/sglang-source-reading/09-router.md)。
-6. 如果目标是 Ascend NPU 部署和优化，按 [`learning/sglang-ascend-npu/README.md`](./learning/sglang-ascend-npu/README.md) 中的 0 到 15 讲顺序推进。
+5. 想学习 layer 级通信和 kernel 组织，读 [`01-layer-communicator-and-common-layers.md`](./learning/sglang-source-reading/05-layer-communication/01-layer-communicator-and-common-layers.md)。
+6. 想学习高级 serving 优化，再读 [`05-speculative-decoding.md`](./learning/sglang-source-reading/06-advanced-features/05-speculative-decoding.md)、[`07-disaggregation-pd.md`](./learning/sglang-source-reading/06-advanced-features/07-disaggregation-pd.md)、[`08-lora-serving.md`](./learning/sglang-source-reading/06-advanced-features/08-lora-serving.md)、[`09-router.md`](./learning/sglang-source-reading/01-entry-routing/09-router.md)。
+7. 如果目标是 Ascend NPU 部署和优化，按 [`learning/sglang-ascend-npu/README.md`](./learning/sglang-ascend-npu/README.md) 中的 0 到 15 讲顺序推进。
 
 ## 与 SGLang 原项目的关系
 

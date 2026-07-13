@@ -186,8 +186,8 @@ sequenceDiagram
 
 建议先读：
 
-- `learning/sglang-source-reading/01-request-lifecycle.md`
-- `learning/sglang-source-reading/04-model-runner-attention.md`
+- `learning/sglang-source-reading/01-entry-routing/01-request-lifecycle.md`
+- `learning/sglang-source-reading/04-model-execution/04-model-runner-attention.md`
 - `learning/tp-worker-model-runner/01-architecture.md`
 
 读完后应该能回答：
