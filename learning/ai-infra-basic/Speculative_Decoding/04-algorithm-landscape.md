@@ -286,8 +286,22 @@ small batch             -> 更深 speculation 可能更划算
 自适应策略会根据近期接受长度动态选择 step tier：
 
 ```text
-EMA_accept_len <- smooth(observed_accept_len)
-target_steps   <- clamp(round(EMA_accept_len) + 1, allowed_tiers)
+近期平均接受长度 <- 用 EMA 平滑每轮观测到的 accepted length
+目标 draft 深度   <- 近期平均接受长度 + 1，再限制到允许的候选档位
+```
+
+也可以写成更短的符号形式：
+
+```text
+EMA_accept_len = smooth(observed_accept_len)
+target_steps   = clamp(round(EMA_accept_len) + 1, allowed_tiers)
+```
+
+读法：
+
+```text
+如果最近经常能接受 3 个 draft token，就可以尝试把 draft 深度调到 4 左右；
+如果最近经常只接受 0 或 1 个，就降低 draft 深度，避免浪费。
 ```
 
 常见保护机制：
