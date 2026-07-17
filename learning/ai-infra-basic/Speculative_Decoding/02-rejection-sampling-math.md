@@ -50,6 +50,82 @@ C 出现 20%
 再把削掉的位置补给 target 更喜欢的 token。
 ```
 
+### 1.2 拒绝采样到底在做什么
+
+拒绝采样不是在判断“draft token 对不对”。它做的是概率校正。
+
+更具体地说，draft 先用便宜模型提出一个 token。这个 token 有两种可能：
+
+```text
+1. target 也认可它:
+   直接接受 draft token，省掉一次 target 逐步生成。
+
+2. target 不够认可它:
+   拒绝 draft token，然后从 target 还缺的概率里重新采样一个 correction token。
+```
+
+这里最容易困惑的是“拒绝”这个词。它不是说 draft token 一定语义错误，而是说：
+
+```text
+如果我们总是接受 draft 的这个 token，
+最终输出分布会偏向 draft，而不是 target。
+```
+
+举个直观例子：
+
+```text
+target 只想让 B 出现 30%
+draft 却让 B 出现 50%
+```
+
+如果 draft 抽到 `B` 就永远接受，那么 `B` 的最终出现率会太高。拒绝采样会做一件很朴素的事：
+
+```text
+draft 提出 B 的一部分情况接受；
+draft 提出 B 的另一部分情况拒绝；
+拒绝后，把这部分概率补给 target 更想要、但 draft 给少了的 token。
+```
+
+所以拒绝采样的核心问题不是：
+
+```text
+这个 token 是否“正确”？
+```
+
+而是：
+
+```text
+如果接受这个 token，会不会让最终输出频率偏离 target 分布？
+```
+
+### 1.3 “贡献”到底有什么用
+
+后面会反复出现“接受贡献”和“补偿贡献”。它们不是 serving 系统里一定要显式保存的业务字段，而是用来回答一个问题：
+
+```text
+最终每个 token 的输出概率，到底从哪些路径来？
+```
+
+可以把它理解成账本：
+
+```text
+接受贡献:
+    draft 抽到某个 token，并且它被接受后，
+    给最终输出分布贡献了多少概率。
+
+补偿贡献:
+    draft 抽到某个 token 但被拒绝后，
+    residual correction 又把多少概率补给了某个 token。
+```
+
+算这两类贡献的目的，是证明最终账本正好等于 target 分布：
+
+```text
+最终输出概率 = 接受贡献 + 补偿贡献 = target 概率
+```
+
+因此，“贡献”不是额外复杂度，而是用来解释拒绝采样为什么不会改变 target model 输出分布的工具。
+
 ## 2. 单 token 拒绝采样规则
 
 先从 draft 分布采样一个候选：
@@ -133,7 +209,199 @@ else:
 2. 如果 draft 对 `v` 的概率高于 target，即 `q(v) > p(v)`，只能接受其中 `p(v)/q(v)` 的比例。
 3. 被拒绝时，说明 draft 在某些 token 上分配了过多概率，需要从 target 比 draft 更偏好的 token 集合中补回来。
 
-## 3. 图解：min 部分与 residual 部分
+## 3. 完整单 token 流程
+
+仍然使用这张概率表：
+
+| token | target `p` | draft `q` |
+|---|---:|---:|
+| `A` | 0.50 | 0.20 |
+| `B` | 0.30 | 0.50 |
+| `C` | 0.20 | 0.30 |
+
+目标是：虽然先让 draft 抽 token，但最终输出仍然要是：
+
+```text
+A: 50%
+B: 30%
+C: 20%
+```
+
+### 3.1 第一步：draft 先抽一个候选
+
+Draft 按 `q` 抽样：
+
+```text
+抽到 A 的概率 = 0.20
+抽到 B 的概率 = 0.50
+抽到 C 的概率 = 0.30
+```
+
+如果直接输出 draft 抽到的 token，最终分布就是：
+
+```text
+A: 20%
+B: 50%
+C: 30%
+```
+
+这明显不是 target 分布。所以需要 target 来校正。
+
+### 3.2 第二步：分别计算接受概率
+
+接受概率是：
+
+```text
+接受概率 = min(1, target 概率 / draft 概率)
+```
+
+代入这三个 token：
+
+| draft 抽到的 token | `p(token)` | `q(token)` | 接受概率 | 解释 |
+|---|---:|---:|---:|---|
+| `A` | 0.50 | 0.20 | 1.00 | draft 给 A 太少；一旦抽到 A，全部接受 |
+| `B` | 0.30 | 0.50 | 0.60 | draft 给 B 太多；只接受 60% |
+| `C` | 0.20 | 0.30 | 0.6667 | draft 给 C 偏多；只接受约 66.7% |
+
+这一步的作用是限制 draft 过度自信的 token。
+
+### 3.3 第三步：如果接受，直接输出 draft token
+
+接受路径对最终输出的贡献如下：
+
+| token | draft 抽到它的概率 | 被接受的概率 | 最终通过接受路径输出它的概率 |
+|---|---:|---:|---:|
+| `A` | 0.20 | 1.00 | 0.20 |
+| `B` | 0.50 | 0.60 | 0.30 |
+| `C` | 0.30 | 0.6667 | 0.20 |
+
+这里的最后一列就是“接受贡献”：
+
+```text
+A 通过接受路径贡献了 0.20
+B 通过接受路径贡献了 0.30
+C 通过接受路径贡献了 0.20
+```
+
+注意一个很重要的现象：
+
+```text
+B 和 C 已经达到 target 想要的概率了。
+A 还差 0.30。
+```
+
+也就是说，接受 draft 之后，最终分布暂时是：
+
+```text
+A: 20%   target 需要 50%，还差 30%
+B: 30%   target 需要 30%，已经够了
+C: 20%   target 需要 20%，已经够了
+```
+
+剩下的问题就是：这 30% 从哪里来？
+
+### 3.4 第四步：如果拒绝，从 residual 里补回来
+
+先看哪些 token 是 target 想要更多、draft 给少了：
+
+| token | target `p` | draft `q` | target 还缺多少 |
+|---|---:|---:|---:|
+| `A` | 0.50 | 0.20 | 0.30 |
+| `B` | 0.30 | 0.50 | 0 |
+| `C` | 0.20 | 0.30 | 0 |
+
+所以 residual distribution 是：
+
+```text
+residual 只会采样 A
+```
+
+再看拒绝会发生多少概率：
+
+```text
+draft 抽到 A: 接受概率 1.00，拒绝概率 0
+draft 抽到 B: 接受概率 0.60，拒绝概率 0.40
+draft 抽到 C: 接受概率 0.6667，拒绝概率 0.3333
+```
+
+拒绝总概率是：
+
+```text
+B 分支拒绝概率 = 0.50 × 0.40   = 0.20
+C 分支拒绝概率 = 0.30 × 0.3333 = 0.10
+
+总拒绝概率 = 0.20 + 0.10 = 0.30
+```
+
+这 `0.30` 正好是 `A` 还缺的概率。拒绝后 residual 会采样 `A`，于是补偿贡献为：
+
+```text
+A 通过拒绝补偿贡献 0.30
+```
+
+最终输出概率变成：
+
+| token | 接受贡献 | 拒绝补偿贡献 | 最终输出概率 | target 概率 |
+|---|---:|---:|---:|---:|
+| `A` | 0.20 | 0.30 | 0.50 | 0.50 |
+| `B` | 0.30 | 0 | 0.30 | 0.30 |
+| `C` | 0.20 | 0 | 0.20 | 0.20 |
+
+这就是拒绝采样的完整逻辑：
+
+```text
+接受路径负责保留 draft 中 target 认可的概率。
+拒绝路径负责把 draft 多占的概率，补给 target 更想要的 token。
+两条路径加起来，最终分布就回到 target。
+```
+
+### 3.5 用一条运行路径理解
+
+真实运行时不是把上面表格全部展开，而是走其中一条随机路径。例如：
+
+```text
+1. draft 抽到 B
+2. target 发现 B 在 draft 里概率太高
+3. 接受概率 = 0.60
+4. 抽随机数 u
+```
+
+如果：
+
+```text
+u = 0.42 <= 0.60
+```
+
+则接受：
+
+```text
+output B
+```
+
+如果：
+
+```text
+u = 0.91 > 0.60
+```
+
+则拒绝：
+
+```text
+从 residual 里采样 correction token
+这个例子里 residual 只会采样 A
+output A
+```
+
+所以同样是 draft 抽到 `B`：
+
+```text
+60% 情况输出 B
+40% 情况改输出 A
+```
+
+这不是随便把 `B` 改成 `A`，而是在纠正 draft 相对 target 的概率偏差。
+
+## 4. 图解：min 部分与 residual 部分
 
 ![拒绝采样概率分解](./assets/rejection-sampling.svg)
 
@@ -158,7 +426,7 @@ p(v)
 
 只要这两部分加起来正好等于 `p`，最终输出就保持 target distribution。
 
-## 4. 单 token 证明
+## 5. 单 token 证明
 
 对任意 token `v`，最终输出 `v` 的概率由两部分组成：
 
@@ -242,7 +510,7 @@ sum q(token) = 1
 
 因此，虽然候选来自 draft 分布 `q`，最终输出分布仍然是 target 分布 `p`。
 
-### 4.1 用数字走一遍
+### 5.1 用数字走一遍
 
 仍然使用前面的概率表：
 
@@ -254,7 +522,7 @@ sum q(token) = 1
 
 最后一列正好等于 target 分布 `p`。这就是拒绝采样“不改变 target 分布”的核心。
 
-## 5. 多 token 链式验证
+## 6. 多 token 链式验证
 
 投机解码不是只猜一个 token，而是猜一串：
 
@@ -313,7 +581,7 @@ bonus token z 从 p_(K+1) 采样
 
 一轮最多提交 `K+1` 个 token。
 
-## 6. 为什么 target verify 可以并行
+## 7. 为什么 target verify 可以并行
 
 链式验证的接受判断是顺序的，但 target logits 可以并行算出来。原因是 target verify 的每个位置都使用固定候选前缀：
 
@@ -334,7 +602,7 @@ sequential decision
 parallel target computation
 ```
 
-## 7. Greedy decoding 特例
+## 8. Greedy decoding 特例
 
 当 temperature 为 0 或严格 greedy 时，目标分布退化成：
 
@@ -354,7 +622,7 @@ else:
 
 也就是说 greedy speculative decoding 接受的是 draft 和 target 完全一致的最长前缀。
 
-## 8. Top-k、Top-p、temperature 与 grammar
+## 9. Top-k、Top-p、temperature 与 grammar
 
 严格保持目标分布时，`p` 必须是最终想要服务的 target 分布。也就是说，所有 sampling processor 都应该被纳入 `p` 的定义：
 
@@ -384,7 +652,7 @@ p(token) = 0
 
 Top-p 和 Top-k 会把部分 token 的 target 概率截断为 0。如果 draft 经常提出 target 截断后的 token，接受率会下降。严格实现仍然正确，但速度收益会变差。
 
-## 9. Tree verification 的数学视角
+## 10. Tree verification 的数学视角
 
 Tree verification 不是改变接受规则，而是一次 target forward 验证更多候选条件前缀。候选节点 `n` 表示一条路径：
 
@@ -412,7 +680,7 @@ node_id -> path retrieval index
 
 因此它比线性链更难实现，但在高质量 draft 或多分支 draft 中收益更高。
 
-## 10. 数值与边界情况
+## 11. 数值与边界情况
 
 ### q(y) 很小
 
@@ -453,7 +721,7 @@ draft_logits  -> log_softmax -> draft_logprobs
 
 读法：乘除法在概率很小时容易数值不稳定，把概率转成 log 后，除法变成减法，更适合 GPU kernel 和低精度计算。
 
-## 11. 伪代码
+## 12. 伪代码
 
 ```python
 def speculative_sample(prefix, draft, target, K):
