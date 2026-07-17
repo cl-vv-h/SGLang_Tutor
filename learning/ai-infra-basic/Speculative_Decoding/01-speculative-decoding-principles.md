@@ -143,7 +143,7 @@ target_probs: [B,K+1,V]  # K 个候选位置 + 末尾 bonus/correction 位置
 
 ```text
 y_i ~ q_i(. | prefix, y_1, ..., y_(i-1))
-p_i(. | prefix, y_1, ..., y_(i-1)) = target verify logits at position i
+p_i(. | prefix, y_1, ..., y_(i-1)) = target 用来验证 y_i 的分布
 ```
 
 target verify 的输入不是普通 decode 的 `[B]` 个新 token，而是每条请求多个候选 token：
@@ -155,6 +155,137 @@ custom_mask:      允许每个候选位置只看 prefix + earlier draft tokens
 ```
 
 如果所有 `K` 个 draft token 都接受，target verify 还可以提供一个 bonus token，也就是 target 在 `prefix + y_1...y_K` 后面的下一个分布。
+
+### 4.1 Target 是跑 K 次 forward，还是一次 forward？
+
+结论先说清楚：
+
+```text
+不是 K 次 target forward。
+也不是一次 forward 后只看最后一个位置的 K+1 分布。
+而是一次 target verify forward，拿到多个位置的 logits/probs。
+```
+
+假设当前正式前缀是 `x`，draft 猜了 3 个 token：
+
+```text
+draft tokens = [A, B, C]
+```
+
+target 需要验证的是：
+
+```text
+第 1 个 draft token A 是否合理:
+    p_1 = P_target(next token | x)
+    用 p_1 检查 A
+
+第 2 个 draft token B 是否合理:
+    p_2 = P_target(next token | x, A)
+    用 p_2 检查 B
+
+第 3 个 draft token C 是否合理:
+    p_3 = P_target(next token | x, A, B)
+    用 p_3 检查 C
+
+如果 A、B、C 全部接受，还需要额外生成一个 bonus token:
+    p_4 = P_target(next token | x, A, B, C)
+    从 p_4 采样 bonus token
+```
+
+所以 target verify 需要的是 `K+1` 组分布：
+
+```text
+[p_1, p_2, ..., p_K, p_(K+1)]
+
+前 K 组分布:     用来验证 draft token y_1...y_K
+最后 1 组分布:   只在全部接受时，用来采样 bonus token
+```
+
+关键点：`p_(K+1)` 不能用来验证前面的 `K` 个 draft token。它只回答：
+
+```text
+如果 y_1...y_K 都是真的下一个 token，那么再下一个 token 应该是什么？
+```
+
+它并不回答：
+
+```text
+y_1 是否应该出现在 prefix 后面？
+y_2 是否应该出现在 prefix,y_1 后面？
+...
+```
+
+因此，如果只看最后一个位置的分布，就无法知道 draft 的前 `K` 个 token 是否应该被接受。
+
+### 4.2 一次 forward 为什么能得到多组分布？
+
+Decoder-only Transformer 在一次 forward 中会为每个输入位置都产生 hidden state；每个位置的 hidden state 接 LM head 后，都可以得到“下一个 token”的 logits。
+
+概念上，把最后一个正式 prefix token 记为 `x_last`，把 draft tokens 放在后面：
+
+```text
+input sequence for verify:
+    [x_last, A, B, C]
+```
+
+这一段 target forward 的 next-token logits 对齐关系是：
+
+```text
+logits at x_last -> P(next | x)          -> 用来验证 A
+logits at A      -> P(next | x,A)        -> 用来验证 B
+logits at B      -> P(next | x,A,B)      -> 用来验证 C
+logits at C      -> P(next | x,A,B,C)    -> 用来采样 bonus token
+```
+
+这就是为什么一次 forward 可以得到 `K+1` 组分布。它本质上和训练时 teacher forcing 很像：模型一次看到一段已知 token，然后并行计算每个位置预测下一个 token 的分布。
+
+在线 serving 中通常已经有 prefix 的 KV Cache，因此实现不一定真的把整个 `x` 重新送进模型。常见做法是：
+
+```text
+已有:
+    prefix KV Cache
+
+本轮 target verify:
+    只处理短 verify block
+    使用 causal mask / custom mask
+    让每个候选位置只能看 prefix 和它前面的 draft token
+```
+
+不同系统对“第一组分布 `p_1`”的取得方式可能不同：
+
+| 实现方式 | 直观理解 |
+|---|---|
+| 复用上一轮已经得到的 prefix 末尾 logits | 如果系统已经保存了 `P(next | x)`，可直接用它验证 `y_1` |
+| 在 verify block 中加入 anchor/root token | 让同一次 verify forward 直接产出 `p_1...p_(K+1)` |
+| 在 metadata 中把 root logits 和 draft logits 对齐 | 对外仍表现为 `target_probs: [B,K+1,V]` |
+
+这些实现细节可以不同，但语义必须一致：
+
+```text
+target_probs[:,0,:]     验证 y_1
+target_probs[:,1,:]     验证 y_2
+...
+target_probs[:,K-1,:]   验证 y_K
+target_probs[:,K,:]     全部接受时采样 bonus token
+```
+
+### 4.3 为什么不直接跑 K 次 target forward？
+
+如果 target 对 `A`、`B`、`C` 分别跑 3 次 forward：
+
+```text
+target forward on x       -> 检查 A
+target forward on x,A     -> 检查 B
+target forward on x,A,B   -> 检查 C
+```
+
+这在数学上可以验证，但性能上接近普通 autoregressive decode，投机解码就失去主要收益。投机解码要利用的是：
+
+```text
+验证决策是顺序的，但 target 计算可以并行。
+```
+
+也就是说，接受时要从 `A` 开始逐个判断；但 target model 的大部分计算可以在一次 short prefill/extend forward 中把 `[A,B,C]` 这段候选一起算完。
 
 ## 5. Tree verification 的形状
 
