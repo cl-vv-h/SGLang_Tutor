@@ -34,6 +34,9 @@
 | Operator / 算子 | 数学语义加上 shape/dtype/layout、Host、注册等完整软件接口 |
 | Kernel | 在 NPU device 上执行的一段计算程序 |
 | Custom Op | 框架默认没有、由扩展自行注册实现的算子 |
+| Wrapper / 包装层 | 高层调用与底层 kernel contract 之间的边界适配器；通常负责检查 shape/dtype/stride/device，分配输出或 workspace，计算 grid/blockDim/tiling，选择后端，并调用 Triton kernel、`torch.ops`、ACLNN 或 Ascend C launch |
+| Python Wrapper | 运行在 Python/Host 侧的 wrapper，接收 `torch.Tensor`、Python 标量或 module 对象，常见职责是输出分配、dtype/layout 整理、grid 计算、后端分流和调用 `kernel[grid]` 或 `torch.ops.*` |
+| Host Wrapper | 运行在 C++ Host 侧的 wrapper，接收 dispatcher 传来的 `at::Tensor` 与标量，常见职责是 `TORCH_CHECK`、workspace/stream/tiling 准备，并最终调用 `EXEC_KERNEL_CMD`、`EXEC_NPU_CMD` 或 ACLNN |
 | Fusion / 融合 | 把多个计算阶段放进更少 kernel，减少 launch 和 GM 中间读写 |
 | Mega Kernel | 一种更激进的融合形态：把多个原本可拆成独立 launch 的算法阶段放进同一次 device kernel launch 中执行，以减少 Host/runtime 边界并增强 device 内部调度控制；它不等于所有中间结果都留在片上，也不等于 persistent kernel |
 | Device Stage | 同一个 device kernel 内部具有明确输入、输出和依赖边界的阶段；它不是独立 PyTorch operator，也不是单独 launch，而是 mega kernel 内的一段设备侧工作 |
