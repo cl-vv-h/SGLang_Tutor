@@ -24,6 +24,8 @@
 | Cache Manager | Triton runtime 中按哈希保存编译产物、launcher stub 或辅助 `.so` 的缓存管理器；命中后可直接复用，不必重新编译 |
 | Dump Manager | Triton runtime 中负责把调试用 IR、launcher 源码或二进制写到 dump 目录的管理器 |
 | Dispatcher | PyTorch 根据 operator、device/dtype 等选择 backend 实现的机制 |
+| Dispatch Key | PyTorch dispatcher 用来选择后端实现的路由标签；Ascend NPU 通过 `torch_npu` 接入时常见内部标签是 `PrivateUse1` |
+| Host-side Dispatch | 本课程中指 C++ Host wrapper 在被 PyTorch dispatcher 调到以后，继续按 dtype、shape、硬件资源、workspace 等条件选择具体 kernel 变体和 launch 参数；它不是独立进程调度 |
 | PrivateUse1 | PyTorch 为外部设备 backend 保留的 dispatch key，torch_npu 用于 NPU 接入 |
 | OpCommand | `torch_npu` framework 层用于打包一次 NPU 算子调用、stream 和 custom handler 的命令对象 |
 
@@ -190,6 +192,7 @@
 |---|---|
 | Alignment / 对齐 | 地址或搬运长度满足硬件粒度要求，如 32B 对齐 |
 | Launcher Stub | Host 侧临时生成的小段 C++/Python 扩展胶水，用来把 Triton/PyTorch 调用参数整理成底层 runtime 能执行的 launch 形式 |
+| `aclrtlaunch_*` Stub | Ascend C 构建链路为某个 device kernel 生成或声明的 Host 侧 launch 入口，通常接收 `blockDim`、`aclrtStream`、设备地址和标量参数，再把 launch 请求交给 CANN Runtime |
 | Padding | 补充无效元素使 shape/字节满足对齐或基本块要求 |
 | Arithmetic Intensity | 每搬运一个字节完成多少计算，用于判断计算或带宽倾向 |
 | Memory-bound | 性能主要受数据搬运带宽/延迟限制 |
