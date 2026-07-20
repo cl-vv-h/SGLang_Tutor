@@ -35,9 +35,16 @@
 | Kernel | 在 NPU device 上执行的一段计算程序 |
 | Custom Op | 框架默认没有、由扩展自行注册实现的算子 |
 | Fusion / 融合 | 把多个计算阶段放进更少 kernel，减少 launch 和 GM 中间读写 |
+| Mega Kernel | 一种更激进的融合形态：把多个原本可拆成独立 launch 的算法阶段放进同一次 device kernel launch 中执行，以减少 Host/runtime 边界并增强 device 内部调度控制；它不等于所有中间结果都留在片上，也不等于 persistent kernel |
+| Device Stage | 同一个 device kernel 内部具有明确输入、输出和依赖边界的阶段；它不是独立 PyTorch operator，也不是单独 launch，而是 mega kernel 内的一段设备侧工作 |
 | MoE / Mixture-of-Experts | 先让 router 为每个 token 选 top-k 个 expert，再把 token 发给这些 expert 计算的模型结构；和 dense FFN 不同，它天然包含 token 分流与回流 |
 | FLA / Flash Linear Attention | 一类把长序列注意力改写成“分块 + 状态递推”形式的算法/实现家族，避免显式构造完整 `T x T` attention 矩阵 |
 | Gated Delta Rule | FLA 家族中的一种更新规则，用 `g` 控制遗忘/衰减，用 `beta` 控制当前 token 对状态的写入强度 |
+| GDN | `sgl-kernel-npu` 当前源码中用于 FLA chunk gated delta rule 相关 mega op 的内部命名缩写，例如 `mega_chunk_gdn`、`GDN_D`、`GDN_C`；本课程不把它当作独立框架名 |
+| PTO | 当前 `sgl-kernel-npu` 源码通过 `<pto/pto-inst.hpp>` 使用的 device 侧 tile/instruction helper 层，可先理解成更贴近 Ascend 硬件通路的低层 DSL/helper；本课程只按源码使用方式解释，不承诺其跨版本 API 稳定性 |
+| KKT / `kkt` stage | 在 `mega_chunk_gdn` 中指 chunk 内 `K` 与 `K^T` 相关的 scaled dot/Gram-like 矩阵阶段，不是优化理论里的 Karush-Kuhn-Tucker 条件 |
+| `solve_tril` | 下三角矩阵求解/求逆相关阶段；`tril` 表示 lower triangular，下三角 |
+| WY / `wy_fast` | FLA chunk 递推中的紧凑中间因子构造阶段；在当前源码中主要把 `A_inv`、`k/v/beta/g` 合成后续 `chunk_h` 可复用的 `w/u` 张量 |
 | DSL | 领域专用语言；Triton 是面向并行 kernel 的 Python DSL |
 | JIT | Just-In-Time，运行时按参数编译 kernel；Triton 常用此方式 |
 | AOT | Ahead-Of-Time，部署前编译；Ascend C shared library 常走此路线 |
@@ -79,6 +86,9 @@
 | Block Index | 当前 Ascend C 实例编号，常由 `GetBlockIdx()` 获取 |
 | Tile | 从大 tensor 切下、一次在某核上处理的数据块 |
 | Logical Tile / Logical Block | 从数学输出空间切出来的一份逻辑工作单元；它说明“总共有多少块工作”，不等于“这次真的启动了多少物理核” |
+| `num_matrices` | `mega_chunk_gdn` 里表示本次 device 侧需要处理的逻辑矩阵数量，当前 Python wrapper 计算为 `num_chunks * num_value_heads`；它不是 token 数，也不是物理 core 数 |
+| `H` / NumValueHeads | 本课程在 FLA mega kernel 上下文中常用 `H` 表示 value heads 数，即 `v/g/beta` 使用的 head 数 |
+| `Hg` / NumKeyHeads | 本课程在 FLA mega kernel 上下文中常用 `Hg` 表示 query/key heads 数，即 `q/k` 使用的 head 数；GQA 场景下 `H` 和 `Hg` 可以不同 |
 | Block Tensor | Triton program 内的一块 N 维值或指针集合 |
 | `tl.tensor` | Triton Python 前端表示 IR value 的核心类，保存 IR handle、完整 type、静态 shape 与标量 dtype；它不是 `torch.Tensor` 数据容器 |
 | `tl.constexpr` | JIT 编译时已知的值，用来决定 block shape、分支、循环展开与 kernel specialization；不同取值可能产生不同缓存变体 |
@@ -140,6 +150,9 @@
 | Workspace | 算子运行所需的额外临时全局内存 |
 | Lib API Workspace | 由 `GetLibApiWorkSpaceSize()` 之类接口返回的库或 launch 框架所需 device scratch 大小，和算法自己的业务输入输出区分开 |
 | Recurrent State / Final State | chunked 线性注意力或递推算子在 chunk 之间传递的历史摘要；`initial_state` 是输入状态，`final_state` 是本轮处理后输出给下一轮的状态 |
+| `mask_lower` | 不含对角线的下三角 mask，常用于表示严格过去依赖，避免当前位置以同一种方式参与自身更新 |
+| `mask_full` | 含对角线的下三角 mask，常用于输出阶段允许当前位置看到自身的因果结构 |
+| `minus_identity` | 对角线为 `-1` 的单位阵变体；在 `mega_chunk_gdn` 中作为三角求解/逆相关 stage 的辅助矩阵传入 device |
 
 ## F. 流水与同步
 
@@ -160,6 +173,13 @@
 | Record Stream | 告知 allocator 某 tensor storage 正被异步 stream 使用，避免提前回收 |
 | Cross-core Sync | 多核之间的数据就绪或阶段同步 |
 | CV Fusion | Cube 与 Vector 阶段在同一融合算子内协作执行 |
+| `TLOAD` | PTO 风格 device helper 中常见的搬入动作，可理解为把 GM 或较低层数据搬进片上 tile；类似 CopyIn，但参数携带 PTO tile/layout 语义 |
+| `TSTORE` | PTO 风格 device helper 中常见的写回动作，可理解为把片上 tile 结果写回 GM；类似 CopyOut |
+| `TASSIGN` | PTO 风格 device helper 中把 tile view 绑定到某段片上 buffer 或逻辑地址的动作；它不是普通数学赋值 |
+| `TTRANS` | PTO 风格 device helper 中的 tile transpose 动作，用于在片上改变 tile 行列布局 |
+| `pipe_barrier` | Ascend device 侧 pipeline barrier，用于确保当前 core 内指定指令通路到达安全点后再继续 |
+| `set_flag` / `wait_flag` | 同一 core 内不同通路之间的事件同步，用于表达搬运、计算、写回等生产消费依赖 |
+| `wait_flag_dev` | device 侧跨 core 或 AIV/AIC 协作等待信号，用于保证多个执行者在阶段边界上对齐 |
 
 ## G. 性能与正确性
 

@@ -79,6 +79,7 @@
 | [源码 04：FLA Chunk Gated Delta Rule 的双路径入口](./sgl-kernel-npu/04-fla-chunk-gated-delta-rule-mixed-path.md) | 同一 Python API 如何在分段 Triton 与 mega custom op 之间分流，并管理 `packed B=1`、`cu_seqlens`、state、`blockDim` 与 workspace 契约 |
 | [源码 05：DeepEP、HCCL 与 MoE token 路径](./sgl-kernel-npu/05-deepep-hccl-and-moe-kernel-path.md) | 看懂 `deep_ep::Buffer` 如何把 router 的 top-k 路由变成 `layout -> dispatch -> local expert compute -> combine`，并定位 `fused_deep_moe` / `dispatch_ffn_combine` |
 | [源码 06：DeepEP Low-Latency、A2 Layered 与小 Batch 推理路径](./sgl-kernel-npu/06-deepep-low-latency-and-layered-a2-path.md) | 看懂为什么小 batch 推理要改走 `low_latency_dispatch/low_latency_combine`，以及 A2 的 layered 路径如何把同机 HCCS 与跨机 RDMA 组合起来 |
+| [源码 08：FLA Mega Kernel、Device Stage 与 Ascend 数据流](./sgl-kernel-npu/08-fla-mega-kernel-device-stages.md) | 从 Python wrapper、schema/Host 入口一路读到 7 个 device stage，理解 mega kernel 的原理、AIV/AIC 协作、GM workspace 与同步代价 |
 
 ### 6. Reference：工作时反复查阅
 
