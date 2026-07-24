@@ -1,3 +1,5 @@
+**中文** | [English](./15-accuracy-testing-and-debugging_EN.md)
+
 # 15. SGLang Ascend NPU 精度测试与问题定位
 
 本讲专门讲精度测试与精度问题定位。它回答三个问题：

@@ -1,3 +1,5 @@
+**中文** | [English](./14-performance-testing_EN.md)
+
 # 14. SGLang Ascend NPU 性能测试
 
 本讲专门讲性能测试。它回答三个问题：

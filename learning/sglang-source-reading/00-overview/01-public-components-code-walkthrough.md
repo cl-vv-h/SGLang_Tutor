@@ -1,3 +1,5 @@
+**中文** | [English](./01-public-components-code-walkthrough_EN.md)
+
 # SGLang 公共组件全景与 Code Walkthrough
 
 这一讲不是继续增加一个孤立专题，而是把 SGLang online serving 的高频公共组件按真实调用层次串起来。读完后，你应该能回答三个问题：

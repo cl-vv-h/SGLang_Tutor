@@ -1,3 +1,5 @@
+**中文** | [English](./03-tiling-pipeline-sync-optimization_EN.md)
+
 # Ascend C 03：Tiling、流水、同步与性能优化
 
 本章关注 Ascend C 的核心价值：当编译器自动策略不够时，开发者可以显式设计数据通路和流水。

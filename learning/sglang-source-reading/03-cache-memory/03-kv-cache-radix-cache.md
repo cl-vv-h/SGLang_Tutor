@@ -1,3 +1,5 @@
+**中文** | [English](./03-kv-cache-radix-cache_EN.md)
+
 # 第 3 讲：KV Cache、Radix Cache 与 HiCache
 
 本讲目标：理解 SGLang 如何管理 KV cache，为什么 prefix cache 能减少 prefill 成本，以及 Scheduler 为什么总是在调度前后操作 `tree_cache`、`req_to_token_pool`、`token_to_kv_pool_allocator`。

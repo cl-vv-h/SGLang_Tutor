@@ -1,3 +1,5 @@
+**中文** | [English](./05-deepep-hccl-and-moe-kernel-path_EN.md)
+
 # sgl-kernel-npu 05：DeepEP、HCCL 与 MoE token 路径
 
 源码基线：[`sgl-kernel-npu@d5630df`](https://github.com/sgl-project/sgl-kernel-npu/tree/d5630dff41c8108216f835597e63f6d3a7445908)。2026-07-05 重新 fetch 官方 `origin/main` 后，远端 `HEAD` 已前进到这个 commit；同时核对 `csrc/deepep/`、`tests/python/deepep/` 与仓库根 README，确认本章涉及的 DeepEP 路径相对上一轮 `b2378ee` 没有源码差异，因此可以在前文基础上继续往下讲。

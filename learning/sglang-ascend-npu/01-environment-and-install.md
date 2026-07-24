@@ -1,3 +1,5 @@
+**中文** | [English](./01-environment-and-install_EN.md)
+
 # 01. 安装与环境：GNU/Linux + Ascend NPU 服务器上跑通 SGLang
 
 这一讲面向一台已经具备 GNU/Linux + Ascend NPU 的服务器，目标是从 0 到 1 跑通 SGLang NPU serving。

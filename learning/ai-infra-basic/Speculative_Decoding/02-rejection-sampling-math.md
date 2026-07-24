@@ -1,3 +1,5 @@
+**中文** | [English](./02-rejection-sampling-math_EN.md)
+
 # 02. 投机采样的数学原理
 
 ## 1. 问题定义

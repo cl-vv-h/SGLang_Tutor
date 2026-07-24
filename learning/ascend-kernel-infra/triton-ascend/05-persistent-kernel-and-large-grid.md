@@ -1,3 +1,5 @@
+**中文** | [English](./05-persistent-kernel-and-large-grid_EN.md)
+
 # Triton-Ascend 05：Persistent Kernel、大 Grid 与 Task Queue 边界
 
 这一章补上 Triton-Ascend 课程里最容易“知道名字但没真想通”的一块：为什么 Ascend NPU 上经常不能把 GPU 风格的超大 grid 原样搬过来，为什么会出现 persistent kernel、`TRITON_ALL_BLOCKS_PARALLEL`、`enable_auto_blockify`、`TRITON_ENABLE_TASKQUEUE` 这些看起来都像“多任务调度”的词，但它们其实不在同一层。

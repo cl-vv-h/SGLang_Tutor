@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # Speculative Decoding / Speculative Inference 教学入口
 
 投机推理在大模型 serving 中通常指 speculative decoding 或 speculative sampling。核心思想是：用一个更便宜的 draft 路径先提出多个未来 token，再让 target model 用一次或少数几次验证 forward 检查这些 token，从而把“每生成一个 token 调一次大模型”改成“每次大模型验证尽量提交多个 token”。

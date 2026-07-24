@@ -1,3 +1,5 @@
+**中文** | [English](./01-platform-detection-and-process-startup_EN.md)
+
 # 01. NPU 平台识别与进程启动
 
 > 课程定位：本文件是公共启动链路补充材料；对应组件主课程的第 02 讲“平台、运行时与 kernel bootstrap”。主目录见[源码串讲 README](../README.md)。

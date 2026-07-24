@@ -1,3 +1,5 @@
+**中文** | [English](./09-lora-moe-feature-branches_EN.md)
+
 # 09. Ascend LoRA、MoE、量化与特性分支
 
 这一讲看 NPU 上的高级特性后端。它们不是跑通 SGLang 的第一步，但在真实业务中经常遇到：LoRA adapter serving、MoE 模型、GPTQ/AWQ/INT8/INT4 量化、多模态处理、Mamba/GDN/hybrid linear attention。

@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # Attention Kernel 教学入口
 
 这个目录用纯 PyTorch 教学代码解释 attention kernel 优化背后的核心想法。重点不是替代 CUDA/Triton 实现，而是把计算顺序、softmax 稳定性、KV Cache 访问和 decode 阶段的瓶颈讲清楚。

@@ -1,3 +1,5 @@
+**中文** | [English](./02-cann-stack-and-boundaries_EN.md)
+
 # 第二讲：CANN 全栈与边界
 
 本讲承接 [第一讲：五个关键对象如何组成 Ascend NPU 推理与算子栈](./01-stack-and-relationships.md)。上一讲回答“谁和谁是什么关系”；这一讲回答“CANN 这一个大名字内部到底分几层，每层分别负责什么”。

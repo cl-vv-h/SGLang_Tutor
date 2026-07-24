@@ -1,3 +1,5 @@
+**中文** | [English](./05-architecture-families_EN.md)
+
 # 主流大模型架构谱系：哪些模块发生了变化
 
 ## 1. 统一分析框架

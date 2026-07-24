@@ -1,3 +1,5 @@
+**中文** | [English](./00-background_EN.md)
+
 # 00. Ascend NPU 背景知识
 
 这一讲回答一个前置问题：**在真正阅读 SGLang 的 NPU 代码、部署 SGLang 服务之前，需要先理解 Ascend NPU 这套软硬件栈里有哪些对象，它们和 CUDA/GPU serving 的差异在哪里。**

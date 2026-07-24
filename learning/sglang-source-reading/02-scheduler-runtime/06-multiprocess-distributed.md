@@ -1,3 +1,5 @@
+**中文** | [English](./06-multiprocess-distributed_EN.md)
+
 # 第 6 讲：多进程 / 多卡 / 分布式执行
 
 这一讲接在第 5 讲之后。前五讲已经把单个请求从 HTTP、Tokenizer、Scheduler、KV cache、ModelRunner、Speculative Decoding 串起来了；现在要回答一个更工程化的问题：

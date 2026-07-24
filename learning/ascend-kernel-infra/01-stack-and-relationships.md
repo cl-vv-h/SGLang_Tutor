@@ -1,3 +1,5 @@
+**中文** | [English](./01-stack-and-relationships_EN.md)
+
 # 第一讲：五个关键对象如何组成 Ascend NPU 推理与算子栈
 
 这一讲只建立边界和调用关系，不深入 SGLang 的调度实现。读完后，应能回答三个问题：

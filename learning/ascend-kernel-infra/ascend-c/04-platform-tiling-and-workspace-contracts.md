@@ -1,3 +1,5 @@
+**中文** | [English](./04-platform-tiling-and-workspace-contracts_EN.md)
+
 # Ascend C 04：Platform、Tiling、Workspace 与 Host/Device 契约
 
 本章横跨 Host C++、launch ABI 和 Device C++。请先按[代码阅读手册](../reference/code-reading-and-types.md)建立类型边界：`at::Tensor` 是 Host 框架对象，`uint32_t/uint64_t` 是 tiling 标量，`GM_ADDR` 是 Device ABI 地址，三者不能因为都能“传给 kernel”就视为同一种类型。

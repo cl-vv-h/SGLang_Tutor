@@ -1,3 +1,5 @@
+**中文** | [English](./04-algorithm-landscape_EN.md)
+
 # 04. 投机推理算法谱系
 
 ## 1. 分类轴

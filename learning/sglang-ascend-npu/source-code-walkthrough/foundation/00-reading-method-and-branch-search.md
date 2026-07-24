@@ -1,3 +1,5 @@
+**中文** | [English](./00-reading-method-and-branch-search_EN.md)
+
 # 00. 源码阅读方法与 Ascend 分支搜索法
 
 > 课程定位：本文件是组件主课程的基础补充材料。请先阅读[第一讲：SGLang NPU 全组件总览](../01-sglang-npu-component-map.md)，再使用本讲的方法搜索具体组件。

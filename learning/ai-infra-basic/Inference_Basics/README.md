@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # Inference Basics
 
 这一章回答一个最基础的问题：LLM 推理到底在做什么，为什么 serving 系统不能只是把请求放进一个 `for` 循环里逐个跑。

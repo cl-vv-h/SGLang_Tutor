@@ -1,3 +1,5 @@
+**中文** | [English](./05-attention-kv-cache_EN.md)
+
 # 05. Ascend Attention、KV Cache 与 HiCache
 
 这一讲拆 SGLang-NPU 最核心的性能路径：attention backend 如何读写 KV cache，以及 NPU 专用 KV pool 为什么要和 `attention_backend=ascend` 配套使用。

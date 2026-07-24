@@ -1,3 +1,5 @@
+**中文** | [English](./03-launch-and-minimal-serving_EN.md)
+
 # 03. 隔离环境启动与最小 Serving 跑通
 
 这一讲只解决一件事：在一台 GNU/Linux + Ascend NPU 服务器上，用尽量不影响整机环境的方式跑通 SGLang 服务。

@@ -1,3 +1,5 @@
+**中文** | [English](./01-architecture_EN.md)
+
 # 架构总览
 
 ## 两个文件的位置

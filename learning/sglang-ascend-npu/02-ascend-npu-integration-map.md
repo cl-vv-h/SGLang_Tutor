@@ -1,3 +1,5 @@
+**中文** | [English](./02-ascend-npu-integration-map_EN.md)
+
 # SGLang Ascend NPU 接入点与调用图谱
 
 本篇聚焦一个问题：**Ascend NPU 在 SGLang 里到底接入了哪些地方，这些类和函数如何从启动、初始化、请求执行、KV cache、attention、graph、分布式、PD 分离、LoRA、MoE 和量化串起来。**

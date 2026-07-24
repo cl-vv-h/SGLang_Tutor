@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # Mamba / State Space Model 教学入口
 
 这个目录专门解释 Mamba 以及 SGLang 中围绕 Mamba 出现的运行时概念：`mamba state`、`MambaPool`、`mamba_scheduler_strategy`、`mamba_track_indices`、Mamba radix cache、hybrid attention backend 等。

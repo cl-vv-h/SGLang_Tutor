@@ -1,3 +1,5 @@
+**中文** | [English](./06-npu-graph-compilation_EN.md)
+
 # 06. NPU Graph 与 Piecewise Compilation
 
 这一讲解释 SGLang 在 Ascend NPU 上如何使用 graph capture/replay 降低 decode 开销。虽然很多参数和类名沿用 `cuda_graph`，但在 NPU 设备下实际走的是 `torch.npu.NPUGraph`。

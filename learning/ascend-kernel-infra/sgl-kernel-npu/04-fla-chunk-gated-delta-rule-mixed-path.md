@@ -1,3 +1,5 @@
+**中文** | [English](./04-fla-chunk-gated-delta-rule-mixed-path_EN.md)
+
 # sgl-kernel-npu 04：FLA Chunk Gated Delta Rule 的双路径入口
 
 本章的 Python tensor、dispatcher op 和 device kernel 位于不同类型层。阅读前可先看[代码阅读手册](../reference/code-reading-and-types.md)，尤其注意 shape/dtype 是 `torch.Tensor` 元数据，`cu_seqlens` 的元素值才编码 packed 样本边界。

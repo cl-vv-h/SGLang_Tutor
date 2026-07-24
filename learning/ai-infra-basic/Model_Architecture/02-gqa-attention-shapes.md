@@ -1,3 +1,5 @@
+**中文** | [English](./02-gqa-attention-shapes_EN.md)
+
 # Grouped-Query Attention：QKV、RoPE 与 KV Cache 的形状流
 
 ## 1. Attention 子层的输入输出

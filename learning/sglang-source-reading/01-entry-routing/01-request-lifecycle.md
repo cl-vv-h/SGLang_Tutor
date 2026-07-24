@@ -1,3 +1,5 @@
+**中文** | [English](./01-request-lifecycle_EN.md)
+
 # 第 1 讲：一次 ChatCompletion 请求的完整生命周期
 
 本讲目标：理解一个 OpenAI-compatible `/v1/chat/completions` 请求如何进入 SGLang，如何被转换成内部请求、tokenize、调度、送入模型前向计算，并最终 detokenize 后返回客户端。

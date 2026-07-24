@@ -1,3 +1,5 @@
+**中文** | [English](./01-kernel-first-principles_EN.md)
+
 # 基础 01：从一个公式到并行 Kernel
 
 本章先不写任何框架代码，只回答一个根问题：一条数学公式为什么会变成 `grid`、`program`、`tile`、搬运和同步？

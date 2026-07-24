@@ -1,3 +1,5 @@
+**中文** | [English](./11-performance-optimization-work-map_EN.md)
+
 # 11. SGLang NPU 推理优化工作地图
 
 这一讲面向刚开始参与 SGLang Ascend NPU 开发的同学。假设你的主要工作围绕两个仓库：

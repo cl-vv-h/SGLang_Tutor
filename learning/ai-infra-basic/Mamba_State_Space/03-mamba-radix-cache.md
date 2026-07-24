@@ -1,3 +1,5 @@
+**中文** | [English](./03-mamba-radix-cache_EN.md)
+
 # Mamba 和 Radix Cache：状态复用、代码依赖与执行流程
 
 这一讲专门讲你指出的第二个问题：**Mamba 和 Radix Cache 到底是什么关系？**

@@ -1,3 +1,5 @@
+**中文** | [English](./04-model-runner-attention_EN.md)
+
 # 第 4 讲：ModelRunner 与 Attention Backend
 
 这一讲接在第 2 讲的 `ScheduleBatch` 和第 3 讲的 KV cache 之后：Scheduler 已经决定“下一批跑什么”，KV cache 已经决定“token 存在哪里”，接下来就要进入真正的模型前向计算。

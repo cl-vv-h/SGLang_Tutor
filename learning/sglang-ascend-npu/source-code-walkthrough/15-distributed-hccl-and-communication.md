@@ -1,3 +1,5 @@
+**中文** | [English](./15-distributed-hccl-and-communication_EN.md)
+
 # 第十五讲：LayerCommunicator、HCCL 与层边界通信
 
 本讲聚焦 SGLang 模型层内部最容易被忽略的一类代码：`LayerCommunicator`。它频繁出现在 GLM-4.7-Flash、DeepSeek-V2/V3/R1 类模型、GPT-OSS MoE、Bailing MoE 等 decoder layer 中，用来统一处理 residual、RMSNorm、TP/DP/CP/MoE 之间的数据分布转换和跨卡 collective。

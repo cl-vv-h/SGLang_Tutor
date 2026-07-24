@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # KV Cache Memory
 
 这一章关注 LLM serving 中最珍贵的资源之一：KV Cache 显存。只要理解 KV Cache 的形状、分配、复用和回收，就能理解很多调度、attention backend、prefix cache 和 PD 分离设计。

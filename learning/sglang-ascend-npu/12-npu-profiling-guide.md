@@ -1,3 +1,5 @@
+**中文** | [English](./12-npu-profiling-guide_EN.md)
+
 # 12. SGLang-NPU Profiling 详细教学
 
 这一讲专门讲 SGLang-NPU 的 profiling。目标不是“打开一个 profiler 看一眼图”，而是建立一套可复现的性能归因流程：先确定慢在哪里，再决定应该改 `sglang` 主仓、`sglang-kernel-npu`，还是环境与部署参数。

@@ -1,3 +1,5 @@
+**中文** | [English](./glossary_EN.md)
+
 # 参考：Ascend Kernel Infra 术语表
 
 本表给出本课程中的工作定义。遇到具体硬件规格和 API 行为时，仍以目标 CANN/Triton-Ascend 版本文档为准。

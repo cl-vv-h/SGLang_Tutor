@@ -1,3 +1,5 @@
+**中文** | [English](./05-model-runner-forward-batch-and-input-buffers_EN.md)
+
 # 05. ModelRunner、ForwardBatch 与设备输入缓冲区
 
 > 课程定位：本文件是 `ModelRunner` 公共执行链补充材料；后续每个组件讲次都会从这些初始化与 forward 接口继续向下追踪。主目录见[源码串讲 README](../README.md)。

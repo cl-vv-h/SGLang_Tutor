@@ -1,3 +1,5 @@
+**中文** | [English](./04-model-loading-dtype-and-layout_EN.md)
+
 # 04. 模型加载、权重放置与 dtype/layout
 
 > 课程定位：本文件是模型加载公共链路补充材料；量化、MoE、LoRA 和模型专用组件会复用这里的权重与 layout 概念。主目录见[源码串讲 README](../README.md)。

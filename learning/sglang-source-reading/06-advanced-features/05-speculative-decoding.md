@@ -1,3 +1,5 @@
+**中文** | [English](./05-speculative-decoding_EN.md)
+
 # 第 5 讲：Speculative Decoding
 
 这一讲接在第 4 讲的 `ModelRunner` 与 attention backend 之后。前面我们已经知道普通 decode 每轮通常只为每个请求生成 1 个 token；Speculative Decoding 要解决的问题是：**能不能先用便宜的 draft 路径猜多个 token，再用 target 模型一次性验证，从而减少昂贵 target forward 的次数？**

@@ -1,3 +1,5 @@
+**中文** | [English](./06-deepep-low-latency-and-layered-a2-path_EN.md)
+
 # sgl-kernel-npu 06：DeepEP Low-Latency、A2 Layered 与小 Batch 推理路径
 
 本章会同时出现 Python `int`、NPU `torch.Tensor`、`deep_ep.Buffer`、路由 `handle` 与通信 event/hook。统一类型边界见[代码阅读手册](../reference/code-reading-and-types.md)；这些对象的生命周期和用途不同，不能只看它们都能作为函数参数传递。

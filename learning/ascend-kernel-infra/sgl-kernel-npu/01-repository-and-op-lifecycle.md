@@ -1,3 +1,5 @@
+**中文** | [English](./01-repository-and-op-lifecycle_EN.md)
+
 # sgl-kernel-npu 01：仓库结构与算子生命周期
 
 本章以官方仓库 [`b2378ee`（2026-07-02）](https://github.com/sgl-project/sgl-kernel-npu/tree/b2378ee05769cf7df209ffc5e1b669728f435a7e) 为源码基线。仓库更新很快，目录或 API 变化时应以自己的 checkout 为准。

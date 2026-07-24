@@ -1,3 +1,5 @@
+**中文** | [English](./08-fla-mega-kernel-device-stages_EN.md)
+
 # sgl-kernel-npu 08：FLA Mega Kernel、Device Stage 与 Ascend 数据流
 
 本章接着 [`04-fla-chunk-gated-delta-rule-mixed-path.md`](./04-fla-chunk-gated-delta-rule-mixed-path.md) 往下挖。04 讲清楚了同一个 FLA 入口为什么会在“分段 Triton 路径”和“mega custom op 路径”之间切换；本章专门拆 mega 路径里的 device 侧实现。

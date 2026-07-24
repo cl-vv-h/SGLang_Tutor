@@ -1,3 +1,5 @@
+**中文** | [English](./02-server-args-and-npu-defaults_EN.md)
+
 # 02. ServerArgs 校验与 NPU 默认参数
 
 > 课程定位：本文件是公共参数链路补充材料；它将作为组件主课程第 02 讲的平台初始化前置知识。主目录见[源码串讲 README](../README.md)。

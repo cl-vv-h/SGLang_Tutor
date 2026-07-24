@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # LoRA 系列教学入口
 
 这个目录用小型 Transformer 和简化 Linear 模块解释参数高效微调。阅读目标是理解 adapter 如何插入模型、哪些参数参与训练、推理时如何合并，以及 QLoRA/DoRA/AdaLoRA 分别解决什么问题。

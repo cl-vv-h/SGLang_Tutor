@@ -1,3 +1,5 @@
+**中文** | [English](./02-flowcharts_EN.md)
+
 # Scheduler 流程图
 
 ## 1. Scheduler 进程启动

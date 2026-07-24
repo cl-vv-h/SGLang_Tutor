@@ -1,3 +1,5 @@
+**中文** | [English](./ROADMAP_EN.md)
+
 # Ascend Kernel Infra 路线图
 
 本文件只维护课程主线、前置关系和待深化主题，不记录按日期的流水账。

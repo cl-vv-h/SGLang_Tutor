@@ -1,3 +1,5 @@
+**中文** | [English](./01-layer-communicator-and-common-layers_EN.md)
+
 # Layer 层、LayerCommunicator 与通用算子源码导读
 
 这一讲顺着一个 decoder layer 的执行过程，解释 SGLang 的 layer 层公共组件如何配合：模型层只写 `DecoderLayer.forward()` 的结构，真正和 TP/EP/CP/DP 张量布局、attention backend、MoE dispatch、KV cache 写入相关的逻辑，大多落在 `python/sglang/srt/layers/` 和 `python/sglang/srt/distributed/`。

@@ -1,3 +1,5 @@
+**中文** | [English](./01-mamba-and-sglang-state_EN.md)
+
 # Mamba 是什么：从 State Space Model 到 SGLang Mamba State
 
 你在 SGLang 里看到的 `mamba state`、`mamba_scheduler_strategy`、`mamba_pool_idx`，不是另一套 KV Cache 的别名。它来自一种和 Transformer attention 不同的序列建模路线：**State Space Model，简称 SSM**。

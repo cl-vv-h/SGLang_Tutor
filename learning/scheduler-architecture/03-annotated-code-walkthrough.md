@@ -1,3 +1,5 @@
+**中文** | [English](./03-annotated-code-walkthrough_EN.md)
+
 # Scheduler 教学版代码导读
 
 说明：本文不是修改后的源码，而是针对 `python/sglang/srt/managers/scheduler.py` 的教学版代码骨架。代码块保留关键控制流，并加入中文注释解释每段逻辑。阅读时建议同时打开原文件，按“文件 + 函数名”定位。

@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # SGLang Ascend NPU 源码串讲
 
 本目录按“组件”而不是“执行阶段”组织 SGLang Ascend NPU 源码教程。

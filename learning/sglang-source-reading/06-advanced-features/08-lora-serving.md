@@ -1,3 +1,5 @@
+**中文** | [English](./08-lora-serving_EN.md)
+
 # 第 8 讲：LoRA Serving / Adapter 热加载
 
 这一讲进入 SGLang 的 LoRA serving。它不是单纯“把 LoRA 权重加载进模型”这么简单，而是在一个正在服务的 base model 上，同时处理：

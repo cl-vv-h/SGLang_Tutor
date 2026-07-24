@@ -1,3 +1,5 @@
+**中文** | [English](./02-triton-fused-split-qk-norm_EN.md)
+
 # sgl-kernel-npu 02：Triton 源码精读——Fused Split Q/K Norm
 
 源码：[`norm/fused_split_qk_norm.py`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/norm/fused_split_qk_norm.py)。这是一个很好的入门案例：只有约百行，却包含 grid、tile、地址、归约、constexpr 分支和 Python wrapper。

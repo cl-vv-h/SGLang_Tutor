@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # Parallel Strategy 教学入口
 
 这个目录整理 LLM 推理中常见的多卡并行策略。主讲义是 [tutorial.md](./tutorial.md)，配套 Python demo 用更小的张量和模型结构模拟 DP、TP、PP、SP/CP、EP 的切分对象和通信模式。

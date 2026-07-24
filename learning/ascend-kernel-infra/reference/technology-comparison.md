@@ -1,3 +1,5 @@
+**中文** | [English](./technology-comparison_EN.md)
+
 # 参考：sgl-kernel-npu、Triton-Ascend 与 Ascend C 技术选型
 
 这三个名字不在同一分类维度：

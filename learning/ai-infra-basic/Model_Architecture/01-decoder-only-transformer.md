@@ -1,3 +1,5 @@
+**中文** | [English](./01-decoder-only-transformer_EN.md)
+
 # Decoder-only Transformer：从 Token 到下一个 Token
 
 ## 1. 模型解决的问题

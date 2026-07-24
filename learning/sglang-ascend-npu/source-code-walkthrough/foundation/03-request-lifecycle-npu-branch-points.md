@@ -1,3 +1,5 @@
+**中文** | [English](./03-request-lifecycle-npu-branch-points_EN.md)
+
 # 03. 请求主链路中的 NPU 接入点
 
 > 课程定位：本文件是公共请求链路补充材料。组件主课程会从这里标出的分支点，继续深入各 backend 与 kernel。主目录见[源码串讲 README](../README.md)。

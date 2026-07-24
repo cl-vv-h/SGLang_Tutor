@@ -1,3 +1,5 @@
+**中文** | [English](./04-ttir-mlir-driver-and-cache_EN.md)
+
 # Triton-Ascend 04：TTIR、MLIR、Driver 与 Cache
 
 上一章已经讲了怎么调 Grid、看 UB 和做 benchmark；这一章回答另一个初学者常卡住的问题：`@triton.jit` 写出来的 Python kernel，究竟什么时候变成 `kernel.o`，又是谁把它送进 CANN runtime。

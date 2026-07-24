@@ -1,3 +1,5 @@
+**中文** | [English](./03-function-map_EN.md)
+
 # 函数与代码段定位
 
 本文件把 `tp_worker.py` 与 `model_runner.py` 的关键函数按阅读目的分组。建议先看函数职责，再打开注释版源码逐段阅读。

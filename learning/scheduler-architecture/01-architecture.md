@@ -1,3 +1,5 @@
+**中文** | [English](./01-architecture_EN.md)
+
 # Scheduler 架构总览
 
 ## 一句话理解

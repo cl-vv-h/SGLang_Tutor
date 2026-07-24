@@ -1,3 +1,5 @@
+**中文** | [English](./02-flowcharts_EN.md)
+
 # 详细流程图
 
 ## 1. 从 Scheduler 到模型执行

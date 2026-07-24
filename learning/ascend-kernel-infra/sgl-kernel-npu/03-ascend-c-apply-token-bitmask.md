@@ -1,3 +1,5 @@
+**中文** | [English](./03-ascend-c-apply-token-bitmask_EN.md)
+
 # sgl-kernel-npu 03：Ascend C 源码精读——Apply Token Bitmask
 
 源码基线：`sgl-kernel-npu@b2378ee`。这个算子特别适合串起 Python import、PyTorch 注册、Host tiling、Global/Local Tensor、双缓冲和测试。

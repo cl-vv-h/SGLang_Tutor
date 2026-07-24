@@ -1,3 +1,5 @@
+**中文** | [English](./03-sparse-moe-routing_EN.md)
+
 # Sparse MoE：Router、Top-K、Expert 与数据重排
 
 ## 1. MoE 替换了什么

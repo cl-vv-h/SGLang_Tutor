@@ -1,4 +1,6 @@
-﻿# 第 9 讲：SGLang Router 架构与源码解析
+﻿**中文** | [English](./09-router_EN.md)
+
+# 第 9 讲：SGLang Router 架构与源码解析
 
 前面几讲我们一直在讲 TokenizerManager、Scheduler、ModelRunner、KV cache、PD 分离和 LoRA，但有一个词很容易被遗漏：**router**。
 

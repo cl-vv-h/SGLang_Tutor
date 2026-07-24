@@ -1,3 +1,5 @@
+**中文** | [English](./07-disaggregation-pd_EN.md)
+
 # 第 7 讲：Disaggregation / PD 分离
 
 这一讲接在第 6 讲之后。第 6 讲已经解释了一个统一模型实例内部的多进程、多卡、TP/PP/DP/EP rank 关系；这一讲开始看更高一层的部署拆分：

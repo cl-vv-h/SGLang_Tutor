@@ -1,3 +1,5 @@
+**中文** | [English](./10-sgl-router-source-deep-dive_EN.md)
+
 # 第 10 讲：sgl-router 源码深潜
 
 这一讲专门阅读当前仓库中的 Rust 组件：

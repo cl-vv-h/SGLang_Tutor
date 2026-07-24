@@ -1,3 +1,5 @@
+**中文** | [English](./10-benchmark-debugging_EN.md)
+
 # 10. Benchmark、Profiling 与排错
 
 这一讲给出 Ascend NPU 上 SGLang 的验证、压测和排错方法。核心原则：**先正确，再稳定，最后性能。**

@@ -1,3 +1,5 @@
+**中文** | [English](./13-run-models-by-scenario_EN.md)
+
 # 13. SGLang NPU 多场景模型运行手册
 
 这一讲是场景化启动手册。前面的章节分别讲环境、参数、PD、LoRA、profiling；这一讲把它们组合成“我要跑某类模型/某种部署形态时，该用什么命令、先验收什么、常见坑在哪”。

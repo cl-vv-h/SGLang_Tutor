@@ -1,3 +1,5 @@
+**中文** | [English](./tutorial_EN.md)
+
 # 大模型推理并行策略整理：DP / TP / PP / SP / EP
 
 常见并行策略包括：

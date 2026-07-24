@@ -1,3 +1,5 @@
+**中文** | [English](./02-mamba-principles_EN.md)
+
 # Mamba 原理详解：从 SSM 到 Mamba2 Forward
 
 这一讲只回答一个问题：**Mamba 到底是怎么计算的？**

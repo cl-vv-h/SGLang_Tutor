@@ -1,3 +1,5 @@
+**中文** | [English](./04-npu-backend-args_EN.md)
+
 # 04. NPU 后端参数与默认值
 
 这一讲拆解 SGLang 在 Ascend NPU 上为什么要改默认参数，以及这些参数会影响哪些源码分支。核心文件是：

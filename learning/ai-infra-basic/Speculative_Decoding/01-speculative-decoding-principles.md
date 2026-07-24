@@ -1,3 +1,5 @@
+**中文** | [English](./01-speculative-decoding-principles_EN.md)
+
 # 01. 投机解码的基本原理
 
 ## 1. 解决的问题

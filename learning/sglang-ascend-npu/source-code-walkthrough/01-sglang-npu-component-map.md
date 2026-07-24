@@ -1,3 +1,5 @@
+**中文** | [English](./01-sglang-npu-component-map_EN.md)
+
 # 第一讲：SGLang NPU 全组件与双仓目录总览
 
 本讲不急着进入某个大文件逐行阅读，而是先建立一张稳定的组件地图。以后看到 `is_npu()`、`attention_backend="ascend"`、`torch.ops.npu.*` 或 `sgl_kernel_npu.*` 时，先判断代码属于哪一层、哪个组件，再沿着该组件的调用链继续阅读。

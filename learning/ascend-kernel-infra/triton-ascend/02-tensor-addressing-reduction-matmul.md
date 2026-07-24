@@ -1,3 +1,5 @@
+**中文** | [English](./02-tensor-addressing-reduction-matmul_EN.md)
+
 # Triton-Ascend 02：地址、广播、归约与矩阵分块
 
 Vector Add 只处理一维连续数据。本章把相同模型扩展到二维 tensor、RMSNorm 和矩阵乘，掌握读 `sgl-kernel-npu` Triton 源码所需的核心语法。

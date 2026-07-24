@@ -1,3 +1,5 @@
+**中文** | [English](./02-scheduler-core_EN.md)
+
 # 第 2 讲：Scheduler 调度核心
 
 本讲目标：理解 SGLang 的 Scheduler 如何把离散请求变成连续执行的 GPU batch。重点不是背完每个优化分支，而是抓住三个状态：`waiting_queue`、`last_batch`、`running_batch`。

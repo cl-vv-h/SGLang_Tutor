@@ -1,3 +1,5 @@
+**中文** | [English](./01-global-local-tensor-pipe-queue_EN.md)
+
 # Ascend C 01：Global/Local Tensor、TPipe 与 TQue
 
 Ascend C 把 AI Core 的存储、搬运、计算和同步能力包装成 C/C++ 风格 API。它比 Triton-Ascend 暴露更多硬件细节，也要求开发者承担更多资源与流水设计责任。

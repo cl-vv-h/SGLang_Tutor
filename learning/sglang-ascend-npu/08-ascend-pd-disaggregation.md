@@ -1,3 +1,5 @@
+**中文** | [English](./08-ascend-pd-disaggregation_EN.md)
+
 # 08. Ascend PD Disaggregation 与 KV Transfer
 
 PD disaggregation 是把 Prefill 和 Decode 分离部署：Prefill worker 负责处理 prompt 并生成 KV cache，Decode worker 负责持续生成 token。Ascend NPU 下，SGLang 提供了 Ascend transfer backend 来传输 KV。

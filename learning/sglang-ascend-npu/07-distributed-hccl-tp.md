@@ -1,3 +1,5 @@
+**中文** | [English](./07-distributed-hccl-tp_EN.md)
+
 # 07. 分布式、HCCL 与 Tensor Parallel
 
 这一讲讲 Ascend NPU 多卡推理。SGLang 的上层并行概念仍然是 TP、PP、DP、EP，但底层通信从 CUDA/NCCL 世界切到 Ascend/HCCL 世界。

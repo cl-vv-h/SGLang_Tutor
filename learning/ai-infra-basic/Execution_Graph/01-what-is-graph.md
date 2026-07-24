@@ -1,3 +1,5 @@
+**中文** | [English](./01-what-is-graph_EN.md)
+
 # 什么是 Graph：从计算图到 SGLang CUDA Graph
 
 你在 SGLang 里看到的 `graph`，大多数时候不是“知识图谱”或“数据结构课里的图搜索”，而是**把一段模型计算提前记录成可复用的执行计划**。

@@ -1,3 +1,5 @@
+**中文** | [English](./03-compile-debug-optimize_EN.md)
+
 # Triton-Ascend 03：编译、调试与性能优化
 
 这一章把“能跑”变成“知道为什么这样跑，并能系统调优”。

@@ -1,3 +1,5 @@
+**中文** | [English](./00-feature-map_EN.md)
+
 # SGLang 特性地图：读源码前先认识这些分支
 
 这份文档不是用户手册，而是“读源码词典”。你在看 SGLang 源码时，经常会遇到 `dllm_config is not None`、`disaggregation_mode == PREFILL`、`enable_overlap`、`spec_algorithm`、`enable_hierarchical_cache` 这类分支。它们不是主链，但会频繁插进主链。

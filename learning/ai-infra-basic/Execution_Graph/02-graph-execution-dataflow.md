@@ -1,3 +1,5 @@
+**中文** | [English](./02-graph-execution-dataflow_EN.md)
+
 # Graph 执行原理：调度、数据与流转
 
 上一讲解释了 Graph 是什么。这一讲更具体：在 SGLang 的 decode graph replay 中，**哪些数据会进入 graph，谁决定是否走 graph，graph 内部如何被调度，数据又如何从请求队列一路流到 KV Cache、logits 和 sampler**。

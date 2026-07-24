@@ -1,3 +1,5 @@
+**中文** | [English](./02-add-operator-end-to-end_EN.md)
+
 # Ascend C 02：一个 Add 算子的端到端工程
 
 本章不追求复制某个 CANN 模板的全部样板代码，而是解释一个生产算子从 Python/PyTorch 调用到 device kernel 的每个边界。
