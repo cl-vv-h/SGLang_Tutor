@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # TP Worker 与 ModelRunner 教学目录
 
 本目录用于阅读 SGLang 中 `tp_worker.py` 与 `model_runner.py` 的实现。两者分别位于：

@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # Scheduler 架构专题
 
 本目录专门讲解 `python/sglang/srt/managers/scheduler.py`。目标不是复制完整源码，而是把 Scheduler 的职责、关键状态、主循环、请求入队、prefill/decode 调度、forward 执行、结果处理这些路径拆开讲清楚。

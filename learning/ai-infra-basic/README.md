@@ -1,3 +1,5 @@
+**中文** | [English](./README_EN.md)
+
 # AI Infra 基础专题
 
 这个目录用于补齐阅读 SGLang 源码前后的基础知识。它不直接复刻生产级实现，而是用讲义和小型 Python demo 拆开 LLM serving 中最常见的机制：模型结构、推理流程、调度、KV Cache、attention kernel、执行图、Mamba/SSM、并行、KV 传输、投机解码、量化、LoRA 和 benchmark/profiling。
