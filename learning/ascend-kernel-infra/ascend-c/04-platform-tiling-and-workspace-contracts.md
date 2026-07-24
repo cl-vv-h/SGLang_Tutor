@@ -67,6 +67,36 @@
 
 > `Platform` 提供硬件事实，`Tiling` 消化“输入 + 硬件事实”得到执行计划，`workspace` 提供额外暂存空间，`blockDim` 和 `tiling key` 是执行计划里的两个不同字段。
 
+### 4.1 Tiling 到底是谁算的：开发者写策略，Host 运行时执行
+
+初学者最容易卡在“Host 计算 tiling”这句话上：它听起来像 Host 侧有一个很聪明的自动调度器，会自己理解算子语义、自己决定怎么切。真实情况更朴素，也更工程化：
+
+> **tiling 策略通常由开发者或算子库作者写好；运行时 Host 只是把本次输入 shape、dtype、layout 和 Platform 查询到的硬件事实代入这套策略，算出本次 launch 的具体参数。**
+
+所以答案不是“全靠开发者手算常量”，也不是“Host 自动替你设计最优方案”。更准确地拆成四层：
+
+| 层 | 谁负责 | 做什么 | 对初学者最重要的理解 |
+|---|---|---|---|
+| tiling 策略设计 | 自定义算子开发者，或 CANN/算子库作者 | 写出如何根据 shape、dtype、UB/L1/L0、核数、对齐和算子语义计算 tile 的规则 | 这是“算法/工程设计”，不是硬件凭空推理 |
+| tiling 运行时计算 | Host 侧 C++ wrapper | 在每次 launch 前读取真实输入和目标设备信息，算出 `blockDim`、`tileLength`、尾块、workspace、tiling key 等具体值 | 这是“把策略实例化成本次作业单” |
+| launch 提交 | CANN Runtime / launch stub | 接收 Host 传来的 kernel symbol、stream、设备地址和标量/tiling tensor，把任务提交给 NPU | Runtime 负责提交与排队，不负责理解你的数学算法 |
+| Device 执行 | Ascend C kernel | 用 `GetBlockIdx()` 找到自己的逻辑实例编号，读取 tiling 标量或 tiling tensor，按既定计划搬运、计算、写回 | Device 拿到的是计划结果，不会重新全局规划 `blockDim` |
+
+拿本章后面会读的 `apply_token_bitmask` 举例，开发者在 Host 源码里写下这套策略：
+
+```text
+blockDim  = min(本次需要处理的行数, 当前设备 AIV 核数)
+baseRows  = 行数 / blockDim
+extraRows = 行数 % blockDim
+tileLength 根据 UB 容量、dtypeSize、double buffer、bitmask packing 和 256-element 对齐反推
+```
+
+运行时如果输入是 `[batch=64, vocab=32000]`，Host 会算出一组具体 `blockDim/baseRows/extraCores/tileLength`；如果下一次输入变成 `[batch=1, vocab=128000]`，同一套策略会得到另一组具体值。策略是源码里写好的，具体数值是 launch 前动态算出来的。
+
+如果你调用的是 CANN 内置 ACLNN 或高层算子库，tiling 策略可能藏在库内部，看起来像“库自动算好了”。但这不表示 Host 天生会自动优化任意自定义 kernel；只是这部分策略由库作者替你写了。自己写 Ascend C custom op 时，通常就要自己设计并实现这段 Host tiling 逻辑。
+
+一个实用判断标准是：如果源码里出现 `GetCoreNumAiv()`、`GetCoreMemSize(...)`、`GetLibApiWorkSpaceSize()`、`blockDim = ...`、`tileLength = ...`、`tilingData.set_*` 或构造 `tiling_tensor`，你正在看的基本就是 **Host 侧把策略实例化为本次执行计划** 的过程。
+
 ## 5. 一张图先看完整数据流
 
 ```mermaid
@@ -298,6 +328,7 @@ Host 计算一份“本次 launch 的计划”
 4. **“没看到结构体，说明这个算子没有 tiling。”** 不对。像 `apply_token_bitmask` 这样的算子只是把 tiling 结果拆成标量直接传了。
 5. **“`tiling key` 就是 tile 大小。”** 不对。它更像变体编号，而不是具体尺寸字段。
 6. **“Host 只负责参数检查，性能优化都在 Device。”** 不对。`blockDim`、tile、workspace、缓存策略和 graph capture 兼容性都在 Host 决定。
+7. **“Host 会自动替自定义算子设计最优 tiling。”** 不对。Host 运行的是开发者或库作者写好的 tiling 策略；它能查询硬件、代入 shape 并算具体值，但不会凭空理解一个新算子的访存复用和并行策略。
 
 ## 13. 调试与性能方法
 
@@ -387,6 +418,16 @@ Host 先按共享结构体 ABI 写一块小的 CPU byte buffer，再把它复制
 例如 tiling key 可以编码 transpose、数据格式、量化模式、split-K 或某套专用算法，使 Host/launch 选择匹配的编译变体；`blockDim=32` 则表示该变体启动 32 个 SPMD 实例，由 `GetBlockIdx()` 区分工作。
 
 同一个 tiling key 可以针对不同 shape 使用不同 blockDim，同一个 blockDim 也可能启动不同 tiling key 的 kernel。前者是实现/算法分支，后者是并行规模。把 key 当核数会选错 binary，把 blockDim 当算法变体则无法表达 Device 应执行哪套代码。
+
+### 7. Tiling 是开发者手工设计，还是 Host 自动计算和分配？
+
+**答案：**策略通常由开发者或算子库作者设计，具体参数由 Host 在运行时计算；Host 不会自动发明一个新算子的最优切分方案。
+
+开发者设计的是“公式和规则”，例如按行切还是按二维 tile 切、最多启多少核、每个 tile 需要几份输入输出 buffer、尾块如何处理、是否需要 workspace、是否要根据 dtype 选择不同 kernel 变体。Host 运行时拿到真实输入后，把 `shape/dtype/layout` 与 `Platform` 查询到的 AIV/AIC 数量、UB/L1/L0 容量等硬件事实代入这些规则，得到本次 launch 的 `blockDim`、`tileLength`、`baseRows`、`extraCores`、workspace 大小或 tiling tensor 字段。
+
+以 `apply_token_bitmask` 为例，`blockDim=min(numRows,coreNum)` 和 UB 预算公式是源码中写死的策略；`numRows`、`coreNum`、`dtypeSize`、`ubSize` 是运行时才知道的值；最终的 `blockDim/baseRows/extraCores/tileLength` 是 Host launch 前算出的 tiling 结果。Device kernel 启动后只通过 `GetBlockIdx()` 和这些参数决定自己处理哪几行、每轮处理多少 vocab 元素，它不会再反过来改变全局 `blockDim`。
+
+如果使用 CANN 内置算子，tiling 代码可能在库内部，所以调用者感觉“Host/库自动算了”；但那是库作者预先实现的策略，并不是 Runtime 对任意 kernel 做通用自动规划。写自定义 Ascend C 算子时，tiling 设计本身就是核心开发工作之一。
 
 ## 16. 官方资料
 

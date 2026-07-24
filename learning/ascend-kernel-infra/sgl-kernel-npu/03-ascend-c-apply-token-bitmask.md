@@ -25,6 +25,65 @@ bit = 0 -> 将 logit 写成 -inf
 
 它可用于约束解码：被 mask 的 token 经 softmax 后概率为 0。
 
+### 1.1 用推理场景解释：它到底在改什么
+
+LLM 每生成下一个 token 前，模型会输出一行或多行 `logits`。`logits[b, v]` 可以先理解为：第 `b` 条请求在词表位置 `v` 上的“未归一化分数”。后续 sampler 会对这行分数做 temperature、top-k/top-p、softmax 和采样等步骤。
+
+`apply_token_bitmask` 做的事非常单一：**把不允许出现的 token 的 logit 改成 `-inf`**。这样 softmax 后这些 token 的概率就是 0，采样器就不可能选到它们。
+
+它不是 top-k，也不是排序，也不是重新归一化概率。它只是在采样前做一层“允许/禁止”过滤。典型用途包括：
+
+- 约束解码：例如 JSON、正则、语法树或结构化输出要求某些位置只能生成特定 token；
+- 业务规则：某些 token 在当前请求中被禁止；
+- 动态 mask：每一步解码根据历史上下文更新可选 token 集合。
+
+这一点很关键：`bitmask` 表示的是“词表维度上的许可表”，不是 batch 里有哪些请求，也不是 top-k 返回的候选列表。
+
+### 1.2 `bitmask` 怎么对应 token id
+
+**token id**，也叫 vocabulary index，是 tokenizer 把文本切成 token 后得到的整数编号，范围通常是 `[0, vocab_size)`。例如词表大小是 32000，那么 token id 可能是 0、1、2、……、31999。
+
+`bitmask` 没有为每个 token id 存一个完整 `bool` 或 `int32`，而是把 32 个 token 的许可状态打包进一个 `INT32`。源码里用常量 `BITS_PER_INT32 = 32` 表达这个协议。
+
+对第 `b` 行、第 `token_id` 个词表位置：
+
+```text
+word_id = token_id / 32
+bit_id  = token_id % 32
+
+packed  = bitmask[b, word_id]
+allowed = ((packed >> bit_id) & 1) == 1
+```
+
+举一个很小的例子，假设 `vocab_size=10`，那么每行只需要 `ceil(10/32)=1` 个 `INT32`。如果第 0 行只允许 token `{2, 5, 9}`，那么这个 `INT32` 的第 2、5、9 个 bit 是 1，其他 bit 是 0。kernel 遍历 logits 的时候，发现 bit=0 就把对应 logit 写成 `-inf`。
+
+这也是为什么 Device 侧 CopyIn 里 bitmask 的偏移是 `vocabOffset / 32`：logits 的偏移单位是“一个 token 位置”，bitmask 的偏移单位却是“一个 packed INT32 word”，两者不是同一个物理元素单位。
+
+### 1.3 `indices` 是什么：这里是 batch 行号，不是 token id
+
+AI 推理代码里经常出现 `indices`，它的字面意思只是“索引”，也就是一组整数编号。它具体指什么，必须看当前算子的约定。常见含义包括：
+
+| 场景 | `indices` 可能表示什么 |
+|---|---|
+| tokenizer / embedding | token id，表示去 embedding 表里取第几个词表项 |
+| top-k | 候选 token 的词表下标，例如 `topk_idx=[13, 502, 998]` |
+| KV Cache | cache slot 或 block id，表示读写 KV cache 的位置 |
+| MoE | expert id，表示 token 被路由到哪个专家 |
+| gather/scatter | 行号、列号或任意维度的位置 |
+| 本算子 | **batch row indices**，表示只处理 logits/bitmask 的哪些行 |
+
+所以本章里的 `indices` 千万不要理解成“要保留或屏蔽的 token id 列表”。要保留哪些 token 已经由 `bitmask` 在 vocab 维度编码好了；`indices` 只是在 batch 维度选择“哪些请求行需要应用这张 bitmask”。
+
+例如：
+
+```text
+logits.shape = [4, vocab_size]
+batch 行号    = 0, 1, 2, 3
+indices      = [1, 3]
+```
+
+含义是：只对第 1 行和第 3 行应用 bitmask，第 0 行和第 2 行不处理。Host 会先把 `logits[indices]` 和 `bitmask[indices]` gather 成一个较小的连续 tensor，kernel 只处理这个小 tensor；kernel 完成后，Host 再把结果 scatter 回原 `logits` 的第 1、3 行。
+
 ## 2. 完整调用链
 
 ```mermaid
@@ -69,15 +128,37 @@ apply_token_bitmask(Tensor logits, Tensor bitmask, Tensor? indices=None) -> Tens
 
 ## 5. Optional Indices
 
-有 `indices` 时只处理选中行：
+有 `indices` 时只处理选中行。源码中的 Host 路径可以压缩成下面几步：
 
 ```text
-rowIndices = indices -> int64 contiguous
-selectedBitmask = bitmask[rowIndices]
-selectedLogits = logits[rowIndices]
+hasIndices      = indices 存在、defined 且 numel > 0
+rowIndices      = indices -> int64 -> contiguous
+selectedBitmask = bitmask.index({rowIndices}).contiguous()
+selectedLogits  = logits.index({rowIndices})
+result          = 对 selectedLogits / selectedBitmask 启动 NPU kernel
+logits.index_put_({rowIndices}, result)
 ```
 
-Kernel 完成后再用 `index_put_` 写回原 logits。这个功能减少 device kernel 内复杂的行映射，但 Host 端 gather/scatter 也有成本；是否更快取决于选中行数。
+这里每个变量的含义是：
+
+| 名字 | 类型/形状 | 含义 |
+|---|---|---|
+| `indices` | `c10::optional<at::Tensor>` | Python 传入的可选索引张量；可能为空 |
+| `rowIndices` | `at::Tensor`，1D，`int64` | Host 规范化后的 batch 行号 |
+| `selectedBitmask` | `at::Tensor`，`[num_indices, padded_bitmask_width]` 或原 bitmask view/contiguous tensor | 被选中的 bitmask 行 |
+| `selectedLogits` | `at::Tensor`，`[num_indices, padded_vocab_size]` 或原 logits view/contiguous tensor | 被选中的 logits 行 |
+| `numIndices` | `int64_t` | 实际需要处理的行数；没有 indices 时等于 batch |
+| `result` | `at::Tensor` | kernel 修改后的选中行结果 |
+
+真实源码证据链在 Host 文件中非常集中：
+
+- [`#L35-L43`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L35-L43)：判断是否有 `indices`，并把它转为 1D `int64` 的 `rowIndices`；
+- [`#L63-L66`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L63-L66)：有 indices 时 gather 选中 logits 行；
+- [`#L159-L160`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L159-L160)：kernel 完成后把结果写回原 logits 对应行。
+
+为什么不让 Device kernel 直接拿原始 `indices` 做行映射？可以做，但当前实现选择把复杂度放在 Host 侧：Host 先 gather 成紧凑连续的 selected tensor，Device kernel 仍然看到一个从 0 到 `numIndices-1` 的普通 batch。这样 Device 侧地址计算简单，`blockDim/baseRows/extraCores` 也仍按连续行来算。代价是 Host 侧多了 gather/scatter 和临时 tensor；当只选中少量宽行时通常值得，当几乎所有行都选中或每行很短时可能不划算。
+
+再强调一次：本算子的 `indices` 是 **batch 行索引**。如果你想表达“token id 17 不允许生成”，应该改对应行 `bitmask` 的第 `17/32` 个 word、第 `17%32` 个 bit，而不是把 17 放进 `indices`。
 
 ## 6. 为什么 Padding 到 256 元素
 
@@ -373,6 +454,16 @@ Kernel launch 提交到 stream 后会立即返回 Host。局部 `workingLogits`/
 4. `csrc/CMakeLists.txt` 把 Host 和 device 源码编入 `libsgl_kernel_npu.so`。
 
 这四处共同证明实现归属。`torch.ops.npu` 只是注册后的调用名称，同一 namespace 也可以包含 torch_npu 或其他扩展注册的算子。
+
+### 7. 本算子里的 `indices` 为什么不是“要屏蔽的 token id 列表”？
+
+**答案：**因为 token 维度的允许/禁止信息已经由 `bitmask` 表达，`indices` 只在 batch 维度选择哪些行要处理。
+
+看 shape 就能分清职责：`logits` 是 `[batch, vocab_size]`，`bitmask` 是 `[batch, ceil(vocab_size/32)]`。每一行 bitmask 覆盖这一行 logits 的整个 vocab 维度，某个 token id 是否允许由 `word_id=token_id/32` 和 `bit_id=token_id%32` 定位到具体 bit。也就是说，“屏蔽哪些 token”是 `bitmask` 的工作。
+
+`indices` 的 Host 代码则是 `bitmask.index({rowIndices})`、`logits.index({rowIndices})` 和最后的 `logits.index_put_({rowIndices}, result)`。这些操作都发生在第 0 维，也就是 batch 行维度。若 `indices=[1,3]`，它表示只处理 batch 第 1、3 行，而不是处理 token id 1 和 token id 3。
+
+AI 推理里 `indices` 这个词很泛：top-k indices 通常是 token id，MoE indices 可能是 expert id，KV cache indices 可能是 cache slot，gather/scatter indices 可能是行号或列号。读源码时不要靠变量名猜语义，要同时看 shape、使用位置和后续 gather/scatter 的维度。
 
 ## 对应源码
 

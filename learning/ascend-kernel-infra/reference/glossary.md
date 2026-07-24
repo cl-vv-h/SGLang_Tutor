@@ -68,6 +68,7 @@
 | aclOpExecutor | ACLNN 两段式接口返回的执行句柄，封装本次算子的计算流程，后续与 workspace、stream 一起提交执行 |
 | Operator Library / 算子库 | 已由 CANN 预先提供的标准或融合算子实现集合，优先用于复用而不是重复写 kernel |
 | Tiling | 根据具体 shape、dtype 和硬件资源计算 blockDim、tile、workspace 等切分参数的过程/协议 |
+| Tiling Strategy / Tiling 策略 | 开发者或算子库作者写在 Host 侧的切分规则；运行时 Host 把本次 shape、dtype、layout 与 Platform 查询结果代入策略，得到具体 `blockDim/tileLength/workspace/tiling key` 等参数 |
 | Platform | 向编译器和 Host 侧暴露硬件核数、存储层级、架构能力等事实的查询与抽象层 |
 | PlatformAscendCManager | Ascend C Host 侧常见的平台查询单例接口，可读取 AIV/AIC 核数、UB/L1/L0 容量和库侧 workspace 需求等信息 |
 | Tiling Key | Host 编码出的 kernel 变体选择值，用来区分不同 transpose、dtype、format、split-K 等实现路径，不等于 tile 大小本身 |
@@ -108,6 +109,8 @@
 | Tail / 尾块 | 总长度不能整除 tile 或核数时剩余的数据部分 |
 | Mask | 标记 block tensor 中哪些 lane 的 load/store/compute 有效 |
 | Stride | 某维索引增加 1 时，线性内存地址跨过的元素数 |
+| Indices / 索引张量 | 保存位置编号的整型张量；具体可能是 token id、batch 行号、cache slot、expert id、top-k 返回下标等，必须结合 shape 和 gather/scatter 维度判断。在 `apply_token_bitmask` 中特指 batch row indices |
+| Token ID / Vocabulary Index | token 在词表中的整数编号，范围通常是 `[0, vocab_size)`；在 logits 中常对应 vocab 维度的位置，不等于 batch 行号 |
 | Layout/Format | Tensor 元素在物理内存中的组织方式，如 ND、NZ |
 | Packed B=1 Layout | 把多条样本沿 token 维拼成一条长序列，对外保留 `B=1` 壳子，再用 `cu_seqlens` 恢复每条样本边界的布局约定 |
 | `cu_seqlens` | cumulative sequence lengths，记录 packed 变长输入每条样本起止位置的前缀和数组 |
@@ -129,8 +132,12 @@
 | HBM | 设备上的高带宽外部内存；在本课程中常作为 GM 的物理背景理解 |
 | L2 Cache | 多核共享的 GM 访问缓存 |
 | L1 Buffer | 较大的片上中转/复用存储，常服务 Cube 数据 |
+| A1/B1 | Ascend C `TPosition` 中常见的 Cube A/B 操作数在 L1 阶段的逻辑位置；它描述数据角色，不应被硬编码理解为所有架构上的固定物理分区 |
+| L1A/L1B | 资料或口语中有时用来描述 L1 中服务 A/B 操作数的区域或角色；不同硬件映射可能不同，初学时优先用 A1/B1 这种逻辑位置理解 |
 | L0A/L0B | Cube A/B 输入操作数的近端存储 |
+| A2/B2 | Ascend C `TPosition` 中常见的 Cube A/B 操作数在 L0 阶段的逻辑位置，通常对应 L0A/L0B 角色 |
 | L0C | Cube 累加结果存储 |
+| CO1/CO2 | Cube 输出或累加结果相关的逻辑位置/阶段命名，常与 L0C、输出格式转换和写回路径相关；具体含义需看目标架构和 API 文档 |
 | UB | Unified Buffer，Vector 输入输出和临时数据的主要片上存储 |
 
 ## E. Ascend C 数据与资源
