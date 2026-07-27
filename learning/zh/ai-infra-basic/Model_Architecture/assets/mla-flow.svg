@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="650" viewBox="0 0 1320 650" role="img" aria-labelledby="title desc">
+  <title id="title">Multi-head latent attention data flow</title>
+  <desc id="desc">Hidden states are compressed into query and key-value latent representations, expanded into content heads, combined with decoupled rotary position heads, and processed by attention.</desc>
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#334155"/></marker><style>.b{stroke:#334155;stroke-width:2;rx:6}.t{font:600 18px Arial,sans-serif;fill:#0f172a}.s{font:14px Consolas,monospace;fill:#334155}.l{stroke:#334155;stroke-width:3;fill:none;marker-end:url(#a)}</style></defs>
+  <rect width="1320" height="650" fill="#f8fafc"/>
+  <rect class="b" x="35" y="270" width="155" height="100" fill="#dbeafe"/><text class="t" x="112" y="307" text-anchor="middle">Hidden States</text><text class="s" x="112" y="340" text-anchor="middle">X [B,S,H]</text>
+  <rect class="b" x="250" y="70" width="205" height="115" fill="#dcfce7"/><text class="t" x="352" y="106" text-anchor="middle">Query Compression</text><text class="s" x="352" y="138" text-anchor="middle">Cq [B,S,Dcq]</text><text class="s" x="352" y="163" text-anchor="middle">Dcq &lt;&lt; N*Dq</text>
+  <rect class="b" x="250" y="420" width="205" height="115" fill="#dcfce7"/><text class="t" x="352" y="456" text-anchor="middle">KV Down Projection</text><text class="s" x="352" y="488" text-anchor="middle">[Ckv, Kr] [B,S,Dc+Dr]</text><text class="s" x="352" y="513" text-anchor="middle">content + position paths</text>
+  <rect class="b" x="520" y="35" width="220" height="105" fill="#fef3c7"/><text class="t" x="630" y="72" text-anchor="middle">Query Content Heads</text><text class="s" x="630" y="105" text-anchor="middle">Qc [B,S,N,Dc_h]</text>
+  <rect class="b" x="520" y="175" width="220" height="105" fill="#fef3c7"/><text class="t" x="630" y="212" text-anchor="middle">Query RoPE Heads</text><text class="s" x="630" y="245" text-anchor="middle">Qr [B,S,N,Dr]</text>
+  <rect class="b" x="520" y="350" width="220" height="105" fill="#fce7f3"/><text class="t" x="630" y="387" text-anchor="middle">Key Content Heads</text><text class="s" x="630" y="420" text-anchor="middle">Kc [B,S,N,Dc_h]</text>
+  <rect class="b" x="520" y="490" width="220" height="105" fill="#fce7f3"/><text class="t" x="630" y="527" text-anchor="middle">Value Heads</text><text class="s" x="630" y="560" text-anchor="middle">V [B,S,N,Dv]</text>
+  <rect class="b" x="805" y="350" width="210" height="105" fill="#fee2e2"/><text class="t" x="910" y="387" text-anchor="middle">Shared RoPE Key</text><text class="s" x="910" y="420" text-anchor="middle">Kr [B,S,1,Dr]</text>
+  <rect class="b" x="805" y="490" width="210" height="105" fill="#e0e7ff"/><text class="t" x="910" y="527" text-anchor="middle">KV Cache</text><text class="s" x="910" y="558" text-anchor="middle">store Ckv + Kr</text><text class="s" x="910" y="580" text-anchor="middle">[B,S,Dc+Dr]</text>
+  <rect class="b" x="1080" y="205" width="205" height="180" fill="#fff7ed"/><text class="t" x="1182" y="245" text-anchor="middle">Latent Attention</text><text class="s" x="1182" y="280" text-anchor="middle">Q = concat(Qc,Qr)</text><text class="s" x="1182" y="310" text-anchor="middle">K = concat(Kc,Kr)</text><text class="s" x="1182" y="340" text-anchor="middle">O [B,S,N,Dv]</text>
+  <path class="l" d="M190 320 C220 320 220 127 240 127"/><path class="l" d="M190 320 C220 320 220 477 240 477"/>
+  <path class="l" d="M455 127 C485 127 485 87 510 87"/><path class="l" d="M455 127 C485 127 485 227 510 227"/>
+  <path class="l" d="M455 477 C485 477 485 402 510 402"/><path class="l" d="M455 477 C485 477 485 542 510 542"/><path class="l" d="M455 477 C650 477 650 402 795 402"/>
+  <path class="l" d="M740 87 C980 87 1000 250 1070 250"/><path class="l" d="M740 227 C950 227 1000 280 1070 280"/><path class="l" d="M740 402 C930 402 1000 320 1070 320"/><path class="l" d="M740 542 C930 542 1000 350 1070 350"/>
+  <path class="l" d="M910 455 V480"/><path class="l" d="M1015 402 H1070"/>
+</svg>

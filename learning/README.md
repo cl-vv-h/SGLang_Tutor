@@ -1,14 +1,27 @@
-**中文** | [English](./README_EN.md)
+# SGLang 教学目录 / SGLang Learning Hub
 
-# SGLang 教学目录
+选择你的语言 / Choose your language:
 
-这里存放面向源码学习的中文教学材料。仓库中的 SGLang 原版代码仅作为教学引用，学习笔记会尽量通过“文件 + 函数 + 关键代码段”的方式定位源码，避免依赖容易漂移的绝对路径。
+- [**中文版**](./zh/) — 面向源码学习的中文教学材料
+- [**English**](./en/) — English educational materials for source code learning
 
-## 专题目录
+---
 
-- [sglang-source-reading](./sglang-source-reading/)：SGLang 源码总览阅读路线。
-- [scheduler-architecture](./scheduler-architecture/)：`Scheduler` 架构、请求调度流程、流程图与带中文注释的代码导读。
-- [tp-worker-model-runner](./tp-worker-model-runner/)：`TpModelWorker` 与 `ModelRunner` 的架构、执行流程、函数定位和中文注释版源码副本。
-- [sglang-ascend-npu](./sglang-ascend-npu/)：SGLang Ascend NPU 实践总览，覆盖环境、NPU 后端、attention、graph、HCCL、PD 分离、LoRA 与调优路线。
-- [ai-infra-basic](./ai-infra-basic/)：AI Infra 基础专题，按推理基础、调度优化、KV Cache、Attention Kernel、执行图、Mamba/SSM、并行策略、KV 传输、投机解码、量化、LoRA、Benchmark/Profiling 组织。
-- [ascend-kernel-infra](./ascend-kernel-infra/)：继续下沉到 Ascend NPU 算子层，学习 sgl-kernel-npu、Triton-Ascend、Ascend C、torch_npu 的关系、编程模型与性能优化。
+本仓库中的 SGLang 原版代码仅作为教学引用，学习笔记通过"文件 + 函数 + 关键代码段"定位源码。
+
+The original SGLang source code in this repository is used only as teaching reference. Learning notes locate source code through "file + function + key code snippets."
+
+## 专题目录 / Topics
+
+| 中文 | English |
+|---|---|
+| [sglang-source-reading](./zh/sglang-source-reading/) | [sglang-source-reading](./en/sglang-source-reading/) — SGLang 源码阅读路线 / Source reading roadmap |
+| [scheduler-architecture](./zh/scheduler-architecture/) | [scheduler-architecture](./en/scheduler-architecture/) — Scheduler 架构 / Architecture |
+| [tp-worker-model-runner](./zh/tp-worker-model-runner/) | [tp-worker-model-runner](./en/tp-worker-model-runner/) — TpModelWorker & ModelRunner |
+| [sglang-ascend-npu](./zh/sglang-ascend-npu/) | [sglang-ascend-npu](./en/sglang-ascend-npu/) — Ascend NPU 实践 / NPU Practice |
+| [ai-infra-basic](./zh/ai-infra-basic/) | [ai-infra-basic](./en/ai-infra-basic/) — AI Infra 基础 / Fundamentals |
+| [ascend-kernel-infra](./zh/ascend-kernel-infra/) | [ascend-kernel-infra](./en/ascend-kernel-infra/) — Ascend NPU 算子 / Kernel Layer |
+
+## 语言切换指南 / Language Guide
+
+See [LANGUAGE.md](./LANGUAGE.md) for the complete translation status and contribution guide.

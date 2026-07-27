@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="430" viewBox="0 0 1280 430" role="img" aria-labelledby="title desc">
+  <title id="title">Decoder-only language model data flow</title>
+  <desc id="desc">Token ids pass through embedding, repeated decoder blocks, final normalization, language model head, and sampling.</desc>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#334155"/></marker><style>.box{stroke:#334155;stroke-width:2;rx:6}.t{font:600 20px Arial,sans-serif;fill:#0f172a}.s{font:16px Consolas,monospace;fill:#334155}.a{stroke:#334155;stroke-width:3;fill:none;marker-end:url(#arrow)}</style></defs>
+  <rect width="1280" height="430" fill="#f8fafc"/>
+  <rect class="box" x="35" y="145" width="150" height="120" fill="#dbeafe"/><text class="t" x="110" y="185" text-anchor="middle">Token IDs</text><text class="s" x="110" y="220" text-anchor="middle">[B,S]</text>
+  <rect class="box" x="235" y="145" width="170" height="120" fill="#dcfce7"/><text class="t" x="320" y="185" text-anchor="middle">Embedding</text><text class="s" x="320" y="220" text-anchor="middle">[B,S,H]</text>
+  <rect class="box" x="465" y="70" width="300" height="270" fill="#fff7ed"/><text class="t" x="615" y="108" text-anchor="middle">Decoder Block x L</text>
+  <rect class="box" x="500" y="132" width="230" height="72" fill="#fef3c7"/><text class="t" x="615" y="162" text-anchor="middle">Causal Attention</text><text class="s" x="615" y="187" text-anchor="middle">[B,S,H] -&gt; [B,S,H]</text>
+  <rect class="box" x="500" y="232" width="230" height="72" fill="#fce7f3"/><text class="t" x="615" y="262" text-anchor="middle">FFN or Sparse MoE</text><text class="s" x="615" y="287" text-anchor="middle">[B,S,H] -&gt; [B,S,H]</text>
+  <rect class="box" x="825" y="145" width="145" height="120" fill="#e0e7ff"/><text class="t" x="897" y="185" text-anchor="middle">Norm</text><text class="s" x="897" y="220" text-anchor="middle">[B,S,H]</text>
+  <rect class="box" x="1020" y="145" width="130" height="120" fill="#fee2e2"/><text class="t" x="1085" y="185" text-anchor="middle">LM Head</text><text class="s" x="1085" y="220" text-anchor="middle">[B,S,V]</text>
+  <rect class="box" x="1185" y="145" width="70" height="120" fill="#f1f5f9"/><text class="t" x="1220" y="190" text-anchor="middle">Next</text><text class="t" x="1220" y="218" text-anchor="middle">Token</text><text class="s" x="1220" y="245" text-anchor="middle">[B]</text>
+  <path class="a" d="M185 205 H225"/><path class="a" d="M405 205 H455"/><path class="a" d="M765 205 H815"/><path class="a" d="M970 205 H1010"/><path class="a" d="M1150 205 H1175"/>
+  <text class="s" x="615" y="382" text-anchor="middle">B = batch, S = sequence length, H = hidden size, L = layers, V = vocabulary</text>
+</svg>

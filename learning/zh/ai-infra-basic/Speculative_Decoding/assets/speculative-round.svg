@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc">
+  <title id="title">Speculative decoding round</title>
+  <desc id="desc">A single speculative decoding round from request state through draft, target verify, accept, commit, and next state.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#344054"/>
+    </marker>
+    <style>
+      .box { fill: #ffffff; stroke: #344054; stroke-width: 2; rx: 8; }
+      .draft { fill: #eef6ff; stroke: #1d5f99; }
+      .target { fill: #fff4e8; stroke: #b95d13; }
+      .accept { fill: #ecfdf3; stroke: #11804b; }
+      .state { fill: #f8fafc; stroke: #475467; }
+      .text { font-family: Arial, sans-serif; fill: #182230; font-size: 18px; }
+      .small { font-size: 14px; fill: #475467; }
+      .mono { font-family: Consolas, monospace; font-size: 14px; fill: #344054; }
+      .arrow { stroke: #344054; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+      .thin { stroke: #98a2b3; stroke-width: 1.5; fill: none; }
+    </style>
+  </defs>
+
+  <rect x="20" y="30" width="1080" height="460" fill="#f9fafb" stroke="#d0d5dd"/>
+  <text x="50" y="70" class="text" font-weight="700">One speculative decoding round</text>
+  <text x="50" y="96" class="small">The draft path guesses multiple tokens; the target model verifies them; only accepted tokens are committed.</text>
+
+  <rect x="50" y="145" width="150" height="110" class="box state"/>
+  <text x="75" y="177" class="text" font-weight="700">Request state</text>
+  <text x="70" y="205" class="mono">output_ids</text>
+  <text x="70" y="226" class="mono">seq_len</text>
+  <text x="70" y="247" class="mono">target KV</text>
+
+  <rect x="250" y="145" width="160" height="110" class="box draft"/>
+  <text x="285" y="177" class="text" font-weight="700">Draft path</text>
+  <text x="275" y="205" class="mono">y1 ... yK</text>
+  <text x="275" y="226" class="mono">q1 ... qK</text>
+  <text x="275" y="247" class="small">cheap proposal</text>
+
+  <rect x="460" y="145" width="170" height="110" class="box target"/>
+  <text x="500" y="177" class="text" font-weight="700">Target verify</text>
+  <text x="485" y="205" class="mono">p1 ... pK</text>
+  <text x="485" y="226" class="mono">p(K+1)</text>
+  <text x="485" y="247" class="small">short extend/prefill</text>
+
+  <rect x="680" y="145" width="160" height="110" class="box accept"/>
+  <text x="718" y="177" class="text" font-weight="700">Accept</text>
+  <text x="705" y="205" class="mono">A accepted</text>
+  <text x="705" y="226" class="mono">+ correction</text>
+  <text x="705" y="247" class="small">or bonus token</text>
+
+  <rect x="890" y="145" width="160" height="110" class="box state"/>
+  <text x="930" y="177" class="text" font-weight="700">Commit</text>
+  <text x="915" y="205" class="mono">append tokens</text>
+  <text x="915" y="226" class="mono">update KV</text>
+  <text x="915" y="247" class="mono">stop/logprob</text>
+
+  <path d="M200 200 L250 200" class="arrow"/>
+  <path d="M410 200 L460 200" class="arrow"/>
+  <path d="M630 200 L680 200" class="arrow"/>
+  <path d="M840 200 L890 200" class="arrow"/>
+
+  <rect x="250" y="330" width="180" height="75" class="box draft"/>
+  <text x="278" y="360" class="text" font-weight="700">Next draft state</text>
+  <text x="275" y="384" class="small">draft KV / hidden / trie</text>
+
+  <path d="M970 255 C970 360 535 365 430 365" class="arrow"/>
+  <path d="M340 330 C340 295 330 280 330 255" class="thin"/>
+
+  <text x="72" y="310" class="mono">normal decode: 1 target step -> 1 token</text>
+  <text x="72" y="337" class="mono">spec decode: 1 target verify -> A+1 tokens</text>
+  <text x="72" y="364" class="mono">A excludes the correction/bonus token</text>
+</svg>

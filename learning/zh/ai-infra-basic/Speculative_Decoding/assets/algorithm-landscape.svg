@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="620" viewBox="0 0 1180 620" role="img" aria-labelledby="title desc">
+  <title id="title">Speculative inference algorithm landscape</title>
+  <desc id="desc">Algorithms arranged by draft source and verification geometry.</desc>
+  <defs>
+    <style>
+      .axis { stroke: #344054; stroke-width: 2; marker-end: url(#arrow); }
+      .grid { stroke: #e4e7ec; stroke-width: 1; }
+      .point { stroke: #344054; stroke-width: 1.5; rx: 8; }
+      .text { font-family: Arial, sans-serif; fill: #182230; font-size: 17px; }
+      .small { font-family: Arial, sans-serif; fill: #475467; font-size: 13px; }
+      .label { font-family: Arial, sans-serif; fill: #182230; font-size: 14px; font-weight: 700; }
+      .a { fill: #eef6ff; }
+      .b { fill: #fff4e8; }
+      .c { fill: #ecfdf3; }
+      .d { fill: #f4f3ff; }
+      .e { fill: #fef3f2; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#344054"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="25" width="1140" height="570" fill="#ffffff" stroke="#d0d5dd"/>
+  <text x="50" y="65" class="text" font-weight="700">Speculative inference algorithms: draft source vs verify geometry</text>
+  <text x="50" y="92" class="small">Most methods differ by how candidates are produced and how many candidate paths the target verifies per round.</text>
+
+  <line x1="120" y1="505" x2="1060" y2="505" class="axis"/>
+  <line x1="120" y1="505" x2="120" y2="135" class="axis"/>
+
+  <text x="430" y="555" class="label">Draft source: external model / retrieval -> internal heads / target features</text>
+  <text x="32" y="315" class="label" transform="rotate(-90 32,315)">Verify geometry: linear chain -> tree / ragged block</text>
+
+  <line x1="120" y1="385" x2="1060" y2="385" class="grid"/>
+  <line x1="120" y1="265" x2="1060" y2="265" class="grid"/>
+  <line x1="355" y1="135" x2="355" y2="505" class="grid"/>
+  <line x1="590" y1="135" x2="590" y2="505" class="grid"/>
+  <line x1="825" y1="135" x2="825" y2="505" class="grid"/>
+
+  <rect x="170" y="405" width="170" height="58" class="point a"/>
+  <text x="190" y="430" class="label">Classic / STANDALONE</text>
+  <text x="190" y="450" class="small">small draft model, chain</text>
+
+  <rect x="405" y="408" width="150" height="58" class="point c"/>
+  <text x="430" y="433" class="label">NGRAM</text>
+  <text x="425" y="453" class="small">context lookup</text>
+
+  <rect x="610" y="390" width="170" height="58" class="point c"/>
+  <text x="650" y="415" class="label">REST</text>
+  <text x="632" y="435" class="small">retrieval continuation</text>
+
+  <rect x="840" y="362" width="165" height="58" class="point d"/>
+  <text x="875" y="387" class="label">LayerSkip</text>
+  <text x="862" y="407" class="small">early layer draft</text>
+
+  <rect x="200" y="245" width="150" height="58" class="point b"/>
+  <text x="238" y="270" class="label">SpecInfer</text>
+  <text x="222" y="290" class="small">tree verification</text>
+
+  <rect x="530" y="235" width="155" height="58" class="point d"/>
+  <text x="575" y="260" class="label">Medusa</text>
+  <text x="550" y="280" class="small">multi-token heads</text>
+
+  <rect x="740" y="215" width="180" height="58" class="point e"/>
+  <text x="792" y="240" class="label">EAGLE</text>
+  <text x="760" y="260" class="small">feature draft + tree</text>
+
+  <rect x="930" y="210" width="145" height="58" class="point e"/>
+  <text x="977" y="235" class="label">MTP</text>
+  <text x="948" y="255" class="small">native future heads</text>
+
+  <rect x="690" y="125" width="160" height="58" class="point b"/>
+  <text x="732" y="150" class="label">DFlash</text>
+  <text x="710" y="170" class="small">linear block verify</text>
+
+  <rect x="880" y="125" width="160" height="58" class="point b"/>
+  <text x="925" y="150" class="label">DSpark</text>
+  <text x="900" y="170" class="small">ragged/block verify</text>
+
+  <rect x="445" y="135" width="170" height="58" class="point a"/>
+  <text x="486" y="160" class="label">Lookahead</text>
+  <text x="465" y="180" class="small">parallel future guesses</text>
+</svg>
