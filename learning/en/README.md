@@ -1,6 +1,6 @@
 # SGLang Learning Hub
 
-This directory contains Chinese-language educational materials for source code learning. The original SGLang code in the repository is used only as teaching reference; learning notes aim to locate source code through "file + function + key code snippets" approach, avoiding dependency on easily shifting absolute paths.
+This directory contains English-language educational materials for source code learning. The original SGLang code in the repository is used only as teaching reference; learning notes aim to locate source code through a "file + function + key code snippets" approach, avoiding dependency on easily shifting absolute paths.
 
 ## Topic Directory
 

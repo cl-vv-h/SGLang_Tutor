@@ -8,25 +8,25 @@ This topic provides a component-by-component walkthrough of how SGLang integrate
 
 | File | Content |
 |---|---|
-| [00-reading-method-and-branch-search.md](./foundation/00-reading-method-and-branch-search_EN.md) | How to read SGLang NPU source: search strategies, branch identification |
-| [01-platform-detection-and-process-startup.md](./foundation/01-platform-detection-and-process-startup_EN.md) | `is_npu()`, platform detection, and process startup flow |
-| [02-server-args-and-npu-defaults.md](./foundation/02-server-args-and-npu-defaults_EN.md) | Server arguments with NPU-specific defaults |
-| [03-request-lifecycle-npu-branch-points.md](./foundation/03-request-lifecycle-npu-branch-points_EN.md) | Request lifecycle with NPU branch points annotated |
-| [04-model-loading-dtype-and-layout.md](./foundation/04-model-loading-dtype-and-layout_EN.md) | Model loading, dtype handling, and tensor layout for NPU |
-| [05-model-runner-forward-batch-and-input-buffers.md](./foundation/05-model-runner-forward-batch-and-input-buffers_EN.md) | ModelRunner forward, batches, and NPU input buffers |
+| [00-reading-method-and-branch-search.md](./foundation/00-reading-method-and-branch-search.md) | How to read SGLang NPU source: search strategies, branch identification |
+| [01-platform-detection-and-process-startup.md](./foundation/01-platform-detection-and-process-startup.md) | `is_npu()`, platform detection, and process startup flow |
+| [02-server-args-and-npu-defaults.md](./foundation/02-server-args-and-npu-defaults.md) | Server arguments with NPU-specific defaults |
+| [03-request-lifecycle-npu-branch-points.md](./foundation/03-request-lifecycle-npu-branch-points.md) | Request lifecycle with NPU branch points annotated |
+| [04-model-loading-dtype-and-layout.md](./foundation/04-model-loading-dtype-and-layout.md) | Model loading, dtype handling, and tensor layout for NPU |
+| [05-model-runner-forward-batch-and-input-buffers.md](./foundation/05-model-runner-forward-batch-and-input-buffers.md) | ModelRunner forward, batches, and NPU input buffers |
 
 ### Component Deep Dives
 
 | File | Content |
 |---|---|
-| [01-sglang-npu-component-map.md](./01-sglang-npu-component-map_EN.md) | Complete component map: SGLang ↔ sgl-kernel-npu |
-| [15-distributed-hccl-and-communication.md](./15-distributed-hccl-and-communication_EN.md) | HCCL distributed communication on NPU |
+| [01-sglang-npu-component-map.md](./01-sglang-npu-component-map.md) | Complete component map: SGLang ↔ sgl-kernel-npu |
+| [15-distributed-hccl-and-communication.md](./15-distributed-hccl-and-communication.md) | HCCL distributed communication on NPU |
 
 ### Examples
 
 | File | Content |
 |---|---|
-| [00-glm-4.7-flash-end-to-end.md](./examples/00-glm-4.7-flash-end-to-end_EN.md) | End-to-end model execution: GLM-4.7-Flash on Ascend NPU |
+| [00-glm-4.7-flash-end-to-end.md](./examples/00-glm-4.7-flash-end-to-end.md) | End-to-end model execution: GLM-4.7-Flash on Ascend NPU |
 
 ## Reading Order
 
