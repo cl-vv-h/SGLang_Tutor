@@ -1,5 +1,7 @@
 # Source Code Walkthrough: SGLang NPU Components
 
+[简体中文](../../../zh/sglang-ascend-npu/source-code-walkthrough/README.md) | **English**
+
 This topic provides a component-by-component walkthrough of how SGLang integrates with Ascend NPU at the source code level.
 
 ## Files

@@ -1,5 +1,7 @@
 # 主流大模型架构与实现原理
 
+**简体中文** | [English](../../../en/ai-infra-basic/Model_Architecture/README.md)
+
 本专题独立讲解大语言模型本身的计算结构，不依赖任何训练或推理框架。内容从标准 Transformer 出发，依次展开 Attention、KV Cache、Sparse MoE、Multi-head Latent Attention、状态空间模型及代表性架构家族，并持续跟踪张量的形状变化和数据依赖。
 
 ## 本专题文件

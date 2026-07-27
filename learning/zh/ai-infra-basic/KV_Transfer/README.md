@@ -1,5 +1,7 @@
 # KV Transfer
 
+**简体中文** | [English](../../../en/ai-infra-basic/KV_Transfer/README.md)
+
 这一章解释 KV Cache 如何在不同 worker 或不同节点之间移动。KV Transfer 常见于 Prefill/Decode Disaggregation，也就是把长 prompt 的 prefill 和持续 decode 放到不同资源池中执行。
 
 ## 为什么要传 KV

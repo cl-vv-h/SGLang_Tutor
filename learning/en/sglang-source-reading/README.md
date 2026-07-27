@@ -1,5 +1,7 @@
 # SGLang Source Code Reading Notes
 
+[简体中文](../../zh/sglang-source-reading/README.md) | **English**
+
 This set of notes is designed for reading SGLang source code alongside Codex. The directory has been reorganized from "sequential lectures" to "archived by source layer": start with global components, then drill down layer by layer through entry points, scheduling, caching, model execution, layer/communication, and advanced features.
 
 ## Layered Reading Map

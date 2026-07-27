@@ -1,5 +1,7 @@
 # Quantization
 
+[简体中文](../../../zh/ai-infra-basic/Quantization/README.md) | **English**
+
 Model quantization for LLM inference: weight-only quantization (GPTQ, AWQ), activation quantization (W8A8, FP8), KV cache quantization, and calibration.
 
 ## Core Concepts

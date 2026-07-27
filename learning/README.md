@@ -1,27 +1,25 @@
-# SGLang 教学目录 / SGLang Learning Hub
+# SGLang Learning Hub / SGLang 教学中心
 
-选择你的语言 / Choose your language:
+Choose your language / 请选择语言：
 
-- [**中文版**](./zh/) — 面向源码学习的中文教学材料
-- [**English**](./en/) — English educational materials for source code learning
-
----
-
-本仓库中的 SGLang 原版代码仅作为教学引用，学习笔记通过"文件 + 函数 + 关键代码段"定位源码。
-
-The original SGLang source code in this repository is used only as teaching reference. Learning notes locate source code through "file + function + key code snippets."
-
-## 专题目录 / Topics
-
-| 中文 | English |
+| Language | Curriculum |
 |---|---|
-| [sglang-source-reading](./zh/sglang-source-reading/) | [sglang-source-reading](./en/sglang-source-reading/) — SGLang 源码阅读路线 / Source reading roadmap |
-| [scheduler-architecture](./zh/scheduler-architecture/) | [scheduler-architecture](./en/scheduler-architecture/) — Scheduler 架构 / Architecture |
-| [tp-worker-model-runner](./zh/tp-worker-model-runner/) | [tp-worker-model-runner](./en/tp-worker-model-runner/) — TpModelWorker & ModelRunner |
-| [sglang-ascend-npu](./zh/sglang-ascend-npu/) | [sglang-ascend-npu](./en/sglang-ascend-npu/) — Ascend NPU 实践 / NPU Practice |
-| [ai-infra-basic](./zh/ai-infra-basic/) | [ai-infra-basic](./en/ai-infra-basic/) — AI Infra 基础 / Fundamentals |
-| [ascend-kernel-infra](./zh/ascend-kernel-infra/) | [ascend-kernel-infra](./en/ascend-kernel-infra/) — Ascend NPU 算子 / Kernel Layer |
+| **English** | [Open `learning/en/`](./en/) |
+| **简体中文** | [打开 `learning/zh/`](./zh/) |
 
-## 语言切换指南 / Language Guide
+The two language directories have the same topic and file structure. Each README provides a direct link to its counterpart in the other language.
 
-See [LANGUAGE.md](./LANGUAGE.md) for the complete translation status and contribution guide.
+中英文目录采用相同的专题和文件结构。每个 README 都提供前往另一语言对应页面的直接链接。
+
+## Topics / 专题
+
+| Topic / 专题 | English | 中文 |
+|---|---|---|
+| AI Infra fundamentals / AI Infra 基础 | [English](./en/ai-infra-basic/) | [中文](./zh/ai-infra-basic/) |
+| SGLang source reading / SGLang 源码阅读 | [English](./en/sglang-source-reading/) | [中文](./zh/sglang-source-reading/) |
+| Scheduler architecture / Scheduler 架构 | [English](./en/scheduler-architecture/) | [中文](./zh/scheduler-architecture/) |
+| TP Worker and ModelRunner | [English](./en/tp-worker-model-runner/) | [中文](./zh/tp-worker-model-runner/) |
+| SGLang on Ascend NPU / Ascend NPU 实践 | [English](./en/sglang-ascend-npu/) | [中文](./zh/sglang-ascend-npu/) |
+| Ascend kernel infrastructure / Ascend 算子基础设施 | [English](./en/ascend-kernel-infra/) | [中文](./zh/ascend-kernel-infra/) |
+
+See [LANGUAGE.md](./LANGUAGE.md) for naming, synchronization, and translation conventions.

@@ -1,5 +1,7 @@
 # LoRA (Low-Rank Adaptation)
 
+[简体中文](../../../zh/ai-infra-basic/LoRA/README.md) | **English**
+
 This topic covers the principles and serving of efficient fine-tuning methods: LoRA, QLoRA, DoRA, and AdaLoRA, with focus on their computational forms and how they integrate into inference systems.
 
 ## Core Methods

@@ -1,5 +1,7 @@
 # Mamba / State Space Models
 
+[简体中文](../../../zh/ai-infra-basic/Mamba_State_Space/README.md) | **English**
+
 Mamba and State Space Models (SSM): principles, Mamba state management, scheduler strategy, and radix cache state handling in SGLang.
 
 ## Files

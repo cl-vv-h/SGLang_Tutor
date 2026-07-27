@@ -1,5 +1,7 @@
 # Benchmark & Profiling
 
+[简体中文](../../../zh/ai-infra-basic/Benchmark_Profiling/README.md) | **English**
+
 Performance benchmarking and profiling for LLM serving: TTFT, ITL, TPS metrics, load testing, profiling tools, and bottleneck identification.
 
 ## Core Metrics

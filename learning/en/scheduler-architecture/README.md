@@ -1,5 +1,7 @@
 # Scheduler Architecture Topic
 
+[简体中文](../../zh/scheduler-architecture/README.md) | **English**
+
 This directory is dedicated to explaining `python/sglang/srt/managers/scheduler.py`. The goal is not to replicate the complete source code, but to clearly break down the Scheduler's responsibilities, key states, main loop, request enqueueing, prefill/decode scheduling, forward execution, and result processing paths.
 
 ## Reading Order

@@ -1,5 +1,7 @@
 # Execution Graph
 
+[简体中文](../../../zh/ai-infra-basic/Execution_Graph/README.md) | **English**
+
 From computation graph concepts to CUDA/NPU Graph, `torch.compile`, static shape reuse, and replay dataflow in LLM serving.
 
 ## Key Files

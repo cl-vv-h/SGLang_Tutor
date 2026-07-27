@@ -1,5 +1,7 @@
 # Schedule Optimization 教学入口
 
+**简体中文** | [English](../../../en/ai-infra-basic/Schedule_Optimization/README.md)
+
 这个目录用小型 demo 解释 LLM serving 调度中最基础、也最容易混淆的部分：Prefill/Decode 的差异、KV Cache 的作用，以及 Chunked Prefill 为什么能改善长 prompt 对系统延迟的影响。
 
 ## 文件说明

@@ -1,5 +1,7 @@
 # Attention Kernel
 
+[简体中文](../../../zh/ai-infra-basic/Attention_Kernel/README.md) | **English**
+
 This topic provides educational implementations of FlashAttention and FlashDecoding algorithms, demonstrating how attention computation is restructured to minimize HBM reads/writes through tiling and recomputation.
 
 ## Core Ideas

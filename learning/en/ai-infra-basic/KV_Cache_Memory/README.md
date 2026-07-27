@@ -1,5 +1,7 @@
 # KV Cache Memory
 
+[简体中文](../../../zh/ai-infra-basic/KV_Cache_Memory/README.md) | **English**
+
 This chapter focuses on one of the most precious resources in LLM serving: KV Cache memory. Once you understand KV Cache shapes, allocation, reuse, and eviction, you'll understand much of scheduling, attention backend, prefix cache, and PD disaggregation design.
 
 ## What KV Cache Stores

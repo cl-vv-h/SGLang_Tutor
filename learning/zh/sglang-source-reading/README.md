@@ -1,5 +1,7 @@
 # SGLang 源码阅读笔记
 
+**简体中文** | [English](../../en/sglang-source-reading/README.md)
+
 这组笔记用于配合 Codex 一起阅读 SGLang 源码。现在目录已经从“按讲次平铺”调整为“按源码层次归档”：先看全局组件，再沿入口、调度、缓存、模型执行、layer/通信和高级特性逐层下钻。
 
 ## 分层阅读地图

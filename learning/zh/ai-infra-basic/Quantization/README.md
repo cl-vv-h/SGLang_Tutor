@@ -1,5 +1,7 @@
 # Quantization
 
+**简体中文** | [English](../../../en/ai-infra-basic/Quantization/README.md)
+
 这一章解释推理量化。量化的目标是降低显存、提升带宽效率和加速 kernel，但它会引入精度误差、kernel 选择复杂度和部署兼容性问题。
 
 ## 常见量化对象

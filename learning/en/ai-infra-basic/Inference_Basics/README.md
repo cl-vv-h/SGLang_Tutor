@@ -1,5 +1,7 @@
 # Inference Basics
 
+[简体中文](../../../zh/ai-infra-basic/Inference_Basics/README.md) | **English**
+
 This chapter answers the most fundamental question: what does LLM inference actually do, and why can't a serving system simply put requests into a `for` loop and run them one by one.
 
 ## Core Concepts

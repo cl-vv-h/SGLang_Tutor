@@ -1,5 +1,7 @@
 # Schedule Optimization
 
+[简体中文](../../../zh/ai-infra-basic/Schedule_Optimization/README.md) | **English**
+
 This topic explains the key scheduling optimizations that make LLM serving systems efficient: continuous batching, chunked prefill, and the fundamental trade-offs between throughput and latency.
 
 ## Core Concepts

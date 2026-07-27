@@ -1,5 +1,7 @@
 # Benchmark Profiling
 
+**简体中文** | [English](../../../en/ai-infra-basic/Benchmark_Profiling/README.md)
+
 这一章讲如何判断一个 serving 系统到底快不快，以及慢在哪里。Benchmark 给出外部指标，profiling 帮你定位内部瓶颈。两者缺一不可。
 
 ## 常见指标

@@ -1,5 +1,7 @@
 # Speculative Decoding
 
+[简体中文](../../../zh/ai-infra-basic/Speculative_Decoding/README.md) | **English**
+
 This topic explains how to accelerate LLM decoding by using a fast "draft" model to propose multiple tokens, which are then verified by the target model in a single forward pass.
 
 ## Core Principles

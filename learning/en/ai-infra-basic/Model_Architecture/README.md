@@ -1,5 +1,7 @@
 # Mainstream LLM Architectures & Implementation Principles
 
+[简体中文](../../../zh/ai-infra-basic/Model_Architecture/README.md) | **English**
+
 This topic independently explains the computational structure of large language models themselves, independent of any training or inference framework. Content starts from the standard Transformer and progressively unfolds Attention, KV Cache, Sparse MoE, Multi-head Latent Attention, state space models, and representative architecture families, continuously tracking tensor shape changes and data dependencies.
 
 ## Topic Files

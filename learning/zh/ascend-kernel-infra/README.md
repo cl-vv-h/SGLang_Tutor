@@ -1,5 +1,7 @@
 # Ascend Kernel Infra：从推理框架走向 NPU 算子
 
+**简体中文** | [English](../../en/ascend-kernel-infra/README.md)
+
 本专题承接 [`learning/sglang-ascend-npu`](../sglang-ascend-npu/)：已有专题关注“如何让 SGLang 在 Ascend NPU 上正确、稳定地运行”，这里继续向下一层，关注“一个算子如何被表达、编译、注册、调用和优化”。
 
 - [路线图](./ROADMAP.md)：查看主线、前置关系和待深化主题；

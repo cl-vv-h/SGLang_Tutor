@@ -1,5 +1,7 @@
 # Ascend Kernel Infra: From Inference Framework to NPU Operators
 
+[简体中文](../../zh/ascend-kernel-infra/README.md) | **English**
+
 This topic builds upon [`learning/sglang-ascend-npu`](../sglang-ascend-npu/): that topic focuses on "how to make SGLang run correctly and stably on Ascend NPU," while here we dive one layer deeper to focus on "how an operator is expressed, compiled, registered, invoked, and optimized."
 
 - [Roadmap](./ROADMAP.md): View the main thread, prerequisites, and topics for deeper exploration.

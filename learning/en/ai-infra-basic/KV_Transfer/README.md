@@ -1,5 +1,7 @@
 # KV Transfer (PD Disaggregation)
 
+[简体中文](../../../zh/ai-infra-basic/KV_Transfer/README.md) | **English**
+
 Prefill/Decode disaggregation: splitting LLM serving into separate prefill and decode workers, with KV Cache transferred between them.
 
 ## Core Idea

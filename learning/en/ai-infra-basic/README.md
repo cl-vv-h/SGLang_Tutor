@@ -1,5 +1,7 @@
 # AI Infra Fundamentals
 
+[简体中文](../../zh/ai-infra-basic/README.md) | **English**
+
 This directory supplements the foundational knowledge needed before and during SGLang source code reading. It doesn't replicate production-grade implementations directly, but instead breaks down the most common mechanisms in LLM serving through lecture notes and small Python demos: model architecture, inference flow, scheduling, KV Cache, attention kernels, execution graphs, Mamba/SSM, parallelism, KV transfer, speculative decoding, quantization, LoRA, and benchmark/profiling.
 
 ## Directory Structure

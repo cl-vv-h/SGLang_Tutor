@@ -1,5 +1,7 @@
 # SGLang Ascend NPU 源码串讲
 
+**简体中文** | [English](../../../en/sglang-ascend-npu/source-code-walkthrough/README.md)
+
 本目录按“组件”而不是“执行阶段”组织 SGLang Ascend NPU 源码教程。
 
 主线问题只有三个：

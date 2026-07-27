@@ -1,5 +1,7 @@
 # Execution Graph
 
+**简体中文** | [English](../../../en/ai-infra-basic/Execution_Graph/README.md)
+
 这一章解释生产推理中常见的 execution graph 优化，例如 CUDA Graph、torch.compile、静态 shape replay。它们解决的不是模型数学问题，而是减少 CPU launch overhead、稳定 kernel 调度，并让 decode loop 更接近固定模板。
 
 ## 本专题文件

@@ -1,5 +1,7 @@
 # TP Worker & ModelRunner Learning Directory
 
+[简体中文](../../zh/tp-worker-model-runner/README.md) | **English**
+
 This directory is for reading the implementations of `tp_worker.py` and `model_runner.py` in SGLang. They are located at:
 
 - `python/sglang/srt/managers/tp_worker.py`

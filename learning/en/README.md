@@ -1,5 +1,7 @@
 # SGLang Learning Hub
 
+[简体中文](../zh/README.md) | **English**
+
 This directory contains English-language educational materials for source code learning. The original SGLang code in the repository is used only as teaching reference; learning notes aim to locate source code through a "file + function + key code snippets" approach, avoiding dependency on easily shifting absolute paths.
 
 ## Topic Directory

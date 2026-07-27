@@ -1,5 +1,7 @@
 # Parallel Strategy
 
+[简体中文](../../../zh/ai-infra-basic/Parallel_Strategy/README.md) | **English**
+
 This topic covers the parallelization strategies used in LLM inference: Data Parallelism (DP), Tensor Parallelism (TP), Pipeline Parallelism (PP), Sequence Parallelism (SP), and Expert Parallelism (EP).
 
 ## Strategies Overview
