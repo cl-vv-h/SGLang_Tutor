@@ -4,6 +4,8 @@
 
 本章延续[代码阅读手册](../reference/code-reading-and-types.md)与上一章的完整 kernel：C++ 模板类型在编译时确定 dtype，tiling 字段使用固定宽度整数形成 Host/Device ABI，地址 offset 默认以元素为单位，buffer size 明确以字节为单位。
 
+> 本章会同时出现 `at::`、`c10::`、`torch::`、`c10_npu::`、`at_npu::native::`、`platform_ascendc::` 和 `AscendC::`。它们不是同一套 API 的不同拼法，也不都运行在 AI Core 上。第一次阅读前，请先看[代码阅读手册第 8 节：C++ 命名空间](../reference/code-reading-and-types.md#8-c-命名空间atc10torch-和-ascend-相关前缀)。
+
 ## 1. 先写规格，不要先写 Kernel
 
 ```text
@@ -178,6 +180,14 @@ TORCH_LIBRARY_IMPL(npu, PrivateUse1, m) {
 
 这段在 Host C++ 动态库加载时运行：`m` 是 PyTorch `torch::Library` 注册句柄；schema 中的 `Tensor` 对应 dispatcher 层的 `at::Tensor`；`PrivateUse1` 是 dispatch key；`TORCH_FN(add_custom_host)` 把 C++ 函数包装成可注册 callable。这里没有任何 `GlobalTensor` 或 `LocalTensor`，更没有在注册时执行 device kernel。
 
+这里的几个“名字空间”必须分开：
+
+- `torch::Library` 中的 `torch` 是 C++ namespace，`Library` 是注册 API 类型；
+- `TORCH_LIBRARY_FRAGMENT(npu, m)` 中的 `npu` 是 dispatcher 的逻辑 operator namespace，不是 C++ `namespace npu`；
+- Python 的 `torch.ops.npu.add_custom` 是对这个 dispatcher namespace 的动态访问；
+- `PrivateUse1` 是 dispatch key，回答“本次 NPU tensor 调哪个 backend 实现”，不是 namespace；
+- Host 实现接收到 `at::Tensor` 后，才会继续查询 stream、准备 tiling 并 launch；注册代码本身不会读取 tensor 元素。
+
 随后 Python 可调用：
 
 ```python
@@ -281,6 +291,24 @@ Device 仍会根据 blockIdx 解析自己负责的数据，但“启动多少实
 DataCopy 可能要求地址和字节数对齐；Vector API 可能按固定 block 处理；读取 padding 时需要安全值；输出只能写真实范围；bitmask、stride 或二维行尾还可能有各自的换算单位。如果直接把非对齐 `actual` 传给只支持对齐路径的 API，可能报错、越界或产生低效隐式处理。
 
 常见方案包括 Host padding、使用非对齐 DataCopy 参数、对齐搬入后用 mask 计算、或为尾块选择专门 kernel。正确性测试必须覆盖 `对齐值-1、对齐值、对齐值+1`，不能只测整 tile shape。
+
+### 6. `at::Tensor`、`c10_npu::getCurrentNPUStream()` 和 `AscendC::GlobalTensor` 为什么会出现在同一个算子里？
+
+**答案：**因为它们分别位于同一次调用的三个边界，而不是三个互相竞争的 Tensor 实现。
+
+`at::Tensor` 是 PyTorch Host 句柄，保存 shape、stride、dtype、device 和 storage 生命周期；`c10_npu::getCurrentNPUStream()` 是 torch_npu 的 Host backend 接口，把本次 PyTorch 执行连接到当前 NPU stream；`AscendC::GlobalTensor<T>` 是 Device kernel 收到地址后建立的 GM typed view。
+
+调用顺序可以简化为：
+
+```text
+dispatcher 传入 at::Tensor
+  -> Host wrapper 校验并从 torch_npu 取得当前 stream
+  -> launch helper 从 at::Tensor 取得设备地址
+  -> CANN Runtime 向 stream 提交 kernel
+  -> Device 用 AscendC::GlobalTensor<T> 解释收到的 GM 地址
+```
+
+`at::Tensor` 句柄在 CPU 进程中，不代表元素也在 CPU；`GlobalTensor<T>` 在 Device 代码中，不拥有 PyTorch 的 shape/storage 生命周期信息。Host wrapper 正是二者之间的合同转换层。更完整的逐命名空间说明见[代码阅读手册第 8 节](../reference/code-reading-and-types.md#8-c-命名空间atc10torch-和-ascend-相关前缀)。
 
 ## 官方资料
 

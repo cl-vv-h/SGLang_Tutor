@@ -150,6 +150,8 @@ logits.index_put_({rowIndices}, result)
 | `numIndices` | `int64_t` | 实际需要处理的行数；没有 indices 时等于 batch |
 | `result` | `at::Tensor` | kernel 修改后的选中行结果 |
 
+这里第一次出现的 `c10::optional<at::Tensor>` 要从外向内读：`at::Tensor` 是 PyTorch/ATen 的 Host tensor 句柄，`c10::optional<T>` 表示“可能有一个 `T`，也可能没有”。因此它表示 Python 的 `indices=None` 或一个真实 indices tensor，而不是 Ascend C 的 local tensor。`c10` 是 PyTorch core 命名空间，`at` 是 ATen 命名空间；不同命名空间的类型可以正常组合成 C++ 模板。`indices` 有值后仍需继续检查 `defined()`、`numel()`、dtype 和维度。完整说明见[代码阅读手册第 8.5 节](../reference/code-reading-and-types.md#85-c10optionalattensor-要从外向内读)。
+
 真实源码证据链在 Host 文件中非常集中：
 
 - [`#L35-L43`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L35-L43)：判断是否有 `indices`，并把它转为 1D `int64` 的 `rowIndices`；

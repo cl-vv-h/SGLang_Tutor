@@ -28,6 +28,23 @@
 | Host-side Dispatch | 本课程中指 C++ Host wrapper 在被 PyTorch dispatcher 调到以后，继续按 dtype、shape、硬件资源、workspace 等条件选择具体 kernel 变体和 launch 参数；它不是独立进程调度 |
 | PrivateUse1 | PyTorch 为外部设备 backend 保留的 dispatch key，torch_npu 用于 NPU 接入 |
 | OpCommand | `torch_npu` framework 层用于打包一次 NPU 算子调用、stream 和 custom handler 的命令对象 |
+| C++ Namespace / 命名空间 | 用于组织 C++ 名字并避免冲突的作用域；`A::B` 表示到作用域 `A` 中查找 `B`。它本身不创建对象，也不能单独证明代码运行在 Host 或 Device |
+| `at::` / ATen | PyTorch 基础 tensor/算子库的 C++ 命名空间；包含 `at::Tensor`、`at::ScalarType`、`at::empty` 等。Host `at::Tensor` 是带元数据与 storage 生命周期的句柄，元素 storage 可以位于 NPU |
+| `c10::` / C10 | PyTorch core 基础设施命名空间，提供 `optional`、`Device`、`DeviceType`、`Scalar`、`Stream` 等跨 backend 类型和工具 |
+| `torch::` | PyTorch C++ frontend/扩展注册命名空间；常见 `torch::Library`、`torch::nn`。常规 C++ frontend 头会向 `torch::` 暴露 ATen 类型，因此 `torch::Tensor` 通常解析为同一底层 tensor 类型 |
+| `c10_npu::` | torch_npu 的 NPU core 适配命名空间，常用于取得当前 NPU stream、管理设备与 guard；它是顶层名字 `c10_npu`，不是 `c10::npu` |
+| `at_npu::native::` | torch_npu 的 native/执行框架命名空间，常见 `OpCommand`；属于 Host backend 实现，不是 Ascend C Device API |
+| `platform_ascendc::` | CANN 的 Host platform/tiling 相关命名空间，查询 AIC/AIV 数量与 UB/L1/L0 等资源，供 Host 计算执行计划 |
+| `AscendC::` | CANN Ascend C 编程 API 命名空间，主要出现在 Device kernel，包含 `GlobalTensor`、`LocalTensor`、`TPipe/TQue`、搬运和计算 API |
+| Dispatcher Namespace | PyTorch operator 注册表中的逻辑名字空间，例如 `TORCH_LIBRARY_FRAGMENT(npu, m)` 对应 Python `torch.ops.npu`；它不是 C++ `namespace npu`，也不证明算子属于某个仓库 |
+| Anonymous Namespace / 匿名命名空间 | `namespace { ... }` 创建的 translation-unit 内部作用域，常用来隐藏注册辅助符号；与 `torch.ops` 的 dispatcher namespace 无关 |
+| ACL/ACLRT 名字前缀 | `aclrtStream`、`aclrtMemcpy` 等来自 C 风格 API，使用 `acl`/`aclrt` 前缀避免冲突；它们不是 `aclrt::Stream` 形式的 C++ namespace |
+| `ge::` | CANN Graph Engine 相关 C++ 命名空间，常见 `DataType`、`Format`、`graphStatus`，主要服务 Host 算子描述、校验和图/运行时接口 |
+| `gert::` | CANN Graph Engine Runtime 相关命名空间，常见 tensor descriptor、storage shape 和 tiling/runtime context；这里的 `gert::Tensor` 不是 `at::Tensor` |
+| `optiling::` | Ascend 算子工程中组织 Host tiling class、校验与 tiling helper 的常见 namespace；名字表达代码组织，不保证每个内部类型只会被 Host header 使用 |
+| `matmul_tiling::` | CANN MatMul Host tiling API/helper 的 namespace，用于依据矩阵 shape/layout、dtype 和硬件资源生成矩阵计算参数 |
+| `AscendC::MicroAPI::` | Ascend C 中面向 Vector 寄存器与更低层微指令控制的 Device API；`RegTensor`/`MaskReg` 与 UB `LocalTensor` 的抽象层级不同 |
+| Namespace Alias | `namespace py = pybind11;` 为现有 namespace 创建短别名；`py::arg` 与 `pybind11::arg` 指向同一声明，不发生对象转换或复制 |
 
 ## B. 算子与编译
 
