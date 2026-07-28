@@ -158,7 +158,7 @@ flowchart TB
 | 02 | `02-platform-runtime-and-kernel-bootstrap.md` | 平台与运行时接入 | `is_npu`、默认参数、动态导入、`sgl_kernel_npu` 注册 |
 | 03 | `03-ascend-attention-and-mla.md` | Attention / MLA | registry、prefill/decode、paged KV、MLA、attention kernel |
 | 04 | `04-kv-cache-memory-and-allocator.md` | KV cache 与内存 | pool、allocator、cache location、assign/update、KVCacheIO |
-| 05 | `05-npu-graph-and-compilation.md` | NPU Graph | graph runner 选择、capture、replay、静态输入、piecewise compile |
+| 05 | [05-npu-graph-and-compilation.md](./05-npu-graph-and-compilation.md) | NPU Graph | 区分 autograd/compiler/launch graph；逐层追踪 runner 选择、bucket、静态 buffer、capture、Event/Stream、replay、动态属性更新与 piecewise compile |
 | 06 | `06-norm-rope-and-activation.md` | Norm / RoPE / Activation | 通用 layer 分支、融合算子、residual 与 dtype 语义 |
 | 07 | `07-quantization-and-linear.md` | 量化与 Linear | quant method 选择、W8A8、AWQ、GPTQ、动态量化与 matmul |
 | 08 | `08-moe-routing-and-fused-expert.md` | MoE 计算 | top-k、dispatch 前处理、expert compute、fused MoE、量化 MoE |

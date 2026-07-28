@@ -2,6 +2,8 @@
 
 这一讲解释 SGLang 在 Ascend NPU 上如何使用 graph capture/replay 降低 decode 开销。虽然很多参数和类名沿用 `cuda_graph`，但在 NPU 设备下实际走的是 `torch.npu.NPUGraph`。
 
+本篇保留为配置、选型与排错入口。关于“计算图是不是每个模型一张图”、autograd/FX/compiler/NPUGraph 的区别，以及 `ModelRunner -> DecodeCudaGraphRunner -> NPUCudaGraphBackend -> torch.npu.NPUGraph` 的固定 commit 源码全链路，请读[源码导读 05：计算图、torch.compile 与 SGLang NPU Graph](./source-code-walkthrough/05-npu-graph-and-compilation.md)。
+
 ## 为什么需要 graph
 
 Decode 阶段每轮生成 token，计算形状通常较小但频率很高。如果每轮都完整经过 Python 调度和 kernel launch，延迟会被放大。

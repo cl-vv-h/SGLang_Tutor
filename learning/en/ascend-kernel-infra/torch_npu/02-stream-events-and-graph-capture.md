@@ -282,6 +282,78 @@ The two `wait_stream` calls establish **execution dependencies**. `x.record_stre
 
 Multiple Streams merely create an opportunity for concurrency. Actual overlap depends on kernel resource use, Cube/Vector/MTE occupancy, memory bandwidth, hardware/runtime support, and Event dependencies.
 
+### 6.1 Practice: Establish a Two-Stream Dependency With an Event
+
+This minimum runnable example requires an Ascend NPU, PyTorch, and `torch_npu`:
+
+```python
+import torch
+import torch_npu
+
+device = torch.device("npu:0")
+producer = torch_npu.npu.Stream(device=device)
+consumer = torch_npu.npu.Stream(device=device)
+ready = torch_npu.npu.Event()
+
+with torch_npu.npu.stream(producer):
+    x = torch.arange(1024, device=device, dtype=torch.float32)
+    y = x * 2
+    ready.record()
+
+with torch_npu.npu.stream(consumer):
+    consumer.wait_event(ready)
+    y.record_stream(consumer)
+    z = y + 1
+
+consumer.synchronize()
+torch.testing.assert_close(
+    z.cpu(),
+    torch.arange(1024, dtype=torch.float32) * 2 + 1,
+)
+```
+
+```mermaid
+flowchart LR
+  subgraph P["producer Stream"]
+    P1["create x"] --> P2["y = x * 2"] --> P3["record ready"]
+  end
+  subgraph C["consumer Stream"]
+    C1["wait ready"] --> C2["z = y + 1"]
+  end
+  P3 -. "release wait after Event completes" .-> C1
+```
+
+The Event affects scheduling as follows:
+
+1. `ready.record()` inserts a progress marker in producer;
+2. the marker completes only after earlier producer work;
+3. `consumer.wait_event(ready)` inserts a wait task in consumer;
+4. subsequent consumer work cannot become executable until the Event completes;
+5. the Device runtime releases that dependency after completion;
+6. the Host does not block while enqueuing the wait.
+
+Deleting `consumer.wait_event(ready)` removes the data-readiness dependency. A correct result in one run would only be a scheduling accident.
+
+### 6.2 Practice: Distinguish Event Query, Wait, and Synchronize
+
+```python
+import torch
+import torch_npu
+
+stream = torch_npu.npu.current_stream()
+done = torch_npu.npu.Event()
+
+x = torch.randn((4096, 4096), device="npu")
+y = x @ x
+done.record(stream)
+
+print("Event complete now?", done.query())
+done.synchronize()
+print("Event complete after synchronize?", done.query())
+```
+
+`query()` checks without waiting and may return either value on the first call. `synchronize()` blocks the Host until the Event completes.
+
 ---
 
 ## 7. `record_stream`: Storage Lifetime, Not Execution Order
@@ -525,6 +597,8 @@ Thus:
 - replayed work still follows Stream dependencies;
 - capture generally imposes constraints on addresses, shapes, control flow, and resource behavior.
 
+This chapter covers the generic torch_npu/runtime mechanism. For SGLang's per-`ShapeKey` graph family, live-`ForwardBatch` copies into static buffers, attention sequence-length update, and replay source path, read [Computation Graphs, torch.compile, and the SGLang NPU Graph](../../sglang-ascend-npu/source-code-walkthrough/05-npu-graph-and-compilation.md).
+
 ---
 
 ## 12. End-to-End Host-to-Device Timeline
@@ -546,11 +620,95 @@ sequenceDiagram
   R->>S: "enqueue task"
   R-->>W: "submission returns"
   W-->>P: "return output tensor handle"
+  Note over P,W: This returns metadata and a Device storage address, not element values
   S->>N: "execute after earlier dependencies"
   N-->>S: "complete; Event/allocator can observe progress"
 ```
 
 The final Device actions may occur after Python has already continued.
+
+### 12.1 Why Returning an Unfinished Tensor Is Correct
+
+The wrapper returns a **tensor handle plus already allocated Device storage**, not unfinished element values copied to the CPU.
+
+An NPU tensor has:
+
+```text
+Host-visible metadata:
+  shape, stride, dtype, device, storage/data_ptr, requires_grad
+
+Device-produced contents:
+  the final element values written into that storage
+```
+
+Before return, output storage exists and the producer launch has entered the current Stream. Its final contents may still be pending.
+
+If Python submits another NPU operation:
+
+```python
+y = custom_npu_op(x)
+z = torch.relu(y)
+```
+
+the timeline is:
+
+```text
+Host:   submit producer -> receive y handle -> submit relu(y) -> continue
+Stream: producer writes y --------------------> relu reads y
+```
+
+The consumer receives the same address, but its kernel is ordered after the producer in the same Stream. It reads only when the data is ready. `y` can be viewed as a Device value whose storage and producer are known, but it is not a Python `Future`; ordering is implemented below the Tensor API.
+
+Operations that truly request Host values cross a synchronization boundary:
+
+```python
+scalar = y.item()
+cpu_y = y.cpu()
+print(y)
+```
+
+The framework must wait for the required Device work/copy before returning the CPU value. Metadata access usually needs no wait:
+
+```python
+print(y.shape, y.dtype, y.device)
+```
+
+### 12.2 When This Can Actually Read Incorrect Data
+
+Correctness is lost when:
+
+1. producer and consumer use different Streams without Event/wait;
+2. a custom wrapper launches into the wrong Stream;
+3. external code reuses or reads a Device address outside the CANN synchronization contract;
+4. cross-Stream storage lifetime is covered by neither `record_stream` nor manual Events;
+5. a third-party library uses a private Stream without exposing dependencies.
+
+The implicit contract after returning the handle is:
+
+> Consumers must preserve same-Stream order or establish cross-Stream Events, and a real Host read must wait for Device completion.
+
+### 12.3 Observe “Handle Returned, Device Still Working”
+
+```python
+import torch
+import torch_npu
+
+stream = torch_npu.npu.current_stream()
+finished = torch_npu.npu.Event()
+
+x = torch.randn((4096, 4096), device="npu")
+y = x @ x
+finished.record(stream)
+
+print(y.shape, y.dtype, y.device)
+print("finished immediately:", finished.query())
+
+z = torch.relu(y)
+cpu_z = z.cpu()
+print(cpu_z.shape)
+```
+
+The first `query()` result is intentionally not asserted. The experiment demonstrates that “the Host owns a `y` object” and “the Device Event has completed” are separate states.
 
 ---
 
@@ -605,6 +763,14 @@ No. A Stream is a logical runtime sequence. Kernel type, `blockDim`, tiling, res
 
 No. The allocator already knows the allocation Stream, and same-Stream-only use usually requires no extra record. `apply_token_bitmask` conservatively records local/aliased working storage used through a raw-pointer callback and possibly a Host task queue. If allocation and current Stream are identical, it may be redundant insurance. Other operators are safe without it when they remain on one Stream or manually synchronize non-creation use back to the creation Stream; only a genuine cross-Stream use with neither mechanism is a lifetime defect.
 
+### 10. Why does Python not read a partially written tensor after the Host wrapper returns?
+
+The return value is a Host handle to allocated Device storage, not element values copied early to CPU. A same-Stream NPU consumer is ordered after the producer, while `.item()` or `.cpu()` must wait at the actual Host-read boundary. Incorrect reads require a broken contract such as cross-Stream use without an Event, a launch into the wrong Stream, or unsynchronized external pointer access.
+
+### 11. How exactly does an Event affect a Stream?
+
+Event Record is a progress-marker task that completes after earlier work in its Stream. Event Wait is a dependency task in another Stream; subsequent work there cannot execute until the Event completes. The runtime then releases the dependency. This normally constrains Device timelines without blocking Host; Event/Stream synchronize is used when the CPU itself must wait.
+
 ---
 
 ## 15. Primary References and Fixed Source
@@ -618,6 +784,7 @@ No. The allocator already knows the allocation Stream, and same-Stream-only use 
 - [`torch_npu` `OpCommand::RunOpApi` and Host task queue, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/csrc/framework/OpCommand.cpp)
 - [`torch_npu` NPU caching allocator allocation-Stream and `recordStream` logic](https://gitee.com/ascend/pytorch/blob/e04f000ce9e11177d193a398644d8fcb67a90cef/torch_npu/csrc/core/npu/NPUCachingAllocator.cpp)
 - [`sgl-kernel-npu` `EXEC_KERNEL_CMD` and raw-address conversion, fixed commit](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/utils/torch_helper.h#L120-L134)
+- [CANN: `aclrtRecordEvent` captures already submitted Stream work and cooperates with `aclrtStreamWaitEvent`](https://www.hiascend.com/document/detail/zh/canncommercial/850/API/appdevgapi/aclcppdevg_03_0083.html)
 - [CANN: Synchronization](https://www.hiascend.com/document/detail/en/canncommercial/850/appdevg/acldevg/aclcppdevg_000013.html)
 - [CANN: Stream management and single/multiple-Stream semantics](https://www.hiascend.com/document/detail/en/canncommercial/800/appdevg/aclcppdevg/aclcppdevg_000011.html)
 - [CANN: `aclrtCreateStream`](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/runtimeapi/aclcppdevg_03_0066.html)

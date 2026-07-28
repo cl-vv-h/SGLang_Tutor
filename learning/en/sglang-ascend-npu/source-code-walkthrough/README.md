@@ -22,6 +22,7 @@ This topic provides a component-by-component walkthrough of how SGLang integrate
 | File | Content |
 |---|---|
 | [01-sglang-npu-component-map.md](./01-sglang-npu-component-map.md) | Complete component map: SGLang ↔ sgl-kernel-npu |
+| [05-npu-graph-and-compilation.md](./05-npu-graph-and-compilation.md) | Autograd/compiler/launch graphs; SGLang buckets, static buffers, NPUGraph capture/replay, Streams/Events, and piecewise compilation |
 | [15-distributed-hccl-and-communication.md](./15-distributed-hccl-and-communication.md) | HCCL distributed communication on NPU |
 
 ### Examples
@@ -37,4 +38,5 @@ This topic provides a component-by-component walkthrough of how SGLang integrate
 3. Foundation 03 — trace the request lifecycle with NPU branches
 4. 01-sglang-npu-component-map — see the full component landscape
 5. Examples 00 — see a complete model example
-6. Foundation 04-05 + 15 — dive into model loading, forward, and communication
+6. Foundation 04-05 + component 05 — understand model loading, static buffers, and graph replay
+7. Component 15 — dive into distributed communication

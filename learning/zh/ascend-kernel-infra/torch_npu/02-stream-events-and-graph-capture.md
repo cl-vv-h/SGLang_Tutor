@@ -344,6 +344,83 @@ z = y + 1
 
 它们不能互相替代。
 
+### 6.4 实践一：用 Event 建立两条 Stream 的依赖
+
+下面是需要 Ascend NPU、PyTorch 和 `torch_npu` 环境的最小可运行例子：
+
+```python
+import torch
+import torch_npu
+
+device = torch.device("npu:0")
+producer = torch_npu.npu.Stream(device=device)
+consumer = torch_npu.npu.Stream(device=device)
+ready = torch_npu.npu.Event()
+
+with torch_npu.npu.stream(producer):
+    x = torch.arange(1024, device=device, dtype=torch.float32)
+    y = x * 2
+    ready.record()  # 在 producer 当前进度后面插入 Event Record 任务
+
+with torch_npu.npu.stream(consumer):
+    consumer.wait_event(ready)  # 插入 Event Wait，不阻塞当前 CPU 线程
+    y.record_stream(consumer)   # 只负责 y.storage 的跨 Stream 生命周期
+    z = y + 1                   # 排在 wait 后面，故不会提前读取 y
+
+consumer.synchronize()
+torch.testing.assert_close(
+    z.cpu(),
+    torch.arange(1024, dtype=torch.float32) * 2 + 1,
+)
+```
+
+逐行画成两条设备时间线：
+
+```mermaid
+flowchart LR
+  subgraph P["producer Stream"]
+    P1["生成 x"] --> P2["y = x * 2"] --> P3["record ready"]
+  end
+  subgraph C["consumer Stream"]
+    C1["wait ready"] --> C2["z = y + 1"]
+  end
+  P3 -. "Event 完成后解除等待" .-> C1
+```
+
+Event 的影响不是“修改 producer 的执行速度”，而是：
+
+1. `ready.record()` 向 producer 插入一个进度标记；
+2. 该标记只有在 producer 中它前面的 `x * 2` 完成后才完成；
+3. `consumer.wait_event(ready)` 向 consumer 插入等待任务；
+4. consumer 中位于 wait 后面的 `y + 1` 暂时不能成为可执行任务；
+5. ready 完成后，Device runtime 解除这个依赖，consumer 才能继续；
+6. Host 调用 `wait_event` 后仍可继续运行 Python，因此这是 Device 侧依赖，不是 CPU blocking wait。
+
+把 `consumer.wait_event(ready)` 删除后，两条 Stream 没有数据就绪依赖。即使偶尔得到正确值，也只说明某次调度碰巧让 producer 先完成，不构成正确性保证。
+
+### 6.5 实践二：区分 Event query、wait 与 synchronize
+
+```python
+import torch
+import torch_npu
+
+stream = torch_npu.npu.current_stream()
+done = torch_npu.npu.Event()
+
+x = torch.randn((4096, 4096), device="npu")
+y = x @ x
+done.record(stream)
+
+print("Event complete now?", done.query())
+# query() 只读取完成状态，不等待；可能为 True，也可能为 False。
+
+done.synchronize()
+# 到这里 CPU 才确认 done 之前的工作已经完成。
+print("Event complete after synchronize?", done.query())
+```
+
+不要把第一次 `query()` 必须为 `False` 写进测试：NPU 可能在 Host 查询前已经完成。这个实验要观察的是 API 语义，而不是强迫某种调度结果。
+
 ---
 
 ## 7. `record_stream`：它记录的是 storage 使用，不是计算顺序
@@ -654,6 +731,8 @@ flowchart LR
 - replay 后的 device 工作仍要服从 Stream/Event 同步；
 - 捕获的图通常要求地址、shape、控制流和资源使用满足实现约束，不能把任意动态 Python 行为都录进去。
 
+本章解释的是通用 torch_npu/runtime 机制。SGLang 如何按 `ShapeKey` 为同一个模型建立多张 NPU 图、把实时 `ForwardBatch` copy 到静态 buffer、更新 attention sequence lengths 并 replay，见[计算图与 SGLang NPU Graph 源码全链路](../../sglang-ascend-npu/source-code-walkthrough/05-npu-graph-and-compilation.md)。
+
 ---
 
 ## 12. 一条完整的 Host 到 Device 时间线
@@ -677,11 +756,107 @@ sequenceDiagram
   R->>S: "任务入队"
   R-->>W: "提交返回"
   W-->>P: "返回输出 tensor 句柄"
+  Note over P,W: 此时只返回元数据和 Device storage 地址，不读取元素值
   S->>N: "在前序依赖满足后执行 kernel"
   N-->>S: "任务完成，Event/allocator 可观察进度"
 ```
 
 注意最后两行可能发生在 Python 已继续运行之后。
+
+### 12.1 计算没完成，为什么可以先返回 tensor
+
+因为返回给 Python 的是 **tensor 句柄和已经分配好的 Device storage**，不是把尚未完成的元素值复制给 CPU。
+
+一个 NPU `torch.Tensor` 可以拆成两部分：
+
+```text
+Host 立即可见的元数据：
+  shape、stride、dtype、device、storage/data_ptr、requires_grad 等
+
+Device 异步产生的内容：
+  storage 地址中最终应出现的元素值
+```
+
+Wrapper 返回前，输出 storage 已经分配，kernel launch 也已经进入 current stream。只是 storage 中的最终元素仍处于“由前序任务写入中”的状态。
+
+Python 得到 `y` 后通常会做两类事情。
+
+#### 情况 A：继续提交 NPU 算子，不读取 CPU 值
+
+```python
+y = custom_npu_op(x)  # producer 已排进 current stream
+z = torch.relu(y)     # consumer 排进同一 current stream
+```
+
+时间线是：
+
+```text
+Host:   submit producer -> get y handle -> submit relu(y) -> continue
+Stream: producer writes y ----------------> relu reads y
+```
+
+`relu` 收到的确实是同一个 `y` 句柄/地址，但它的 kernel 排在 producer 后面。NPU 不会让后面的 `relu` 越过前面的写入，所以读取时数据已经就绪。这里不需要 Host 先看到 `y` 的数值。
+
+可以把 `y` 理解为“已经拥有地址且生产任务已排队的 Device 值”，但它不是 Python `Future`：`torch.Tensor` API 没有变成 `await y`，正确性由 Stream 顺序在框架下方实现。
+
+#### 情况 B：Python 真正要求 Host 取得元素值
+
+以下操作会跨越 Device → Host 边界：
+
+```python
+scalar = y.item()
+cpu_y = y.cpu()
+print(y)  # 为显示元素，通常需要取得 Device 数据
+```
+
+框架必须在复制/读取所依赖的 Stream 工作完成后，才能把值交给 CPU。这个边界会发生同步等待，或者发起有序异步拷贝后再等待拷贝完成。因此 `item()` 返回时不会把“半写入”的值交给 Python。
+
+仅访问元数据通常不需要等待：
+
+```python
+print(y.shape, y.dtype, y.device)
+```
+
+### 12.2 哪些情况下真的会读错
+
+异步返回不是无条件安全。下面几种写法会破坏保证：
+
+1. producer 在 Stream A，consumer 在 Stream B，却没有 Event/wait；
+2. custom wrapper 把 kernel 投到错误 Stream，脱离 PyTorch current stream；
+3. 外部 C/C++ 代码直接解引用或复用 Device 地址，没有遵循 CANN 同步合同；
+4. storage 跨 Stream 使用但 allocator 生命周期没有被 `record_stream` 或手工 Event 覆盖；
+5. 第三方库使用自己的 Stream，却没有向 PyTorch 暴露依赖。
+
+所以图中“Host wrapper 返回 tensor 句柄”之后还隐含一个重要合同：
+
+> 所有后续消费者必须继续服从同一 Stream 顺序，或显式建立跨 Stream Event；真正的 Host 数据读取必须等待 Device 完成。
+
+### 12.3 用实验观察“句柄已返回、数据仍在计算”
+
+```python
+import torch
+import torch_npu
+
+stream = torch_npu.npu.current_stream()
+finished = torch_npu.npu.Event()
+
+x = torch.randn((4096, 4096), device="npu")
+y = x @ x
+finished.record(stream)
+
+# 这些是 Host 元数据，访问它们不要求矩阵乘结果已经回到 CPU。
+print(y.shape, y.dtype, y.device)
+print("finished immediately:", finished.query())
+
+# z 的 kernel 与 matmul 位于同一 Stream，可直接安全排队。
+z = torch.relu(y)
+
+# .cpu() 是实际读取边界；返回的 CPU tensor 必须是完成后的值。
+cpu_z = z.cpu()
+print(cpu_z.shape)
+```
+
+`finished.query()` 的结果不固定；它只是帮助看到“Host 已拿到 `y` 对象”和“Device Event 已完成”是两个不同状态。
 
 ---
 
@@ -780,6 +955,14 @@ sequenceDiagram
 
 **答案：**不能按出现次数判断。Allocator 已知道 storage 的 allocation stream，只在该 Stream 上使用时通常无需再次记录。`apply_token_bitmask` 对可能新建或 alias 的局部 working tensor、裸指针 callback 和异步 task-queue 路径做了显式保守登记；如果 working tensor 的 allocation stream 就是 current stream，这个调用可能只是冗余保险。其他算子若始终遵守同 Stream 使用或用 Event 把非 creation-stream 使用同步回去，可以安全地不写；若确实跨 Stream 又没有任何记录/同步，才是需要修复的风险。必须逐条追踪 allocation、use、deallocation 三条时间线，不能从文件里有没有这一行直接下结论。
 
+### 问题 10：Host 已经返回输出 tensor，为什么 Python 不会读到半成品？
+
+**答案：**返回的是已分配 Device storage 的 Host 句柄，不是把元素值提前复制给 CPU。后续 NPU consumer 通常排进同一 Stream，读取任务天然位于 producer 写入之后；`.item()`、`.cpu()` 等真正要求 Host 值的操作则必须等依赖完成。只有跨 Stream 不建 Event、投错 Stream 或绕过同步合同直接访问地址时才可能读错。
+
+### 问题 11：Event 对 Stream 的影响到底是什么？
+
+**答案：**Event Record 是一条进度标记任务；它在所在 Stream 的前序任务完成后才完成。另一条 Stream 的 Event Wait 是一条依赖任务，使其后续任务暂时不可执行。Event 完成后 runtime 才解除等待。这个过程通常不阻塞 Host，只约束 Device 两条时间线；若要让 CPU 等待，应调用 Event/Stream synchronize。
+
 ---
 
 ## 16. 官方资料与固定源码
@@ -793,6 +976,7 @@ sequenceDiagram
 - [`torch_npu` `OpCommand::RunOpApi` 与 Host task queue（固定 commit）](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/csrc/framework/OpCommand.cpp)
 - [`torch_npu` NPU caching allocator 的 allocation stream 与 `recordStream`](https://gitee.com/ascend/pytorch/blob/e04f000ce9e11177d193a398644d8fcb67a90cef/torch_npu/csrc/core/npu/NPUCachingAllocator.cpp)
 - [`sgl-kernel-npu` `EXEC_KERNEL_CMD` 与裸地址转换（固定 commit）](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/utils/torch_helper.h#L120-L134)
+- [CANN：`aclrtRecordEvent` 捕获 Stream 已下发任务，并与 `aclrtStreamWaitEvent` 配合](https://www.hiascend.com/document/detail/zh/canncommercial/850/API/appdevgapi/aclcppdevg_03_0083.html)
 - [CANN：同步等待](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900/API/appdevgapi/aclcppdevg_03_0093.html)
 - [CANN：Stream 管理与单/多 Stream 语义](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha001/devguide/appdevg/aclcppdevg/aclcppdevg_000011.html)
 - [CANN：`aclrtCreateStream`](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900/API/runtimeapi/aclcppdevg_03_0066.html)

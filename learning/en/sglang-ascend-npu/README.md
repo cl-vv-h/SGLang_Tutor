@@ -166,6 +166,8 @@ Goal: Understand the most critical performance path for NPU backend.
 
 Goal: Understand how fixed shape replay reduces decode overhead.
 
+Start with the [NPU graph and compilation overview](./06-npu-graph-compilation.md), then follow the [source-level graph execution walkthrough](./source-code-walkthrough/05-npu-graph-and-compilation.md) to see how `ModelRunner` selects, captures, and replays NPU graphs.
+
 ### 07. TP / HCCL / Communication
 
 Goal: Understand why communication branches differ for multi-card Ascend.

@@ -510,7 +510,7 @@ Fallback：
 4. [03-launch-and-minimal-serving.md](./03-launch-and-minimal-serving.md)：单卡服务启动、请求验证、日志解读。
 5. [04-npu-backend-args.md](./04-npu-backend-args.md)：`set_default_server_args()` 逐行讲解。
 6. [05-attention-kv-cache.md](./05-attention-kv-cache.md)：Ascend attention、KV cache、HiCache。
-7. [06-npu-graph-compilation.md](./06-npu-graph-compilation.md)：`NPUGraph`、piecewise graph、shape 与 replay。
+7. [06-npu-graph-compilation.md](./06-npu-graph-compilation.md)：先建立 `NPUGraph`、piecewise graph、shape 与 replay 的总体认识；再读[计算图源码级执行链](./source-code-walkthrough/05-npu-graph-and-compilation.md)，追踪 `ModelRunner` 如何选择、捕获并重放 NPU 图。
 8. [07-distributed-hccl-tp.md](./07-distributed-hccl-tp.md)：TP、HCCL、communicator、ZBAL。
 9. [08-ascend-pd-disaggregation.md](./08-ascend-pd-disaggregation.md)：Ascend PD 分离与 KV transfer。
 10. [09-lora-moe-feature-branches.md](./09-lora-moe-feature-branches.md)：Ascend LoRA、MoE stream、fallback。

@@ -1,5 +1,7 @@
 # 06. NPU Graph & Compilation
 
+This chapter is the configuration and troubleshooting entry point. For the source-complete distinction among autograd, FX/compiler, and NPUGraph launch graphs—and the fixed-commit `ModelRunner -> DecodeCudaGraphRunner -> NPUCudaGraphBackend -> torch.npu.NPUGraph` path—read [Source Walkthrough 05: Computation Graphs, torch.compile, and SGLang NPU Graph](./source-code-walkthrough/05-npu-graph-and-compilation.md).
+
 ## 1. NPUGraph vs CUDAGraph
 
 | Aspect | CUDAGraph | NPUGraph |
@@ -57,8 +59,9 @@ Benefits on NPU:
 ## 5. Key Source
 
 - `srt/compilation/npu_piecewise_backend.py` — NPU piecewise graph backend
-- `srt/model_executor/cuda_graph_runner.py` — Graph runner (used for both CUDA and NPU)
-- `srt/hardware_backend/npu/utils.py` — `NPUGraph` initialization
+- `srt/model_executor/runner/decode_cuda_graph_runner.py` — cross-platform decode graph orchestration
+- `srt/hardware_backend/npu/graph_runner/npu_graph_runner.py` — NPU runner specialization
+- `srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py` — real `NPUGraph` creation, capture, update, and replay
 
 ## 6. Common Issues
 
