@@ -87,7 +87,7 @@ This track does not re-explain SGLang upper-level mechanisms like Scheduler, Rad
 
 | Content | Use |
 |---|---|
-| [Code Reading Manual: Variable Types, Shapes, Addresses & Source Implementation](./reference/code-reading-and-types.md) | Layer-by-layer distinction of Python objects, Triton IR types, pointer/value blocks, Ascend C Global/Local Tensor; explains why pointer can be added to offset |
+| [Code Reading Manual: Types, Shapes, Addresses, C++ Namespaces & Source Implementation](./reference/code-reading-and-types.md) | Distinguishes Python objects, Triton IR types, pointer/value blocks, and Ascend C tensors; explains pointer arithmetic and the boundaries among `at::`, `c10::`, `torch::`, torch_npu, CANN, and Ascend C namespaces |
 | [Technology Selection: When to Reuse, When Triton, When Ascend C](./reference/technology-comparison.md) | Characteristics, pros/cons, decision tree, review checklist |
 | [Glossary](./reference/glossary.md) | Centralized explanation of program, grid, tile, AI Core, GlobalTensor, pipeline, and other terms |
 

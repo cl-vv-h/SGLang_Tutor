@@ -1,5 +1,27 @@
 # Glossary / 术语表
 
+## Framework, Runtime, and C++ Namespaces
+
+| Term | Definition |
+|---|---|
+| C++ Namespace | A scope used to organize C++ names and avoid collisions. `A::B` looks up `B` in scope `A`; the namespace itself does not allocate memory or prove Host/Device placement |
+| `at::` / ATen | PyTorch's foundational C++ tensor/operator namespace. `at::Tensor` is a metadata and storage-lifetime handle whose element storage may reside on an NPU |
+| `c10::` / C10 | PyTorch core namespace for backend-neutral types and utilities such as `optional`, `Device`, `DeviceType`, `Scalar`, and `Stream` |
+| `torch::` | PyTorch C++ frontend and extension-registration namespace, including `torch::Library` and `torch::nn`; normal frontend headers expose ATen Tensor names into this namespace |
+| `c10_npu::` | torch_npu NPU core-adaptation namespace for current streams, devices, and guards; it is a top-level name, not `c10::npu` |
+| `at_npu::native::` | torch_npu native/execution-framework namespace, including `OpCommand`; it belongs to Host backend implementation rather than the Ascend C Device API |
+| `platform_ascendc::` | CANN Host platform/tiling namespace for querying AIC/AIV counts and UB/L1/L0 resources |
+| `AscendC::` | CANN Ascend C programming namespace, primarily used in Device kernels for tensors, pipes, queues, movement, computation, and synchronization |
+| Dispatcher Namespace | A logical PyTorch operator-registry namespace. `TORCH_LIBRARY_FRAGMENT(npu, m)` corresponds to Python `torch.ops.npu`, but is not C++ `namespace npu` and does not prove repository ownership |
+| Anonymous Namespace | `namespace { ... }` creates translation-unit-local C++ scope, often used to hide registration helper symbols |
+| ACL/ACLRT Name Prefix | C-style APIs use prefixes such as `aclrtStream` and `aclrtMemcpy`; `aclrtStream` is a complete type name, not `aclrt::Stream` |
+| `ge::` | CANN Graph Engine types such as `DataType`, `Format`, and `graphStatus`, mainly used for Host operator description and validation |
+| `gert::` | CANN Graph Engine Runtime descriptors and contexts; `gert::Tensor` is not `at::Tensor` |
+| `optiling::` | Common namespace for Ascend operator tiling classes, validation, and tiling helpers |
+| `matmul_tiling::` | CANN Host MatMul tiling helpers that derive matrix execution parameters from shape, layout, dtype, and hardware |
+| `AscendC::MicroAPI::` | Lower-level Ascend C Device API for Vector registers and micro-instruction control; `RegTensor`/`MaskReg` are distinct from UB `LocalTensor` |
+| Namespace Alias | `namespace py = pybind11;` creates a short alias; `py::arg` and `pybind11::arg` name the same declaration without conversion or copying |
+
 ## Ascend NPU Hardware
 
 | Term | Definition |

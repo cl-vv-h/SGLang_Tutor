@@ -4,6 +4,21 @@
 
 Apply a packed bitmask to token selection, used for structured output (grammar-constrained generation). The bitmask restricts which tokens are valid at each generation step.
 
+## Host Type and Namespace Boundary
+
+The real Host signature contains:
+
+```cpp
+HOST_API at::Tensor apply_token_bitmask(
+    at::Tensor logits,
+    at::Tensor bitmask,
+    c10::optional<at::Tensor> indices);
+```
+
+Read `c10::optional<at::Tensor>` from the outside in. `at::Tensor` is a PyTorch/ATen Host tensor handle. `c10::optional<T>` means that a value of type `T` may be absent. The complete type therefore represents Python `indices=None` or a real indices tensor; it is not an Ascend C local tensor.
+
+`c10` is the PyTorch core namespace and `at` is the ATen namespace. C++ templates can freely compose types from different namespaces. A present `indices` value still needs checks for `defined()`, `numel()`, dtype, device, and dimensions. See the [detailed optional-Tensor explanation](../reference/code-reading-and-types.md#5-read-c10optionalattensor-from-the-outside-in).
+
 ## Ascend C Implementation
 
 ```text
