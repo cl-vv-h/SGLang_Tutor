@@ -53,6 +53,41 @@ A useful first analogy is a task lane:
 
 This is only an ordering analogy. A Stream is not a physical lane and is not bound one-to-one to an AI Core.
 
+### 1.1 Software View: A Layered Logical Execution Sequence
+
+A logical Stream is represented by related runtime state across several layers:
+
+```text
+Python torch_npu.npu.Stream object
+  -> C10/torch_npu Stream ID, device ID, and current-Stream state
+  -> optional torch_npu Host Task Queue
+  -> CANN aclrtStream handle and runtime task queue
+  -> ordered tasks observed by driver/device scheduling
+```
+
+The **Host Task Queue** is an optional torch_npu software submission layer. With task-queue mode enabled, the calling thread can enqueue a callback that will later invoke a CANN launch. It is not the same object as the CANN Stream:
+
+- a Host Task Queue item may mean “invoke this CANN launch callback”;
+- the CANN Stream carries Device tasks such as kernels, copies, and Event waits;
+- both layers can be asynchronous;
+- both must preserve the same logical Stream order.
+
+`sgl-kernel-npu` passes its launch lambda through `OpCommand::RunOpApi`. With task-queue mode enabled, torch_npu packages the callback as `QueueParas` and calls `enCurrentNPUStream`; otherwise it invokes the callback directly. Either path eventually submits work to an `aclrtStream`.
+
+### 1.2 Hardware View: There Is No Compute Unit Named “Stream”
+
+A Stream is not an AI Core, Vector Core, MTE, register file, or tensor-memory region. Conceptually:
+
+1. Host runtime encodes kernels, asynchronous copies, and Event operations as device-recognizable tasks;
+2. runtime/driver submits the tasks with Stream identity and ordering metadata;
+3. device control and scheduling mechanisms select ready tasks;
+4. a kernel is dispatched to AI Core/Vector Core resources according to its type, `blockDim`, and tiling;
+5. movement tasks use the corresponding data-movement engines.
+
+For hardware, the Stream identifies an ordered timeline, not a particular core. One kernel may occupy many cores, and later kernels in the same Stream can use different resources. Multiple Streams permit independent tasks to be considered concurrently; actual overlap still depends on resource availability.
+
+Official documentation's “task queue” description is the externally guaranteed semantic model. Product versions and fast-launch configurations can change internal queue, notification, and scheduling resources, so do not model a Stream as one physical FIFO permanently attached to an AI Core.
+
 ---
 
 ## 2. What a Stream Is Not
@@ -273,8 +308,10 @@ It does not:
 It is especially important when:
 
 - a tensor is used on a side Stream;
-- a custom wrapper extracts a raw `aclrtStream` and launches directly;
-- the allocator cannot infer the asynchronous use through a normal framework operator path.
+- a custom wrapper extracts a raw `aclrtStream` and launches on a non-allocation Stream;
+- the allocator cannot infer that cross-Stream asynchronous use through a normal framework path.
+
+A raw-pointer launch alone is not enough to require `record_stream` when storage remains on its allocation/current Stream; same-Stream allocator ordering is normally sufficient.
 
 The essential distinction is:
 
@@ -284,6 +321,63 @@ wait_stream(A):   do not let B consume x before A finishes producing it.
 ```
 
 Alive memory does not imply ready data.
+
+### 7.1 Why Only `apply_token_bitmask` Calls It Explicitly
+
+At the fixed `sgl-kernel-npu@d5630dff` baseline, the only non-Markdown calls are:
+
+```cpp
+workingLogits.record_stream(npuStream);
+workingBitmask.record_stream(npuStream);
+```
+
+This does not mean that other operators are synchronous or that only this operator has a lifetime. The criterion is whether storage is used outside its **allocation stream**—also called its creation or origin Stream.
+
+#### Same allocation/use Stream: normally no explicit record
+
+The caching allocator associates a block with its allocation Stream. If all uses remain on S:
+
+```text
+Stream S: allocate -> old kernel uses block -> reuse block -> new kernel uses block
+```
+
+future Device use of a reallocated address remains ordered after old use in S. The allocator already has enough information, so recording the same S commonly adds no new correctness fact. This is why ordinary PyTorch/torch_npu inputs, outputs, and temporary workspaces used only on the current Stream usually need no explicit call.
+
+#### Non-allocation Stream: extra lifetime handling is required
+
+If S0 allocates storage and S1 uses it, the allocator does not know about S1 by default. Correct choices are:
+
+1. call `x.record_stream(S1)` so allocator reuse waits for S1; or
+2. manually make S0 wait for S1 with Events before deallocating `x`.
+
+#### Why this wrapper records defensively
+
+`apply_token_bitmask` has several relevant properties:
+
+1. its working tensors may be local temporaries created by `zeros`, advanced indexing, or `contiguous`;
+2. they may instead alias caller-owned inputs;
+3. `EXEC_KERNEL_CMD::ConvertType` keeps only `data_ptr()`, so the launch lambda captures raw addresses rather than `at::Tensor` references;
+4. `RunOpApi` may queue the callback in torch_npu's Host task queue before the actual CANN launch;
+5. later copy/scatter work returns `logits`, not the working tensor objects.
+
+The explicit calls conservatively say that current-Stream asynchronous work uses those storage blocks. However:
+
+- if a working tensor was allocated on and used only by the current Stream, the call is likely redundant insurance;
+- visible `EXEC_KERNEL_CMD` code does not generically record every tensor;
+- another wrapper without the call is not automatically wrong;
+- another wrapper that uses storage on a non-allocation Stream without either recording it or synchronizing back to the creation Stream has a potential lifetime bug;
+- converting a tensor to a raw pointer makes automatic inference harder, but raw-pointer use alone is not sufficient proof that `record_stream` is required.
+
+Use this audit table:
+
+| Question | Yes | No |
+|---|---|---|
+| Is storage used only on its allocation/current Stream? | Usually no extra record | Continue |
+| Does the launch framework retain/track the asynchronous use? | Rely on its documented contract | Continue |
+| Was the non-allocation use recorded? | Allocator can defer reuse | Continue |
+| Does creation Stream wait for use Stream before deallocation? | Manual Event scheme is safe | Potential early-reuse risk |
+
+Execution readiness remains separate: cross-Stream producers and consumers still require an Event/wait.
 
 ---
 
@@ -335,6 +429,8 @@ The types and responsibilities are:
 4. `EXEC_KERNEL_CMD` is a Host launch wrapper, not CPU execution of the kernel's mathematics;
 5. the launch joins the current Stream's existing order;
 6. the wrapper may return before Device completion.
+
+Do not generalize this into “every raw-pointer launch must record every tensor.” These lines are an explicit defense for this wrapper's working tensors. Same allocation/current-Stream tensors are normally protected by caching-allocator ordering. See [Section 7.1](#71-why-only-apply_token_bitmask-calls-it-explicitly).
 
 See the full algorithm in [the `apply_token_bitmask` walkthrough](../sgl-kernel-npu/03-ascend-c-apply-token-bitmask.md).
 
@@ -505,6 +601,10 @@ It forces Host execution to wait and thereby removes concurrency that exposed a 
 
 No. A Stream is a logical runtime sequence. Kernel type, `blockDim`, tiling, resource requirements, and device scheduling determine which AI Core/Vector Core resources execute each task.
 
+### 9. Does the single `apply_token_bitmask` call site prove that every other operator is missing it?
+
+No. The allocator already knows the allocation Stream, and same-Stream-only use usually requires no extra record. `apply_token_bitmask` conservatively records local/aliased working storage used through a raw-pointer callback and possibly a Host task queue. If allocation and current Stream are identical, it may be redundant insurance. Other operators are safe without it when they remain on one Stream or manually synchronize non-creation use back to the creation Stream; only a genuine cross-Stream use with neither mechanism is a lifetime defect.
+
 ---
 
 ## 15. Primary References and Fixed Source
@@ -515,5 +615,9 @@ No. A Stream is a logical runtime sequence. Kernel type, `blockDim`, tiling, res
 - [`torch_npu` current/default Stream utilities, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/npu/utils.py)
 - [`torch_npu` graph capture implementation, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/npu/graphs.py)
 - [`torch_npu` C++ `NPUStream`, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/csrc/core/npu/NPUStream.h)
+- [`torch_npu` `OpCommand::RunOpApi` and Host task queue, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/csrc/framework/OpCommand.cpp)
+- [`torch_npu` NPU caching allocator allocation-Stream and `recordStream` logic](https://gitee.com/ascend/pytorch/blob/e04f000ce9e11177d193a398644d8fcb67a90cef/torch_npu/csrc/core/npu/NPUCachingAllocator.cpp)
+- [`sgl-kernel-npu` `EXEC_KERNEL_CMD` and raw-address conversion, fixed commit](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/utils/torch_helper.h#L120-L134)
 - [CANN: Synchronization](https://www.hiascend.com/document/detail/en/canncommercial/850/appdevg/acldevg/aclcppdevg_000013.html)
+- [CANN: Stream management and single/multiple-Stream semantics](https://www.hiascend.com/document/detail/en/canncommercial/800/appdevg/aclcppdevg/aclcppdevg_000011.html)
 - [CANN: `aclrtCreateStream`](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/runtimeapi/aclcppdevg_03_0066.html)

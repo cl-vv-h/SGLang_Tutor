@@ -337,6 +337,8 @@ Host 在 launch 前对 working tensor 调用 `record_stream(npuStream)`，防止
 
 这里的 `npuStream` 是 `c10_npu::NPUStream` Host 包装；`record_stream` 不会同步 kernel，也不会构建计算图。它只登记 allocator 生命周期。`getCurrentNPUStream()`、原生 `aclrtStream`、Event 与 graph capture 的完整关系见[torch_npu 02：Stream、Event、异步生命周期与计算图](../torch_npu/02-stream-events-and-graph-capture.md)。
 
+为什么仓库其他算子通常没有这两行？Caching allocator 已知道每块 storage 的 allocation stream；只在同一 Stream 使用时，后续地址复用仍受同 Stream 顺序保护，通常不必再次记录。这里的 working tensor 是可能新建、也可能 alias 输入的局部对象，而 `EXEC_KERNEL_CMD` 会把它转换成裸 `data_ptr()` 并经异步 callback launch，所以作者选择显式保守登记。若它确实在 current stream 分配并只在该 Stream 使用，这两行可能只是冗余保险；不能据此断言其他算子缺失，也不能断言任何 raw-pointer launch 都必须记录。完整源码证据和判定表见[Stream 专章第 7.4 节](../torch_npu/02-stream-events-and-graph-capture.md#74-为什么-sgl-kernel-npu-只有-apply_token_bitmask-显式调用它)。
+
 ## 16. 测试如何设计
 
 仓库的 [`test_apply_token_bitmask.py`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/tests/python/sgl_kernel_npu/test_apply_token_bitmask.py) 包含：

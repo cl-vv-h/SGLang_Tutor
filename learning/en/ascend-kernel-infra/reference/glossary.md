@@ -29,13 +29,14 @@
 | Stream | An ordered Host/runtime submission sequence for kernel launches, asynchronous copies, Events, and other device tasks; one Stream has implicit order but is not bound one-to-one to a CPU thread or AI Core |
 | Default Stream | The fixed default Stream made available for a device/context; “default” is an identity and does not mean it is always the current Stream |
 | Current Stream | The submission target selected by the framework for the current device and Host execution context; PyTorch NPU operators and custom wrappers normally inherit it |
+| Allocation / Creation Stream | The Stream associated with a storage block when the caching allocator allocates it; the allocator knows this Stream but not every non-creation-Stream use |
 | `c10::Stream` | PyTorch C10's backend-neutral Stream identity value; it carries device/Stream identity without being a native CANN queue handle |
 | `c10_npu::NPUStream` | torch_npu's Host C++ wrapper for an NPU Stream; `.stream(false)` exposes the underlying `aclrtStream` |
 | `aclrtStream` | CANN Runtime's native opaque Stream handle passed to asynchronous copies, kernels, and ACLNN launch interfaces |
 | Event | A runtime progress marker; an Event recorded in a Stream completes after preceding work, and another Stream can wait on it to establish cross-Stream order |
 | `wait_event` / `wait_stream` | Enqueues a dependency that makes future work in one Stream wait for another Stream's progress, normally without blocking Host |
 | Stream Synchronize | Blocks Host until work previously submitted to a Stream completes; it is coarser than Event-based ordering and overuse destroys overlap |
-| `record_stream` | Tells the caching allocator that tensor storage is asynchronously used by a Stream and must not be reused early; it is not an execution dependency or Host synchronization |
+| `record_stream` | Tells the caching allocator that storage is asynchronously used by a specified Stream, primarily a non-allocation Stream, and must not be reused early; same-allocation-Stream-only use normally needs no extra record. It is not an execution dependency or Host synchronization |
 | Graph Capture / NPUGraph | Captures a relatively stable launch sequence on a capture Stream for replay; the graph describes replayable work, while Streams carry submission and ordering |
 
 ## Ascend NPU Hardware

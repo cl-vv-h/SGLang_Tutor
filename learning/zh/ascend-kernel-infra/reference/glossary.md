@@ -200,13 +200,14 @@
 | Stream | Host/runtime 向某个 device 提交 kernel launch、异步拷贝、Event 等任务的有序执行序列；同一 Stream 隐式有序，不与 CPU 线程或 AI Core 一一绑定 |
 | Default Stream | 某 device/context 自动具备的固定默认 Stream；“默认”描述固定身份，不表示它永远是 current stream |
 | Current Stream | 框架为当前 device 与 Host 执行上下文选中的提交目标；PyTorch NPU 算子和 custom wrapper 通常应继承它 |
+| Allocation / Creation Stream | Caching allocator 分配某个 storage 时与该内存块关联的 Stream；allocator 默认知道这条 Stream，但不会自动知道所有非 creation-stream 使用 |
 | `c10::Stream` | PyTorch C10 层的 backend-neutral Stream 身份值，包含 device/stream 标识但不直接等于 CANN 原生队列句柄 |
 | `c10_npu::NPUStream` | torch_npu 对 NPU Stream 的 Host C++ 包装，可通过 `.stream(false)` 取得底层 `aclrtStream` |
 | `aclrtStream` | CANN Runtime 的原生不透明 Stream 句柄，传给异步拷贝、kernel 或 ACLNN launch API |
 | `wait_event` / `wait_stream` | 向一条 Stream 加入对另一条 Stream 进度的异步等待，建立跨 Stream 执行依赖而通常不阻塞 Host |
 | Stream Synchronize | 让 Host 阻塞直到某条 Stream 先前提交的任务完成；比 Event wait 更粗，滥用会破坏异步重叠 |
 | Task Queue | Triton-Ascend launcher/runtime 的异步提交模式；开启后 Host 提交 launch 后可先返回，但这不等于 device kernel 内部变成 persistent 调度 |
-| Record Stream | 告知 caching allocator 某 tensor storage 正被指定 Stream 异步使用，避免提前回收复用；它不建立执行依赖，也不阻塞 Host |
+| Record Stream | 告知 caching allocator 某 tensor storage 正被指定 Stream（主要是非 allocation stream）异步使用，避免提前回收复用；只在 allocation stream 使用通常不需再次记录。它不建立执行依赖，也不阻塞 Host |
 | Graph Capture / NPUGraph | 在 capture Stream 上记录一段相对稳定的 launch 序列并生成可 replay 的图；图描述可重放工作，Stream 承载提交与顺序，二者不是同一对象 |
 | Cross-core Sync | 多核之间的数据就绪或阶段同步 |
 | CV Fusion | Cube 与 Vector 阶段在同一融合算子内协作执行 |
