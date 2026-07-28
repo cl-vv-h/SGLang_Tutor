@@ -427,6 +427,8 @@ Python torch.Tensor
 
 当然，上游也可能传错数据，ACLNN 本身也可能有缺陷，但源码证据表明 device 实现不在这个扩展中时，盲改扩展的 Ascend C/Triton 目录没有因果依据。应先构造最小 ACLNN wrapper 复现，确认问题位于参数胶水、运行环境还是供应方算子实现。
 
+本章把 current stream 视为 ACLNN/custom launch 合同的一部分；若要继续理解 `getCurrentNPUStream()` 的返回类型、`record_stream` 为何不等于同步，以及 Stream 与 NPUGraph 的边界，请接着读[torch_npu 02：Stream、Event、异步生命周期与计算图](./02-stream-events-and-graph-capture.md)。
+
 ## 官方源码与文档
 
 - [Ascend Extension for PyTorch README](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/README.md)

@@ -1,0 +1,519 @@
+# torch_npu 02: Streams, Events, Asynchronous Lifetimes, and Graph Capture
+
+> This chapter explains a mechanism shared by PyTorch, `torch_npu`, CANN, and `sgl-kernel-npu`: how Host code queues NPU work, preserves dependencies, keeps tensor memory alive, and why none of this is the same as building a computation graph.
+
+## 0. Learning Goals
+
+After this chapter, you should be able to explain:
+
+1. what a Stream is and is not;
+2. why asynchronous Host submission and ordered execution can coexist;
+3. the roles of `c10::Stream`, `c10_npu::NPUStream`, and `aclrtStream`;
+4. why Host wrappers call `getCurrentNPUStream()`;
+5. the distinct jobs of `record_stream`, `wait_stream`, Events, and synchronization;
+6. how to use multiple Streams safely;
+7. how Streams relate to eager execution, autograd graphs, and NPU graph capture;
+8. how these ideas appear in real `sgl-kernel-npu` source.
+
+Recommended prerequisites:
+
+- [Foundation 03: Memory, Pipeline, and Synchronization](../foundations/03-memory-pipeline-and-sync.md)
+- [torch_npu 01: Dispatcher, ACLNN, and Custom Op Boundaries](./01-dispatch-aclnn-and-custom-op-boundaries.md)
+- [sgl-kernel-npu 01: Repository Structure and Operator Lifecycle](../sgl-kernel-npu/01-repository-and-op-lifecycle.md)
+
+---
+
+## 1. A Precise Definition
+
+A **Stream** is an ordered sequence through which Host/runtime code submits asynchronous tasks to a device.
+
+The terms in that definition mean:
+
+- **Host**: the CPU process running Python, PyTorch, and C++ wrappers;
+- **runtime**: software connecting Host code to the NPU, mainly `torch_npu` and CANN Runtime here;
+- **device**: the Ascend NPU that executes kernels;
+- **task**: a kernel launch, asynchronous copy, Event record/wait, or operator-library call;
+- **asynchronous**: the Host can usually continue after submission without waiting for the NPU;
+- **ordered**: tasks in one Stream obey their submission dependencies, also called in-order or FIFO semantics.
+
+These statements are therefore compatible:
+
+```text
+From the Host's view: submit A and continue quickly, so submission is asynchronous.
+Within one Stream: B cannot violate the A -> B dependency, so execution is ordered.
+```
+
+A useful first analogy is a task lane:
+
+- the Host places work onto the lane;
+- work in one lane does not overtake earlier work;
+- separate lanes may overlap, but hardware contention can still serialize them;
+- an Event acts as a signal between lanes;
+- synchronization makes the Host stop and wait for progress.
+
+This is only an ordering analogy. A Stream is not a physical lane and is not bound one-to-one to an AI Core.
+
+---
+
+## 2. What a Stream Is Not
+
+| Object | Layer | Purpose | A Stream? |
+|---|---|---|---|
+| CPU thread | Host OS | Executes Python/C++ | No; it may submit to a Stream |
+| Process | Host OS | Owns address space and threads | No |
+| AI Core / Vector Core | NPU hardware | Executes matrix, vector, and movement instructions | No |
+| Kernel | Device program | Performs one parallel computation | No; its launch is a Stream task |
+| Ascend C `TPipe` / `TQue` | Inside one Device kernel | Coordinates on-chip movement/compute stages | No |
+| Computation graph | Framework/graph layer | Describes operators and data dependencies | No |
+| Event | Runtime synchronization object | Marks progress in a Stream | No |
+
+Two different kinds of “queue” are especially easy to confuse:
+
+```text
+Host/runtime Stream
+  kernel A -> memcpy B -> kernel C
+  spans multiple launches
+
+Ascend C Device TQue
+  CopyIn tile 0 -> Compute tile 0 -> CopyOut tile 0
+  exists inside one kernel execution
+```
+
+See [Foundation 03](../foundations/03-memory-pipeline-and-sync.md) for Device-side queues and pipelines.
+
+---
+
+## 3. Three Representations of One Logical Stream
+
+### 3.1 `c10::Stream`: PyTorch's Backend-Neutral Identity
+
+`c10::Stream` is a C++ value type in PyTorch's C10 layer. Conceptually, it carries:
+
+```text
+device type + device index + Stream identity
+```
+
+Generic PyTorch code must not depend directly on CUDA or NPU native handles. A `c10::Stream` therefore identifies a Stream across backends; it is not the runtime queue itself and is not an NPU address.
+
+### 3.2 `c10_npu::NPUStream`: torch_npu's Backend Wrapper
+
+Real Host source commonly contains:
+
+```cpp
+auto npuStream = c10_npu::getCurrentNPUStream();
+```
+
+Here:
+
+- `auto` deduces `c10_npu::NPUStream`;
+- the value is a lightweight Host-side C++ wrapper;
+- `getCurrentNPUStream()` queries an existing current Stream rather than creating one;
+- querying it does not launch a kernel.
+
+### 3.3 `aclrtStream`: CANN's Native Opaque Handle
+
+Code that calls a CANN launch interface often needs:
+
+```cpp
+aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
+```
+
+An **opaque handle** is an identifier whose internal representation callers must not depend on. `.stream(false)` extracts the CANN-native `aclrtStream` from the `NPUStream` wrapper so a launch API knows which ordered sequence receives the work.
+
+```mermaid
+flowchart LR
+  A["c10::Stream<br/>PyTorch backend-neutral identity"] --> B["c10_npu::NPUStream<br/>torch_npu NPU wrapper"]
+  B --> C["aclrtStream<br/>CANN native opaque handle"]
+  C --> D["Runtime queue and device scheduling"]
+```
+
+These are normally representations of the same logical Stream at different abstraction layers, not three unrelated Streams.
+
+---
+
+## 4. Default Stream and Current Stream
+
+The **default Stream** is a fixed execution sequence made available for a device/context. The **current Stream** is the sequence currently selected by the framework for a device and Host execution context.
+
+Most PyTorch NPU operators do not expose a `stream` argument. They implicitly use the current Stream:
+
+```python
+import torch_npu
+
+current = torch_npu.npu.current_stream()
+default = torch_npu.npu.default_stream()
+```
+
+A context manager temporarily changes the current Stream and restores it on exit:
+
+```python
+import torch
+import torch_npu
+
+side = torch_npu.npu.Stream()
+with torch_npu.npu.stream(side):
+    y = torch.ones(1024, device="npu") * 2
+```
+
+Leaving the `with` block restores the prior current Stream. It does **not** prove that NPU work in `side` has finished.
+
+### Why a Custom Op Must Respect the Current Stream
+
+Suppose PyTorch has established:
+
+```text
+producer(x) -> custom_op(x) -> consumer(y)
+```
+
+If the custom wrapper silently launches into another Stream without Events, it may read `x` before the producer finishes, and the consumer may read `y` before the custom kernel finishes. Using `getCurrentNPUStream()` preserves the caller's existing same-Stream ordering.
+
+---
+
+## 5. How Asynchronous Execution Works
+
+For:
+
+```python
+a = op_a(x)
+b = op_b(a)
+c = op_c(b)
+```
+
+eager execution is approximately:
+
+```mermaid
+sequenceDiagram
+  participant H as "Host Python/C++"
+  participant R as "torch_npu/CANN Runtime"
+  participant S as "Current NPU Stream"
+  participant D as "NPU Device"
+  H->>R: "submit op_a"
+  R->>S: "enqueue kernel A"
+  R-->>H: "return to Host"
+  H->>R: "submit op_b"
+  R->>S: "enqueue kernel B"
+  R-->>H: "return to Host"
+  H->>R: "submit op_c"
+  R->>S: "enqueue kernel C"
+  S->>D: "execute with A -> B -> C ordering"
+```
+
+Python may reach the next statement while Device execution of A is still in progress. Correctness comes from same-Stream ordering and tensor storage lifetime, not from synchronizing after every Python line.
+
+A Python/C++ function returning usually means the launch was submitted, not that every output element is already computed.
+
+---
+
+## 6. Multiple Streams and Events
+
+Different Streams have no implicit mutual order:
+
+```text
+Stream A: A1 -> A2
+Stream B: B1 -> B2
+```
+
+A1 precedes A2 and B1 precedes B2. Submission order alone does not establish an A2-versus-B1 dependency.
+
+An **Event** is a runtime progress marker. When recorded in Stream A, it becomes complete only after earlier A work completes:
+
+```text
+Stream A: producer(x) -> record E
+Stream B: wait E -> consumer(x)
+```
+
+The wait is normally enqueued asynchronously; the Host need not block.
+
+`wait_stream(other)` expresses that future work in this Stream must wait for work already submitted to `other`. Conceptually, it records an Event in `other` and queues a wait in this Stream.
+
+```python
+import torch
+import torch_npu
+
+main = torch_npu.npu.current_stream()
+side = torch_npu.npu.Stream()
+x = torch.ones(1024, device="npu")
+
+side.wait_stream(main)
+with torch_npu.npu.stream(side):
+    x.record_stream(side)
+    y = x * 2
+
+main.wait_stream(side)
+z = y + 1
+```
+
+The two `wait_stream` calls establish **execution dependencies**. `x.record_stream(side)` establishes **memory-lifetime bookkeeping**. Neither substitutes for the other.
+
+Multiple Streams merely create an opportunity for concurrency. Actual overlap depends on kernel resource use, Cube/Vector/MTE occupancy, memory bandwidth, hardware/runtime support, and Event dependencies.
+
+---
+
+## 7. `record_stream`: Storage Lifetime, Not Execution Order
+
+PyTorch's caching allocator reuses NPU memory blocks. Asynchrony creates a gap:
+
+```text
+Host: the tensor object has gone out of scope
+Device: a Stream may still be reading or writing its storage
+```
+
+**Storage** is the underlying memory containing tensor elements. The tensor object is a handle carrying shape, stride, dtype, device, and a storage reference.
+
+`tensor.record_stream(stream)` tells the allocator that the tensor's storage was used by that Stream and must not be reused until the relevant queued work is complete.
+
+It does not:
+
+- launch a kernel;
+- move a tensor “into” a Stream;
+- make one Stream wait for another;
+- block the CPU;
+- capture a graph.
+
+It is especially important when:
+
+- a tensor is used on a side Stream;
+- a custom wrapper extracts a raw `aclrtStream` and launches directly;
+- the allocator cannot infer the asynchronous use through a normal framework operator path.
+
+The essential distinction is:
+
+```text
+record_stream(B): keep x's address alive while B may use it.
+wait_stream(A):   do not let B consume x before A finishes producing it.
+```
+
+Alive memory does not imply ready data.
+
+---
+
+## 8. Keep the Synchronization Mechanisms Separate
+
+| Mechanism | Wait relationship | Blocks Host? | Purpose |
+|---|---|---:|---|
+| Same-Stream order | Later task waits for earlier task | No | Ordinary operator dependencies |
+| `wait_event` / `wait_stream` | One Stream waits for another's progress | No | Cross-Stream dependency |
+| `stream.synchronize()` | Host waits for one Stream | Yes | Debugging, Host reads, timing |
+| `torch_npu.npu.synchronize()` | Host waits for submitted device work | Yes | Coarse device boundary |
+| `query()` | No wait; completion check only | No | Polling |
+| `record_stream()` | No execution wait | No | Allocator lifetime tracking |
+
+Synchronizing after every operator destroys Host/device overlap and asynchronous scheduling. Prefer same-Stream ordering and precise Events, and block the Host only at a real asynchronous boundary such as a CPU read, debugging boundary, or measured interval.
+
+---
+
+## 9. Source Walkthrough in `sgl-kernel-npu`
+
+### 9.1 `apply_token_bitmask`
+
+Source:
+
+- [`apply_token_bitmask.cpp#L133-L153`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L133-L153)
+
+Fixed-commit source excerpt:
+
+```cpp
+// Prevent NPU storage from being reclaimed before async kernel completes
+auto npuStream = c10_npu::getCurrentNPUStream();
+workingLogits.record_stream(npuStream);
+workingBitmask.record_stream(npuStream);
+
+// ...
+if (dtype == at::kFloat) {
+    EXEC_KERNEL_CMD(apply_token_bitmask_fp32, blockDim, workingLogits,
+                    workingBitmask, numRowsU32, vocabSizeU32,
+                    logitsStrideU32, bitmaskStrideU32, baseRows,
+                    extraCores, tileLength, blockDim, dtypeSizeU32);
+}
+```
+
+The types and responsibilities are:
+
+1. `workingLogits` and `workingBitmask` are Host-side `at::Tensor` handles whose storage resides in NPU GM;
+2. `npuStream` is a `c10_npu::NPUStream`;
+3. `record_stream` protects storage from premature allocator reuse;
+4. `EXEC_KERNEL_CMD` is a Host launch wrapper, not CPU execution of the kernel's mathematics;
+5. the launch joins the current Stream's existing order;
+6. the wrapper may return before Device completion.
+
+See the full algorithm in [the `apply_token_bitmask` walkthrough](../sgl-kernel-npu/03-ascend-c-apply-token-bitmask.md).
+
+### 9.2 Extracting the Native `aclrtStream`
+
+CATLASS Host code contains:
+
+```cpp
+aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
+```
+
+Source:
+
+- [`catlass_matmul_fp8.cpp#L56-L65`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/catlass/op_host/catlass_matmul_fp8.cpp#L56-L65)
+
+This bridges:
+
+```text
+PyTorch current Stream
+  -> torch_npu NPUStream wrapper
+  -> CANN aclrtStream handle
+  -> CATLASS/CANN launch API
+```
+
+There is no required process literally named “Host.” The C++ wrapper runs on a Host thread inside the Python serving process. Host is a location and responsibility, not a separately named daemon.
+
+ACLNN follows the same ordering principle: the executor and workspace are submitted with the current Stream. See [torch_npu 01](./01-dispatch-aclnn-and-custom-op-boundaries.md).
+
+---
+
+## 10. The CANN Runtime View
+
+This is a structural illustration with error handling omitted; it is not production-ready code:
+
+```cpp
+aclrtStream stream = nullptr;
+aclrtCreateStream(&stream);
+
+aclrtMemcpyAsync(dst, dstBytes, src, srcBytes,
+                 ACL_MEMCPY_HOST_TO_DEVICE, stream);
+
+// A generated/declared kernel-launch entry would also receive stream.
+
+aclrtSynchronizeStream(stream);
+aclrtDestroyStream(stream);
+```
+
+The lifecycle is:
+
+1. Host creates or obtains a Stream;
+2. asynchronous copies and launches receive the same `aclrtStream`;
+3. runtime preserves their same-Stream order;
+4. Host synchronization is used only when completion must be observed;
+5. framework extensions should normally reuse `torch_npu`'s current Stream rather than bypassing device, dependency, allocator, and lifetime management.
+
+---
+
+## 11. Is a Stream the Same as a Computation Graph?
+
+No.
+
+| Term | What it represents | Relationship to Streams |
+|---|---|---|
+| Eager execution | Submit an operator as Python reaches it | Uses Streams without pre-building a graph |
+| Autograd graph | A training DAG of values/operations needed for gradients | Backward kernels still execute through Streams |
+| NPU graph capture / NPUGraph | Capture a stable launch sequence for replay | Capture and replay use Streams; the graph is not a Stream |
+
+A **DAG**, or directed acyclic graph, represents directed dependencies without dependency cycles.
+
+The two concepts answer different questions:
+
+```text
+Graph:  What computations exist, and what are their data dependencies?
+Stream: Which ordered device-submission sequence carries each task?
+```
+
+`torch_npu` graph capture selects a capture Stream, enters its Stream context, and records work between capture begin/end. Replay still submits runtime work and remains subject to Stream/Event ordering.
+
+```mermaid
+flowchart LR
+  A["Select capture Stream"] --> B["Capture begin"]
+  B --> C["Submit a stable operator sequence"]
+  C --> D["Capture end: reusable graph"]
+  D --> E["Replay through runtime"]
+  E --> F["Stream and Event ordering still applies"]
+```
+
+Thus:
+
+- Streams work without graph capture;
+- graph capture uses a Stream to identify the recorded submission sequence;
+- replayed work still follows Stream dependencies;
+- capture generally imposes constraints on addresses, shapes, control flow, and resource behavior.
+
+---
+
+## 12. End-to-End Host-to-Device Timeline
+
+```mermaid
+sequenceDiagram
+  participant P as "Python/SGLang"
+  participant D as "PyTorch Dispatcher"
+  participant W as "C++ Host Wrapper"
+  participant S as "Current NPU Stream"
+  participant R as "CANN Runtime"
+  participant N as "NPU Device"
+  P->>D: "torch.ops.npu.custom_op(x)"
+  D->>W: "invoke PrivateUse1 implementation"
+  W->>W: "validate, tile, allocate output/workspace"
+  W->>S: "getCurrentNPUStream"
+  W->>W: "record_stream for storage lifetime"
+  W->>R: "launch(kernel, stream, pointers, tiling)"
+  R->>S: "enqueue task"
+  R-->>W: "submission returns"
+  W-->>P: "return output tensor handle"
+  S->>N: "execute after earlier dependencies"
+  N-->>S: "complete; Event/allocator can observe progress"
+```
+
+The final Device actions may occur after Python has already continued.
+
+---
+
+## 13. Common Failures
+
+1. **Treating Host return as Device completion.** Timing captures launch cost, or an error appears only at a later synchronization point.
+2. **Launching a custom kernel into the wrong Stream.** Isolated tests pass, integrated execution races, and a global synchronize appears to “fix” it.
+3. **Treating `record_stream` as synchronization.** The address remains valid, but data is consumed before it is ready.
+4. **Ignoring side-Stream storage lifetime.** Failures appear under allocator pressure or short Python object lifetimes.
+5. **Synchronizing the whole device everywhere.** Correctness survives, but overlap and throughput collapse.
+6. **Creating multiple Streams and assuming overlap.** Resource contention may still serialize execution.
+
+When reading a wrapper, mark the current device, Stream type, producer/consumer Streams, Event dependencies, allocator tracking, true Host-blocking points, and the raw handle passed to launch.
+
+---
+
+## 14. Chapter Checkpoints and Detailed Answers
+
+### 1. If Stream submission is asynchronous, why can B safely consume A in the same Stream?
+
+“Asynchronous” means the Host does not wait. “Ordered” means Device tasks in one Stream preserve dependencies. The Host can submit A and B quickly while runtime/device execution still enforces A before B.
+
+### 2. Why should a custom wrapper use the current rather than always the default Stream?
+
+The caller may have selected a side Stream with a context/guard. Producers and consumers then belong to that current Stream. Forcing the custom launch onto default breaks the established chain unless explicit Events are added.
+
+### 3. What is the essential difference between `record_stream` and `wait_stream`?
+
+`record_stream` informs the allocator that storage is still in asynchronous use; `wait_stream` establishes an execution dependency. The former keeps memory alive, while the latter makes data ready before consumption.
+
+### 4. What does `c10_npu::getCurrentNPUStream().stream(false)` produce?
+
+`getCurrentNPUStream()` returns a Host-side `c10_npu::NPUStream` wrapper. `.stream(false)` extracts the CANN-native opaque `aclrtStream` handle required by low-level launch APIs.
+
+### 5. Are two Streams necessarily faster than one?
+
+No. They only expose possible concurrency. Full kernel occupancy, shared memory bandwidth, Event dependencies, hardware limits, and scheduling overhead may prevent overlap. Measure the real workload with a profiler.
+
+### 6. What is the shortest distinction between a Stream and a graph?
+
+A graph describes computations and data dependencies. A Stream describes the ordered runtime submission sequence carrying device tasks. Eager mode uses Streams without graph capture, and graph replay still executes through Streams.
+
+### 7. Why can `stream.synchronize()` hide a bug without being the right fix?
+
+It forces Host execution to wait and thereby removes concurrency that exposed a missing dependency or lifetime record. The proper repair is usually the correct current Stream, precise Event/wait dependencies, and allocator tracking.
+
+### 8. Is a Stream bound to one AI Core?
+
+No. A Stream is a logical runtime sequence. Kernel type, `blockDim`, tiling, resource requirements, and device scheduling determine which AI Core/Vector Core resources execute each task.
+
+---
+
+## 15. Primary References and Fixed Source
+
+- [PyTorch C++: C10 Streams](https://docs.pytorch.org/cppdocs/api/c10/streams.html)
+- [PyTorch: `Tensor.record_stream`](https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html)
+- [`torch_npu` Python Stream implementation, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/npu/streams.py)
+- [`torch_npu` current/default Stream utilities, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/npu/utils.py)
+- [`torch_npu` graph capture implementation, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/npu/graphs.py)
+- [`torch_npu` C++ `NPUStream`, fixed commit](https://github.com/Ascend/pytorch/blob/86986b9711ef597e83edc41da1f02c34a03fea7b/torch_npu/csrc/core/npu/NPUStream.h)
+- [CANN: Synchronization](https://www.hiascend.com/document/detail/en/canncommercial/850/appdevg/acldevg/aclcppdevg_000013.html)
+- [CANN: `aclrtCreateStream`](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/runtimeapi/aclcppdevg_03_0066.html)

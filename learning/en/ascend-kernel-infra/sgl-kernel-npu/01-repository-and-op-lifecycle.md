@@ -26,6 +26,10 @@ sgl-kernel-npu/
 6. Device kernel                 # Ascend C / Triton kernel executes
 ```
 
+The Host wrapper normally submits the launch asynchronously to PyTorch's **current NPU Stream**. `c10::Stream` is PyTorch's backend-neutral identity, `c10_npu::NPUStream` is torch_npu's NPU wrapper, and `aclrtStream` is the opaque native CANN handle passed to a launch. Using the current rather than blindly using the default Stream preserves the producer/custom-op/consumer order selected by the caller.
+
+Custom raw launches must also keep asynchronously used tensor storage alive. `tensor.record_stream(stream)` informs the caching allocator about that use; it does not make one Stream wait for another. Read [torch_npu 02: Streams, Events, Asynchronous Lifetimes, and Graph Capture](../torch_npu/02-stream-events-and-graph-capture.md) for the full type path, Event dependencies, and source walkthrough.
+
 ## Registration Pattern
 
 ```python

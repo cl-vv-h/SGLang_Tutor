@@ -357,6 +357,8 @@ PyTorch dispatcher 只负责把调用送到某个 C++ 函数。进入 C++ Host w
 3. `ACLRT_LAUNCH_KERNEL(kernel_name)(blockdim, acl_stream, params...)`：调用构建系统生成的 `aclrtlaunch_<kernel_name>` launch stub。
 4. `at_npu::native::OpCommand::RunOpApi(...)`：把这次 launch 包进 `torch_npu` 的 op 执行机制，接入 stream、异步执行和错误处理。
 
+这里三种容易混淆的类型依次是 PyTorch 跨后端的 `c10::Stream`、torch_npu 的 `c10_npu::NPUStream` 包装，以及 CANN launch 接受的原生 `aclrtStream` 不透明句柄。它们的逐层类型、default/current Stream 与 Event 语义见[torch_npu 02：Stream、Event、异步生命周期与计算图](../torch_npu/02-stream-events-and-graph-capture.md)。
+
 这里第一次出现的 **launch stub** 是 Host 侧的小段生成代码或头文件声明，用来把 C++ 参数按 CANN runtime 需要的 ABI 提交给某个 device kernel。比如 `mega_chunk_gdn.cpp` include 了 `aclrtlaunch_launch_mega_kernel.h`，见 [`mega_chunk_gdn.cpp#L8`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L8)。这个头通常来自 Ascend C 构建生成，所以你可能在源码树里找不到它。
 
 这里第一次出现的 **ABI** 是 application binary interface，应用二进制接口。你可以把它理解成“编译后的 Host 代码和 device launch stub 之间约定好的参数顺序、类型、调用方式”。schema 是 PyTorch 层的合同，ABI 是更底层二进制调用合同。
@@ -405,6 +407,8 @@ sequenceDiagram
 NPU launch 通常是异步的。Host wrapper 把工作排进当前 stream 后，可以很快返回；真正的 device 计算在 NPU 上按 stream 顺序执行。后续 PyTorch op、显式同步、读取结果到 CPU 或 profiler 都可能触发等待。
 
 这也是为什么 `record_stream` 很重要。Host wrapper 里临时创建的 `workingLogits/workingBitmask` 如果只被异步 kernel 使用，而 Python/C++ 作用域已经退出，allocator 可能以为它们可以复用。`record_stream` 告诉 allocator：“这些 tensor 的 storage 还被这个 stream 上的异步工作使用，先别回收。”`apply_token_bitmask` 在 launch 前就做了这件事。
+
+但 `record_stream` 只保护 allocator 管理的 storage 生命周期，不会建立 producer/consumer 的执行依赖。跨 Stream 的数据就绪关系要用 Event、`wait_event` 或 `wait_stream`；完整反例和时序图见[Stream 专章第 7-8 节](../torch_npu/02-stream-events-and-graph-capture.md#7-record_stream它记录的是-storage-使用不是计算顺序)。
 
 所以，“Host 调度”不是 CPU 线程亲自算完结果，而是：
 

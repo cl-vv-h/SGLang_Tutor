@@ -45,7 +45,10 @@ data_queue.Free(consumed);  // Return to producer
 | `TQue::EnQueue/DeQueue` | Between pipeline stages | Data passing with backpressure |
 | `SetFlag/WaitFlag` | Between cores | Event signaling |
 | `Barrier()` | All cores in block | Synchronization point |
-| `sync_stream()` | Host/Device | CPU-GPU synchronization |
+| Stream order / Event | Between kernel launches | Cross-kernel dependency without necessarily blocking Host |
+| `stream.synchronize()` | Host/Device | Host waits for work previously submitted to one Stream |
+
+A runtime **Stream** is an ordered Host-to-Device submission sequence spanning kernel launches, asynchronous copies, and Events. It is not an Ascend C `TQue`: a `TQue` coordinates tile stages inside one Device kernel. See [torch_npu 02: Streams, Events, Asynchronous Lifetimes, and Graph Capture](../torch_npu/02-stream-events-and-graph-capture.md) for current/default Streams, `record_stream`, Events, and the distinction from computation graphs.
 
 ## Arithmetic Intensity
 

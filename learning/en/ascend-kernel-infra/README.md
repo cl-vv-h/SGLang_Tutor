@@ -70,6 +70,7 @@ This track does not re-explain SGLang upper-level mechanisms like Scheduler, Rad
 | Content | Learning Outcome |
 |---|---|
 | [torch_npu 01: Dispatcher, ACLNN & Custom Op Boundaries](./torch_npu/01-dispatch-aclnn-and-custom-op-boundaries.md) | Distinguish which NPU path standard `torch`/`torch_npu`/`torch.ops.*` calls land on |
+| [torch_npu 02: Streams, Events, Asynchronous Lifetimes & Graph Capture](./torch_npu/02-stream-events-and-graph-capture.md) | Distinguish default/current Streams, Event dependencies, `record_stream` lifetime protection, and graph capture; trace `getCurrentNPUStream()` to `aclrtStream` |
 
 ### 5. sgl-kernel-npu: Back to Real Production Source Code
 

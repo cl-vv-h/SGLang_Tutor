@@ -70,6 +70,7 @@
 | 内容 | 学习成果 |
 |---|---|
 | [torch_npu 01：Dispatcher、ACLNN 与 Custom Op 的边界](./torch_npu/01-dispatch-aclnn-and-custom-op-boundaries.md) | 能区分标准 `torch`/`torch_npu`/`torch.ops.*` 调用分别落到哪条 NPU 路径 |
+| [torch_npu 02：Stream、Event、异步生命周期与计算图](./torch_npu/02-stream-events-and-graph-capture.md) | 能区分 default/current Stream、Event 依赖、`record_stream` 内存保护和 graph capture，并读懂 `getCurrentNPUStream()` 到 `aclrtStream` 的源码路径 |
 
 ### 5. sgl-kernel-npu：回到真实生产源码
 

@@ -48,6 +48,14 @@ GM:  masked_logits [B, V]  # Constrained logits
 
 ## Async Lifecycle
 
-- Bitmask loaded asynchronously from host
-- Can be updated mid-generation (new grammar constraints)
-- Three-TQue pipeline ensures correct ordering
+The real Host wrapper obtains the current Stream and records the two working tensors before launch:
+
+```cpp
+auto npuStream = c10_npu::getCurrentNPUStream();
+workingLogits.record_stream(npuStream);
+workingBitmask.record_stream(npuStream);
+```
+
+`npuStream` is a Host-side `c10_npu::NPUStream`. The launch is asynchronous: the wrapper may return while the NPU still uses the tensors' GM storage. `record_stream` tells the caching allocator not to reuse that storage prematurely. It does not synchronize execution and does not build a computation graph. Cross-Stream producer/consumer ordering requires an Event or `wait_stream`.
+
+The three Ascend C `TQue` objects solve a different problem: CopyIn/Compute/CopyOut ordering inside this one Device kernel. They are not runtime Streams. See [torch_npu 02: Streams, Events, Asynchronous Lifetimes, and Graph Capture](../torch_npu/02-stream-events-and-graph-capture.md) for the complete distinction.

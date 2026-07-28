@@ -44,3 +44,5 @@ torch.utils.rename_privateuse1_backend("npu")
 torch.ops.sgl_kernel.fused_attention(...)   # sgl-kernel-npu
 torch.ops.npu.sgmv_shrink(...)              # torch_npu custom
 ```
+
+Every asynchronous ACLNN or custom launch also needs a correct execution sequence and storage lifetime. Continue with [torch_npu 02: Streams, Events, Asynchronous Lifetimes, and Graph Capture](./02-stream-events-and-graph-capture.md) for `getCurrentNPUStream()`, `aclrtStream`, `record_stream`, cross-Stream Events, and the distinction from NPUGraph.

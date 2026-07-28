@@ -143,6 +143,8 @@ pipe.InitBuffer(outQueue, bufferCount, tileBytes);
 
 同步不足会算错；同步过多会把异步硬件重新串行化。正确性是下限，最小必要依赖是性能目标。
 
+这里的 Stream 是 **Host/runtime 跨多个 kernel launch 的有序提交序列**，不是本章前面讲的 Ascend C `TQue`。`TQue` 组织一次 Device kernel 内部的 tile 流水；Stream 组织 kernel、异步搬运和 Event 等 runtime 任务。`getCurrentNPUStream()`、`record_stream`、跨 Stream Event 以及它与计算图的区别，见[torch_npu 02：Stream、Event、异步生命周期与计算图](../torch_npu/02-stream-events-and-graph-capture.md)。
+
 ## 9. Tiling 的三个尺度
 
 ```text
