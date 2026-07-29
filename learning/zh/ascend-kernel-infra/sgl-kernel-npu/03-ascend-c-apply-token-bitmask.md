@@ -331,13 +331,15 @@ Device 文件为 half、float、bfloat16 提供三个入口。Host 按 logits dt
 
 ## 15. 异步生命周期
 
-Host 在 launch 前对 working tensor 调用 `record_stream(npuStream)`，防止异步 kernel 完成前底层 storage 被 allocator 回收。
+Host 在 launch 前对两个 working Tensor 调用 `record_stream(npuStream)`。这会把 current Stream 登记到 caching allocator 的 `stream_uses`，但不代表本算子真的发生了跨 Stream。
 
-这类 bug 的典型表现是偶现错误，而不是每次稳定失败。Kernel 正确性不仅在 device 数学里，也包括 Host 对异步生命周期的管理。
+逐分支审计可见：`index/zeros/contiguous`、`EXEC_KERNEL_CMD`、后续 `copy_`/`index_put_` 全部使用 current Stream；wrapper 没有创建 side Stream。因此对正常同 Stream 调用，这两次登记在正确性上是冗余的，不是 bitmask 数学或异步 launch 的必要步骤。`workingLogits` 要么 alias 返回的 `logits`，要么是 current-Stream 临时量；`workingBitmask` 也通常在 current Stream 分配/使用。
 
-这里的 `npuStream` 是 `c10_npu::NPUStream` Host 包装；`record_stream` 不会同步 kernel，也不会构建计算图。它只登记 allocator 生命周期。`getCurrentNPUStream()`、原生 `aclrtStream`、Event 与 graph capture 的完整关系见[torch_npu 02：Stream、Event、异步生命周期与计算图](../torch_npu/02-stream-events-and-graph-capture.md)。
+它们只在一种边缘情形提供额外保护：working storage alias 另一条 Stream 分配的输入，而调用方准备过早释放最后一个引用。但它们不建立数据就绪依赖，也没有覆盖所有可能 alias，所以不能把它理解为“本算子自动支持任意跨 Stream 输入”。
 
-为什么仓库其他算子通常没有这两行？Caching allocator 已知道每块 storage 的 allocation stream；只在同一 Stream 使用时，后续地址复用仍受同 Stream 顺序保护，通常不必再次记录。这里的 working tensor 是可能新建、也可能 alias 输入的局部对象，而 `EXEC_KERNEL_CMD` 会把它转换成裸 `data_ptr()` 并经异步 callback launch，所以作者选择显式保守登记。若它确实在 current stream 分配并只在该 Stream 使用，这两行可能只是冗余保险；不能据此断言其他算子缺失，也不能断言任何 raw-pointer launch 都必须记录。完整源码证据和判定表见[Stream 专章第 7.4 节](../torch_npu/02-stream-events-and-graph-capture.md#74-为什么-sgl-kernel-npu-只有-apply_token_bitmask-显式调用它)。
+仓库其他算子没有隐藏的统一 `record_stream`：`EXEC_KERNEL_CMD` 只取得 current Stream 并转换裸指针。`causal_conv1d`、`catlass_matmul_basic` 等局部 tiling/workspace 同样异步提交，却依靠同 allocation/current Stream 顺序。只有实际把 storage 交给另一条 side/communication Stream 时，才需要 `record_stream(consumer)`，或 Event + keepalive/反向 wait 的等效方案。完整 allocator 源码、分支表和实验见[Stream 专章第 7.4～7.6 节](../torch_npu/02-stream-events-and-graph-capture.md#74-为什么-sgl-kernel-npu-只有-apply_token_bitmask-显式调用它)。
+
+这里的 `npuStream` 是 `c10_npu::NPUStream` Host 包装；`record_stream` 不会同步 kernel，也不会构建计算图。`getCurrentNPUStream()`、原生 `aclrtStream`、Event 与 graph capture 的完整关系见[torch_npu 02：Stream、Event、异步生命周期与计算图](../torch_npu/02-stream-events-and-graph-capture.md)。
 
 ## 16. 测试如何设计
 

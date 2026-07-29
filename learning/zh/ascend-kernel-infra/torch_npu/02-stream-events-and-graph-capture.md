@@ -425,124 +425,294 @@ print("Event complete after synchronize?", done.query())
 
 ## 7. `record_stream`：它记录的是 storage 使用，不是计算顺序
 
-### 7.1 allocator 为什么需要它
+### 7.1 先把“对象死亡”和“storage 可复用”分开
 
-PyTorch 使用 caching allocator（缓存分配器）管理 NPU 显存。tensor Python/C++ 对象销毁后，allocator 通常不是把显存立即还给系统，而是把内存块放进缓存，供后续 tensor 复用。
-
-异步执行带来一个时间差：
+PyTorch 使用 **caching allocator（缓存分配器）** 管理 NPU 显存。`at::Tensor`/Python Tensor 是 Host 句柄，**storage** 才是保存元素的底层 Device 内存块。最后一个 Tensor 引用消失，只表示 Host 不再持有这个句柄；Device 上已经提交的任务可能仍在使用 storage。
 
 ```text
-Host：tensor 对象已经离开作用域
-Device：某条 Stream 上的 kernel 仍在读/写其 storage
+Host：最后一个 Tensor 引用消失 -> allocator 收到 free 请求
+Device：某条 Stream 上的 kernel 仍在读/写同一地址
 ```
 
-这里的 **storage** 是 tensor 元素实际占用的底层内存；tensor 对象是持有 shape、stride、dtype、device 与 storage 引用的上层句柄。
+Allocator 不会总把内存立即还给系统，而会缓存后复用。真正的问题不是“Tensor C++ 局部变量是否退出作用域”，而是：
 
-如果 allocator 不知道这条 Stream 仍在使用 storage，就可能过早把同一地址分给另一个 tensor，形成 use-after-free/early-reuse 式数据竞争。
+> allocator 准备把地址交给下一次分配时，所有可能使用旧内容的 Stream 是否已经越过最后一次使用点？
 
-### 7.2 `record_stream(stream)` 的准确语义
+### 7.2 `record_stream` 在 torch_npu allocator 中实际做了什么
 
-`tensor.record_stream(stream)` 告诉 caching allocator：
+`tensor.record_stream(S)` 把 `S` 登记到该 allocation block 的 `stream_uses`。下面是 [`NPUCachingAllocator.cpp`](https://gitee.com/ascend/pytorch/blob/e04f000ce9e11177d193a398644d8fcb67a90cef/torch_npu/csrc/core/npu/NPUCachingAllocator.cpp) 的关键逻辑，省略了锁、日志、context 与错误检查：
 
-> 这个 tensor 的 storage 已被 `stream` 使用；在该 Stream 已提交的相关工作完成前，不要把这块内存重新分配给别的 tensor。
+```cpp
+void recordStream(Block* block, c10_npu::NPUStream stream) {
+    block->stream_uses.insert(stream);
+}
 
-它：
+void free(Block* block) {
+    if (!block->stream_uses.empty()) {
+        insert_events(block);
+    } else {
+        free_block(block);
+    }
+}
 
-- 不启动 kernel；
-- 不把 tensor “复制到 Stream”；
-- 不让 Stream B 等待 Stream A；
-- 不阻塞 CPU；
-- 不捕获计算图；
-- 只补充 allocator 对异步使用关系的认识。
+void insert_events(Block* block) {
+    for (auto& stream : block->stream_uses) {
+        auto event = create_event_internal(stream.device_index());
+        event->record(stream);
+        block->event_count++;
+        npu_events[stream].emplace_back(std::move(event), block);
+    }
+}
+```
 
-创建 tensor 的 Stream 通常已被 allocator 知道。`record_stream` 最关键的场景是：
+所以它的准确作用是：
 
-- tensor 在另一条 side stream 上被使用；
-- custom C++ wrapper 取出原生 `aclrtStream` 后，在非 allocation stream 直接 launch；
-- allocator 无法从普通框架算子路径推断这次**跨 Stream**异步使用。
+1. Tensor 引用归零时先不把 block 放回可复用池；
+2. allocator 在记录过的 Stream 上放 Event；
+3. Event 完成后递减 `event_count`；
+4. 所有相关 Event 完成，block 才重新可分配。
 
-只有 raw-pointer launch、但 storage 始终在 allocation/current stream 上使用，并不足以要求 `record_stream`；同 Stream 的 allocator 顺序通常已经安全。
+它不启动 kernel、不复制 Tensor、不建立 producer/consumer 顺序、不阻塞 Host，也不构建计算图。
 
-### 7.3 为什么它不能替代 `wait_stream`
+一个容易忽略的实现细节是：上述 NPU allocator 路径没有在 `recordStream` 入口把“使用 Stream 等于 allocation Stream”直接过滤掉。因此，对同一 Stream 调用它在数学正确性上通常没有新增信息，但在实现上不一定是零成本 no-op；block 释放时可能多走 Event 延迟回收路径。
 
-假设 A 产生 `x`，B 消费 `x`：
+### 7.3 同 Stream 为什么天然安全，跨 Stream 为什么不安全
+
+设 block 在 Stream S 分配，旧 kernel 与复用后的新 kernel 也都提交到 S：
 
 ```text
-record_stream(B) 只解决：x 的地址别被过早复用。
-wait_stream(A)    才解决：B 别在 A 写完 x 前读取。
+Stream S:
+allocate p -> old kernel uses p -> allocator reissues p -> new kernel uses p
 ```
 
-只调用 `record_stream`，内存地址可能还活着，但其中的数据仍可能没写完。
+即使 Host 很早就重新拿到地址 `p`，新 kernel 仍排在旧 kernel 之后，因此不会在 Device 上同时破坏旧数据。Allocator 已经用 block 的 allocation Stream 对内存池分组；这里不需要额外 Event。
+
+跨 Stream 才会失去这条天然顺序：
+
+```text
+S0（allocation Stream）: allocate p -----------------> reuse p?
+S1（use Stream）:                   kernel still uses p
+```
+
+正确方案有两类：
+
+```text
+方案 A：p.record_stream(S1)
+        allocator 在 S1 完成前不复用 p
+
+方案 B：S1 完成时 record Event E
+        S0 wait E
+        再允许 p 的 Host 引用消失/在 S0 上复用
+```
+
+`record_stream(S1)` 只解决地址寿命。S1 在读取前是否等到 S0 写完，仍要靠 `wait_event`/`wait_stream`：
+
+```text
+wait_event：保证数据 ready
+record_stream：保证地址 still alive
+```
 
 ### 7.4 为什么 `sgl-kernel-npu` 只有 `apply_token_bitmask` 显式调用它
 
-先区分“源码事实”和“可以推出的结论”。
+#### 7.4.1 先给结论
 
-在课程固定的 `sgl-kernel-npu@d5630dff` 中，对非 Markdown 源码全文检索后，显式调用只有：
+对最新审计的 `sgl-kernel-npu@fcb5489d` 做静态源码分析后，本章结论比“保守保险”更明确：
+
+> `apply_token_bitmask` 的算法本身没有跨 Stream 需求。Wrapper 没有创建 side Stream；内部产生临时 Tensor 的 ATen 操作、自定义 kernel launch、结果 `copy_`/`index_put_` 都使用同一条 current NPU Stream。对正常、遵守 PyTorch Stream 合同的调用，两个 `record_stream(current)` 在正确性上是冗余的，不是 bitmask 功能所必需。
+
+它们仍能提供一个有限的额外防御：如果调用方传入的是在另一条 Stream 分配的 alias storage，只建立了数据就绪依赖，却准备过早丢掉最后一个引用，那么内部对 current Stream 的登记可保护 `workingLogits`/`workingBitmask` 所指向的 storage。但这不是完整的跨 Stream API 合同，原因后文会说明。
+
+这是基于可见源码的工程判断，不等同于维护者公开声明“这两行可以删除”。真正删除前仍应在支持的 NPU、task queue 与 graph 模式下做压力测试。
+
+#### 7.4.2 整个 wrapper 只有一条 runtime Stream
+
+真实宏 [`torch_helper.h#L120-L134`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/utils/torch_helper.h#L120-L134) 每次都取得 current Stream：
 
 ```cpp
-workingLogits.record_stream(npuStream);
-workingBitmask.record_stream(npuStream);
+#define EXEC_KERNEL_CMD(kernel_name, blockdim, ...)                       \
+    do {                                                                  \
+        auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);   \
+        auto converted_params = TorchNpuHelper::ConvertTypes(__VA_ARGS__);\
+        auto acl_call = [acl_stream, blockdim, converted_params]() -> int {\
+            /* ACLRT_LAUNCH_KERNEL(...)(blockdim, acl_stream, params...) */\
+            return 0;                                                     \
+        };                                                                \
+        at_npu::native::OpCommand::RunOpApi(#kernel_name, acl_call);       \
+    } while (false)
 ```
 
-它不能推出“其他算子不异步”，也不能推出“只有这个算子需要管理生命周期”。绝大多数 kernel launch 都是异步的。是否需要显式 `record_stream`，由 **storage 的 allocation stream 与实际使用 stream 是否相同**决定，而不是由算子名字决定。
+`ConvertType(const at::Tensor&)` 确实把 Tensor 变成 `data_ptr()`，`RunOpApi` 在 task queue 开启时也可能先保存 callback。但这仍未创建第二条 Device Stream：callback、后续分配产生的任务以及后续 kernel 都保留 current Stream/软件队列顺序。**裸指针和异步 callback 不是需要 `record_stream` 的充分条件；跨 Stream 使用才是。**
 
-#### 情况 A：只在 allocation stream 上使用，通常不需要
+#### 7.4.3 逐分支检查两个 working Tensor
 
-Caching allocator 在分配内存块时会记录 **allocation stream（分配 Stream，也称 creation/origin stream）**。如果 tensor 随后只在这条 Stream 上使用：
+真实 Host 源码见 [`apply_token_bitmask.cpp`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp)。
 
-```text
-Stream S: allocate block -> kernel reads/writes block -> block reused -> next kernel uses block
+| 分支 | `workingLogits` 从哪里来 | `workingBitmask` 从哪里来 | 是否离开 current Stream |
+|---|---|---|---|
+| 无 `indices`、无需 padding | alias `logits` | alias `bitmask` | 否 |
+| 无 `indices`、需要 padding | current Stream 上 `zeros + copy_` | alias 或 current Stream 上 `zeros + copy_` | 否 |
+| 有 `indices` | current Stream 上 `index/contiguous` 产生 `selectedLogits`，必要时再 padding | current Stream 上 `index/contiguous` 产生 `selectedBitmask`，必要时再 padding | 否 |
+
+Kernel 之后的：
+
+```cpp
+auto result = needsPadding
+    ? workingLogits.narrow(1, 0, vocabSize)
+    : workingLogits;
+
+logits.index_put_({rowIndices}, result);  // hasIndices
+logits.copy_(result);                     // needsPadding
 ```
 
-即使 Host 看起来已经把同一地址重新分配给新 tensor，未来对该地址的 Device 操作仍排在 S 的旧操作之后。因此 allocator 已有足够信息，显式记录同一个 S 通常不增加新的正确性知识。
+也提交到同一 current Stream。于是：
 
-这就是大量普通 PyTorch/torch_npu 算子不写 `record_stream` 的主要原因。输入、输出和临时 workspace 通常在 current stream 上产生并在同一 current stream 上使用。
+- 新建的 working storage：在 current Stream 分配、使用、最后被同一 Stream 后续任务消费；
+- alias 的 `workingLogits`：底层通常就是最终返回的 `logits`，返回值继续持有引用；
+- alias 的 `workingBitmask`：如果它也在 current Stream 分配，同 Stream 复用已经安全；
+- 只有“bitmask 在 S0 分配、算子在 S1 调用、调用后立刻丢掉 bitmask”这种跨 Stream alias 情况，内部记录 S1 才增加生命周期保护。
 
-#### 情况 B：storage 被非 allocation stream 使用，需要额外处理
+而且这两行不是完整的“自动接受任意跨 Stream 输入”方案。例如 `rowIndices` 可能 alias 调用方的 `indices`，却没有相同登记；跨 Stream 的数据就绪也仍需调用方 Event。因此更准确的定位是：**局部、非对称的防御性登记，而不是算子语义要求。**
 
-设 storage 在 S0 分配，却在 S1 上使用：
+#### 7.4.4 `workingLogits` 与 `workingBitmask` 的必要性并不相同
 
-```text
-S0: allocate x ----------------------> reuse x's block?
-S1:              kernel still uses x
+`workingLogits.record_stream(current)` 更明显地冗余：
+
+- alias `logits` 时，返回的 `logits` 继续持有 storage；
+- 新建临时量时，它在 current Stream 创建，kernel 后又被 current Stream 的 copy/scatter 消费。
+
+`workingBitmask.record_stream(current)` 只有在它 alias 一个由别的 Stream 分配、且调用方会过早释放的输入时，才可能提供实际额外保护。对常见默认/current Stream 调用，它同样是冗余的。
+
+### 7.5 其他算子是否偷偷用了“等效方式”
+
+大多数没有；更准确的答案是：**它们没有制造需要补救的跨 Stream 条件，因此不需要等效方式。**
+
+`EXEC_KERNEL_CMD` 宏没有遍历参数并自动 `record_stream`。下面两个源码例子与 `apply_token_bitmask` 一样，会把局部 Tensor 转成裸地址异步提交。
+
+#### 例一：`causal_conv1d` 的局部参数 Tensor 与 workspace
+
+最新源码的 [`causal_conv1d.cpp#L307-L321`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/causal_conv1d/op_host/causal_conv1d.cpp#L307-L321) 和 [`#L396-L403`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/causal_conv1d/op_host/causal_conv1d.cpp#L396-L403)：
+
+```cpp
+at::Tensor y = at::empty_like(x);
+at::Tensor bias_tensor = hasBias ? bias : at::empty({0}, x.options());
+at::Tensor cache_indices_tensor =
+    hasCacheIndices
+        ? cache_indices.to(at::kLong)
+        : at::empty({0}, x.options().dtype(at::kLong));
+
+auto workspaceTensor =
+    at::empty(
+        {totalWorkspace},
+        at::TensorOptions().dtype(at::kByte).device(x.options().device()));
+
+EXEC_KERNEL_CMD(
+    causal_conv1d,
+    blockDim,
+    x,
+    weight,
+    conv_states,
+    bias_tensor,
+    query_start_loc_tensor,
+    cache_indices_tensor,
+    has_initial_state_tensor,
+    num_accepted_tokens_tensor,
+    y,
+    workspaceTensor,
+    tilingTensor);
+
+return y;
 ```
 
-Allocator 默认只知道 S0。若 Host 引用消失，它可能按 S0 的时间线复用地址，而 S1 还没结束。此时有两个正确方案：
+`bias_tensor`、转换后的 index/state Tensor 与 `workspaceTensor` 都可能在函数返回时失去 C++ 引用，但它们在 current Stream 分配并只被 current Stream kernel 使用，所以没有显式记录。
 
-1. `x.record_stream(S1)`：让 allocator 在回收时为 S1 建立完成检查/Event；
-2. 手工 Event：在释放 `x` 前让 S0 等待 S1，使 reuse 回到 allocator 已知的 S0 顺序。
+#### 例二：`catlass_matmul_basic` 的局部 workspace
 
-#### `apply_token_bitmask` 为什么选择显式记录
+[`catlass_matmul_basic.cpp#L85-L89`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/catlass/op_host/catlass_matmul_basic.cpp#L85-L89)：
 
-这个 wrapper 有几个值得作者防御的特点：
+```cpp
+auto tiling_tensor = get_tiling(m, n, k, formatMode, dTypeMap[aType], blockDim);
+auto workspace_tensor = at::empty(
+    {1},
+    at::TensorOptions().dtype(at::kByte).device(input_a.options().device()));
 
-1. `workingLogits`/`workingBitmask` 可能是 `zeros`、advanced indexing 或 `contiguous` 新建的**局部临时 tensor**；
-2. 它们也可能直接 alias（共享 storage）调用方输入；
-3. `EXEC_KERNEL_CMD` 的 `ConvertType(const at::Tensor&)` 只保留 `data_ptr()`，launch lambda 捕获的是裸地址而不是 `at::Tensor` 引用；
-4. `RunOpApi` 在 torch_npu task queue 开启时还可能先排入 Host 软件队列，之后才真正调用 CANN launch；
-5. wrapper 随后发起 `copy_`/`index_put_`，最终返回的是 `logits`，而 working tensor 本身不会返回给调用者。
+EXEC_KERNEL_CMD(
+    catlass_matmul_basic,
+    blockDim,
+    input_a,
+    input_b,
+    output_c,
+    workspace_tensor,
+    tiling_tensor);
+```
 
-所以这两行明确表达：“无论 working storage 最初来自哪条 Stream，也无论 raw-pointer launch 何时完成，都把本次 current-stream 使用登记给 allocator。”这是保守、局部且容易审计的做法。
+这里也没有隐藏的 `record_stream`。它依赖的是同一 current Stream，而不是另一套神秘生命周期 API。
 
-但必须保持严谨：
+普通 ATen/ACLNN 算子同样会把工作提交到 current Stream。只有真正自行选择 communication/side Stream 的模块，才需要显式使用下面一种方案：
 
-- 若 working tensor 确实在当前 S 上分配、只在 S 上使用，这次 `record_stream(S)` 很可能是冗余保险；
-- `EXEC_KERNEL_CMD` 在可见源码中不会统一对所有 tensor 调用 `record_stream`；
-- 其他 wrapper 没写它不等于必然有 bug，因为同 Stream allocator 语义可能已经足够；
-- 若其他 wrapper 把 storage 用到非 allocation stream，又既没记录也没用 Event 回接 creation stream，那就应视为需要审计的潜在生命周期 bug；
-- “把 tensor 转成裸指针”会让通用 wrapper 更难自动推断使用关系，但裸指针本身不是必须调用 `record_stream` 的充分条件；真正判据仍是 Stream 与生命周期。
+1. producer Event + consumer wait，解决数据就绪；
+2. `tensor.record_stream(consumer)`，解决 allocator 生命周期；
+3. 保留 Tensor 强引用直到 completion Event，再释放；
+4. 让 allocation Stream 反向等待 use Stream 的 completion Event，再允许同 Stream 复用。
 
-可以用下面的决策表审查每一个算子：
+SGLang 主仓也有“Event + keepalive”替代 `record_stream` 的真实例子：[`deepseek_v4.py#L2005-L2029`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/models/deepseek_v4.py#L2005-L2029) 把异步通信输入保存在 `state.combine_keepalive`，等 compute Stream `wait_event` 后才 `pop` 释放。该例使用 CUDA API，但内存所有权原理与 NPU Stream 相同；NPU 版本应使用 `torch.npu.Stream/Event`。
 
-| 问题 | 是 | 否 |
-|---|---|---|
-| storage 只在 allocation/current stream 使用？ | 通常不需额外记录 | 继续检查 |
-| tensor 对象被 launch framework 持有到异步使用登记完成？ | 可依赖框架合同 | 继续检查 |
-| 非 allocation stream 的使用已 `record_stream`？ | allocator 可延迟复用 | 继续检查 |
-| creation stream 在释放前已 Event-wait 使用 stream？ | 可手工保证安全 | 存在潜在 early-reuse 风险 |
+### 7.6 两个可运行实验：验证“冗余”与“跨 Stream 必要”
 
-最后还要单独检查**数据就绪**：上表只审计地址何时能复用，跨 Stream producer/consumer 仍需 Event/wait。
+#### 实验 A：同 Stream A/B 对照
+
+编译两个版本：
+
+- A：保留两次 `record_stream`；
+- B：删除两次调用。
+
+在默认 Stream 上循环：
+
+```python
+import torch
+import torch_npu
+
+for _ in range(10_000):
+    logits = torch.randn((8, 32000), device="npu", dtype=torch.float16)
+    bitmask = torch.full((8, 1000), -1, device="npu", dtype=torch.int32)
+    out = torch.ops.npu.apply_token_bitmask(logits, bitmask)
+    pressure = torch.empty_like(bitmask)  # 制造 allocator 复用压力
+
+torch.npu.synchronize()
+```
+
+若两版正确性一致，而 B 的 Event/allocator trace 更少，就支持“同 Stream 下冗余”的源码结论。不能只跑一次，也要覆盖 task queue、graph capture、padding、`indices` 和不同 dtype。
+
+#### 实验 B：真正的跨 Stream 输入
+
+```python
+producer = torch.npu.Stream()
+consumer = torch.npu.Stream()
+
+with torch.npu.stream(producer):
+    logits = torch.randn((8, 32000), device="npu", dtype=torch.float16)
+    bitmask = torch.full((8, 1000), -1, device="npu", dtype=torch.int32)
+    ready = producer.record_event()
+
+with torch.npu.stream(consumer):
+    consumer.wait_event(ready)       # 数据就绪
+    out = torch.ops.npu.apply_token_bitmask(logits, bitmask)
+    bitmask.record_stream(consumer)  # 生命周期；即使算子内部删除登记也安全
+```
+
+去掉 `consumer.wait_event(ready)` 是数据竞争；去掉 `bitmask.record_stream(consumer)` 后再立刻释放 bitmask 并在 producer 上施加大量分配压力，才是在测试 allocator early reuse。两类错误不能混成一个实验结论。
+
+### 7.7 最终审计算法
+
+对任意 wrapper 按顺序问：
+
+1. storage 在哪条 Stream 分配？
+2. 最后一个异步消费者在哪条 Stream？
+3. 两者是否相同？相同则通常不需 `record_stream`。
+4. 不同则 producer→consumer 是否有 Event，保证数据 ready？
+5. consumer 使用期间，是 `record_stream(consumer)`、强引用 keepalive，还是 allocation Stream 反向 wait completion Event，保证地址 alive？
+6. wrapper 是否还有未覆盖的 alias/临时 Tensor？
+
+不要用“算子是异步的”“使用了裸指针”“局部变量会析构”作为单独判据。几乎所有加速器算子都满足这些描述；真正判据始终是 **allocation、last use 与 reuse 是否跨越不同 Stream 时间线**。
 
 ---
 
@@ -608,12 +778,12 @@ if (dtype == at::kFloat) {
 1. `workingLogits`、`workingBitmask` 的 C++ 类型是 `at::Tensor`；
 2. 它们是 Host 句柄，但底层 storage 位于 NPU GM；
 3. `npuStream` 是 `c10_npu::NPUStream`，表示当前 PyTorch NPU Stream；
-4. 两次 `record_stream` 告知 allocator：异步 kernel 完成前不要复用这些 storage；
+4. 两次 `record_stream` 把 current Stream 登记进两个 storage 的 allocator `stream_uses`；
 5. `EXEC_KERNEL_CMD` 是 Host launch 封装，不是在 CPU 上执行 kernel 数学；
 6. launch 被提交到当前 Stream，因此它自然排在该 Stream 先前的 producer 后面；
-7. wrapper 可以在 Device 完成前返回，因而必须正确维护 storage 生命周期。
+7. wrapper 可以在 Device 完成前返回，但本 wrapper 的 allocation、kernel 与结果回写都没有离开 current Stream。
 
-这里不应读成“每个 raw-pointer launch 都必须逐 tensor 调用 `record_stream`”。这两行是本 wrapper 对 working tensor 的显式防御；同 allocation/current stream 的普通 tensor 通常已由 caching allocator 正确管理。完整判据见[第 7.4 节](#74-为什么-sgl-kernel-npu-只有-apply_token_bitmask-显式调用它)。
+源码审计结论是：对正常同 Stream 调用，这两行在正确性上冗余；它们不是 bitmask 算法的必要步骤。它们只会在 working storage alias 另一条 Stream 分配的输入、且调用方可能过早释放引用时增加一层局部生命周期防御。`causal_conv1d` 与 `catlass_matmul_basic` 的局部 workspace/tiling 也经同一宏异步提交，却依靠同 Stream 顺序而不记录。完整逐分支证明见[第 7.4 节](#74-为什么-sgl-kernel-npu-只有-apply_token_bitmask-显式调用它)。
 
 对应算子的完整算法见[Ascend C 实战：apply_token_bitmask](../sgl-kernel-npu/03-ascend-c-apply-token-bitmask.md)。
 
@@ -953,7 +1123,7 @@ print(cpu_z.shape)
 
 ### 问题 9：为什么只有 `apply_token_bitmask` 写了 `record_stream`，其他算子是不是漏写了？
 
-**答案：**不能按出现次数判断。Allocator 已知道 storage 的 allocation stream，只在该 Stream 上使用时通常无需再次记录。`apply_token_bitmask` 对可能新建或 alias 的局部 working tensor、裸指针 callback 和异步 task-queue 路径做了显式保守登记；如果 working tensor 的 allocation stream 就是 current stream，这个调用可能只是冗余保险。其他算子若始终遵守同 Stream 使用或用 Event 把非 creation-stream 使用同步回去，可以安全地不写；若确实跨 Stream 又没有任何记录/同步，才是需要修复的风险。必须逐条追踪 allocation、use、deallocation 三条时间线，不能从文件里有没有这一行直接下结论。
+**答案：**逐分支源码审计表明，`apply_token_bitmask` 没有创建 side Stream：`index/zeros/contiguous`、自定义 kernel、`copy_`/`index_put_` 都在 current Stream。`workingLogits` 要么 alias 最终返回的 `logits`，要么是 current-Stream 临时量；`workingBitmask` 也通常在 current Stream 分配或使用。因此对正常 PyTorch Stream 用法，两次 `record_stream(current)` 在正确性上是冗余的，不是算子功能所必需。它们只对“working storage alias 另一条 Stream 的输入，调用方又可能过早释放引用”提供有限保护，并且仍不解决数据就绪，也没有覆盖所有可能 alias（如 `rowIndices`），所以不能视为完整跨 Stream 支持。其他 wrapper 的 `EXEC_KERNEL_CMD` 没有隐藏等效记录；`causal_conv1d`、`catlass_matmul_basic` 等直接依靠同 allocation/current Stream 顺序。只有真正把 storage 交给 side/communication Stream 时，才需要 `record_stream(consumer)`，或 Event + keepalive/反向 wait 的等效生命周期方案。
 
 ### 问题 10：Host 已经返回输出 tensor，为什么 Python 不会读到半成品？
 

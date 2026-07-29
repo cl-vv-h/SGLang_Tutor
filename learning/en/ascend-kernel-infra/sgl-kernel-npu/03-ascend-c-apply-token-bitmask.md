@@ -56,8 +56,14 @@ workingLogits.record_stream(npuStream);
 workingBitmask.record_stream(npuStream);
 ```
 
-`npuStream` is a Host-side `c10_npu::NPUStream`. The launch is asynchronous: the wrapper may return while the NPU still uses the tensors' GM storage. `record_stream` tells the caching allocator not to reuse that storage prematurely. It does not synchronize execution and does not build a computation graph. Cross-Stream producer/consumer ordering requires an Event or `wait_stream`.
+`npuStream` is a Host-side `c10_npu::NPUStream`. The calls insert current Stream into the two storage blocks' allocator `stream_uses`; they do not prove that this operator crosses Streams.
 
-Why do most other repository operators not contain these calls? The caching allocator already knows each block's allocation Stream, and same-Stream reuse remains ordered after prior work, so no extra record is normally required. These working tensors are local objects that may be newly allocated or alias inputs, while `EXEC_KERNEL_CMD` converts them to raw `data_ptr()` values captured by an asynchronous callback; the author chose an explicit conservative record. If allocation and current Stream are identical, it may only be redundant insurance. Its presence does not prove that other operators are missing a call or that all raw-pointer launches require one. See [the full source-based criteria](../torch_npu/02-stream-events-and-graph-capture.md#71-why-only-apply_token_bitmask-calls-it-explicitly).
+Branch-by-branch analysis shows that index/zeros/contiguous preparation, `EXEC_KERNEL_CMD`, and later copy/scatter all use current Stream. The wrapper creates no side Stream. Both records are therefore correctness-redundant for normal same-Stream calls, not requirements of bitmask mathematics or raw-pointer asynchronous launch. `workingLogits` either aliases returned `logits` or is a current-Stream temporary, and `workingBitmask` is normally allocated/used on current Stream.
+
+They add limited protection only when working storage aliases an input allocated on another Stream and the caller may release its final reference early. They do not establish data readiness and do not cover every possible alias, so they are not complete support for arbitrary cross-Stream inputs.
+
+Other repository wrappers have no hidden generic record: `EXEC_KERNEL_CMD` only gets current Stream and converts arguments. Local tiling/workspace in `causal_conv1d` and `catlass_matmul_basic` is also submitted asynchronously but relies on same allocation/current-Stream ordering. A real side/communication-Stream handoff needs `record_stream(consumer)` or an Event-plus-keepalive/reverse-wait scheme. See the [allocator source, branch audit, source comparisons, and experiments](../torch_npu/02-stream-events-and-graph-capture.md#74-why-is-apply_token_bitmask-the-only-explicit-call-site).
+
+`record_stream` does not synchronize execution or build a computation graph. Cross-Stream readiness still requires an Event or `wait_stream`.
 
 The three Ascend C `TQue` objects solve a different problem: CopyIn/Compute/CopyOut ordering inside this one Device kernel. They are not runtime Streams. See [torch_npu 02: Streams, Events, Asynchronous Lifetimes, and Graph Capture](../torch_npu/02-stream-events-and-graph-capture.md) for the complete distinction.

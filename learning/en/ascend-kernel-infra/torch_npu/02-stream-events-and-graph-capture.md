@@ -358,98 +358,225 @@ print("Event complete after synchronize?", done.query())
 
 ## 7. `record_stream`: Storage Lifetime, Not Execution Order
 
-PyTorch's caching allocator reuses NPU memory blocks. Asynchrony creates a gap:
+### 7.1 Object Lifetime Is Not Storage Reuse Time
 
-```text
-Host: the tensor object has gone out of scope
-Device: a Stream may still be reading or writing its storage
-```
+PyTorch's caching allocator reuses NPU memory blocks. A Python/C++ Tensor is a Host handle; **storage** is the Device allocation holding its elements. Losing the last Tensor reference only sends a free request to the allocator. Device work may still be using the address.
 
-**Storage** is the underlying memory containing tensor elements. The tensor object is a handle carrying shape, stride, dtype, device, and a storage reference.
+The real question is:
 
-`tensor.record_stream(stream)` tells the allocator that the tensor's storage was used by that Stream and must not be reused until the relevant queued work is complete.
+> When the allocator reissues an address, has every Stream passed the old storage's last-use point?
 
-It does not:
+### 7.2 What torch_npu Actually Records
 
-- launch a kernel;
-- move a tensor “into” a Stream;
-- make one Stream wait for another;
-- block the CPU;
-- capture a graph.
-
-It is especially important when:
-
-- a tensor is used on a side Stream;
-- a custom wrapper extracts a raw `aclrtStream` and launches on a non-allocation Stream;
-- the allocator cannot infer that cross-Stream asynchronous use through a normal framework path.
-
-A raw-pointer launch alone is not enough to require `record_stream` when storage remains on its allocation/current Stream; same-Stream allocator ordering is normally sufficient.
-
-The essential distinction is:
-
-```text
-record_stream(B): keep x's address alive while B may use it.
-wait_stream(A):   do not let B consume x before A finishes producing it.
-```
-
-Alive memory does not imply ready data.
-
-### 7.1 Why Only `apply_token_bitmask` Calls It Explicitly
-
-At the fixed `sgl-kernel-npu@d5630dff` baseline, the only non-Markdown calls are:
+`tensor.record_stream(S)` inserts `S` into the allocation block's `stream_uses`. The important branches in [`NPUCachingAllocator.cpp`](https://gitee.com/ascend/pytorch/blob/e04f000ce9e11177d193a398644d8fcb67a90cef/torch_npu/csrc/core/npu/NPUCachingAllocator.cpp), with locks and logging omitted, are:
 
 ```cpp
-workingLogits.record_stream(npuStream);
-workingBitmask.record_stream(npuStream);
+void recordStream(Block* block, c10_npu::NPUStream stream) {
+    block->stream_uses.insert(stream);
+}
+
+void free(Block* block) {
+    if (!block->stream_uses.empty()) {
+        insert_events(block);
+    } else {
+        free_block(block);
+    }
+}
+
+void insert_events(Block* block) {
+    for (auto& stream : block->stream_uses) {
+        auto event = create_event_internal(stream.device_index());
+        event->record(stream);
+        block->event_count++;
+        npu_events[stream].emplace_back(std::move(event), block);
+    }
+}
 ```
 
-This does not mean that other operators are synchronous or that only this operator has a lifetime. The criterion is whether storage is used outside its **allocation stream**—also called its creation or origin Stream.
+The block becomes reusable only after the recorded Stream Events complete. This does not launch a kernel, copy data, establish producer/consumer order, block Host, or capture a graph.
 
-#### Same allocation/use Stream: normally no explicit record
+The shown NPU allocator path does not filter out “recorded Stream equals allocation Stream” at entry. Such a call normally adds no correctness fact, but it is not necessarily a zero-cost no-op: freeing the block may take the Event-delayed path.
 
-The caching allocator associates a block with its allocation Stream. If all uses remain on S:
+### 7.3 Same-Stream Safety Versus Cross-Stream Risk
+
+Same Stream:
 
 ```text
-Stream S: allocate -> old kernel uses block -> reuse block -> new kernel uses block
+S: allocate p -> old kernel uses p -> reissue p -> new kernel uses p
 ```
 
-future Device use of a reallocated address remains ordered after old use in S. The allocator already has enough information, so recording the same S commonly adds no new correctness fact. This is why ordinary PyTorch/torch_npu inputs, outputs, and temporary workspaces used only on the current Stream usually need no explicit call.
+The new Device use remains after the old use in S. No extra Event is normally required.
 
-#### Non-allocation Stream: extra lifetime handling is required
+Cross Stream:
 
-If S0 allocates storage and S1 uses it, the allocator does not know about S1 by default. Correct choices are:
+```text
+S0 allocation: allocate p ----------------------> reuse p?
+S1 use:                         kernel uses p
+```
 
-1. call `x.record_stream(S1)` so allocator reuse waits for S1; or
-2. manually make S0 wait for S1 with Events before deallocating `x`.
+Correct lifetime choices are:
 
-#### Why this wrapper records defensively
+1. `p.record_stream(S1)`; or
+2. record completion in S1, make S0 wait for that Event, then allow the final reference to disappear.
 
-`apply_token_bitmask` has several relevant properties:
+Data readiness is separate:
 
-1. its working tensors may be local temporaries created by `zeros`, advanced indexing, or `contiguous`;
-2. they may instead alias caller-owned inputs;
-3. `EXEC_KERNEL_CMD::ConvertType` keeps only `data_ptr()`, so the launch lambda captures raw addresses rather than `at::Tensor` references;
-4. `RunOpApi` may queue the callback in torch_npu's Host task queue before the actual CANN launch;
-5. later copy/scatter work returns `logits`, not the working tensor objects.
+```text
+wait_event:    data is ready before consumer reads
+record_stream: address remains alive while consumer may read
+```
 
-The explicit calls conservatively say that current-Stream asynchronous work uses those storage blocks. However:
+### 7.4 Why Is `apply_token_bitmask` the Only Explicit Call Site?
 
-- if a working tensor was allocated on and used only by the current Stream, the call is likely redundant insurance;
-- visible `EXEC_KERNEL_CMD` code does not generically record every tensor;
-- another wrapper without the call is not automatically wrong;
-- another wrapper that uses storage on a non-allocation Stream without either recording it or synchronizing back to the creation Stream has a potential lifetime bug;
-- converting a tensor to a raw pointer makes automatic inference harder, but raw-pointer use alone is not sufficient proof that `record_stream` is required.
+#### Conclusion
 
-Use this audit table:
+Static analysis of current `sgl-kernel-npu@fcb5489d` supports a stronger conclusion:
 
-| Question | Yes | No |
-|---|---|---|
-| Is storage used only on its allocation/current Stream? | Usually no extra record | Continue |
-| Does the launch framework retain/track the asynchronous use? | Rely on its documented contract | Continue |
-| Was the non-allocation use recorded? | Allocator can defer reuse | Continue |
-| Does creation Stream wait for use Stream before deallocation? | Manual Event scheme is safe | Potential early-reuse risk |
+> `apply_token_bitmask` has no algorithmic cross-Stream requirement. Its ATen preparation, custom launch, and result copy/scatter all use the same current NPU Stream. For normal callers that obey the PyTorch Stream contract, both `record_stream(current)` calls are correctness-redundant; token-bitmask semantics do not require them.
 
-Execution readiness remains separate: cross-Stream producers and consumers still require an Event/wait.
+They provide limited defensive protection when a working tensor aliases storage allocated on another Stream and the caller is about to drop the final reference. This is not a complete arbitrary-cross-Stream contract, and removal still requires NPU/task-queue/graph stress tests.
+
+#### There Is Only One Runtime Stream in This Wrapper
+
+The real [`EXEC_KERNEL_CMD`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/utils/torch_helper.h#L120-L134) always obtains the current Stream:
+
+```cpp
+auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);
+auto converted_params = TorchNpuHelper::ConvertTypes(__VA_ARGS__);
+auto acl_call = [acl_stream, blockdim, converted_params]() -> int {
+    // launch kernel on acl_stream
+    return 0;
+};
+at_npu::native::OpCommand::RunOpApi(kernel_name, acl_call);
+```
+
+`ConvertTypes` produces raw `data_ptr()` values, and `RunOpApi` may queue the callback in the Host task queue, but neither fact creates a second Device Stream. Raw pointers, local variables, and asynchronous callbacks are not sufficient reasons to record; a cross-Stream last use is the deciding condition.
+
+#### Audit Every Working-Tensor Branch
+
+See the real [`apply_token_bitmask.cpp`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp).
+
+| Branch | `workingLogits` | `workingBitmask` | Leaves current Stream? |
+|---|---|---|---|
+| No indices, no padding | aliases `logits` | aliases `bitmask` | No |
+| No indices, padding | current-Stream `zeros + copy_` | alias or current-Stream `zeros + copy_` | No |
+| With indices | current-Stream index/contiguous/padding result | current-Stream index/contiguous/padding result | No |
+
+The later `narrow`, `index_put_`, and `copy_` also use current Stream.
+
+- An internally allocated working block is created and consumed on current Stream.
+- An aliased `workingLogits` is normally the returned `logits`, so the result keeps its storage referenced.
+- An aliased `workingBitmask` allocated on current Stream is protected by same-Stream ordering.
+- Only the case “bitmask allocated on S0, operator invoked on S1, last reference dropped early” gains real lifetime protection from the internal S1 record.
+
+The defense is also incomplete for arbitrary cross-Stream inputs: `rowIndices` may alias `indices` but is not recorded, and no record makes the data ready. The accurate label is **local, asymmetric defensive bookkeeping**, not an operator-semantic necessity.
+
+`workingLogits.record_stream(current)` is especially redundant: either it aliases the returned output or it is a current-Stream temporary consumed by current-Stream copy/scatter. `workingBitmask.record_stream(current)` can matter only for the cross-Stream alias edge case above.
+
+### 7.5 Do Other Operators Use a Hidden Equivalent?
+
+Mostly no—they avoid the cross-Stream condition, so there is nothing to replace.
+
+`EXEC_KERNEL_CMD` does not automatically record Tensor arguments. Other wrappers submit local raw-pointer temporaries without explicit records:
+
+Current [`causal_conv1d.cpp#L307-L321`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/causal_conv1d/op_host/causal_conv1d.cpp#L307-L321) and [`#L396-L403`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/causal_conv1d/op_host/causal_conv1d.cpp#L396-L403):
+
+```cpp
+at::Tensor y = at::empty_like(x);
+at::Tensor bias_tensor = hasBias ? bias : at::empty({0}, x.options());
+at::Tensor cache_indices_tensor =
+    hasCacheIndices
+        ? cache_indices.to(at::kLong)
+        : at::empty({0}, x.options().dtype(at::kLong));
+
+auto workspaceTensor =
+    at::empty(
+        {totalWorkspace},
+        at::TensorOptions().dtype(at::kByte).device(x.options().device()));
+
+EXEC_KERNEL_CMD(
+    causal_conv1d,
+    blockDim,
+    x,
+    weight,
+    conv_states,
+    bias_tensor,
+    query_start_loc_tensor,
+    cache_indices_tensor,
+    has_initial_state_tensor,
+    num_accepted_tokens_tensor,
+    y,
+    workspaceTensor,
+    tilingTensor);
+return y;
+```
+
+[`catlass_matmul_basic.cpp#L85-L89`](https://github.com/sgl-project/sgl-kernel-npu/blob/fcb5489d66702a5bc3d09fa3854231e943d6abe8/csrc/catlass/op_host/catlass_matmul_basic.cpp#L85-L89):
+
+```cpp
+auto tiling_tensor = get_tiling(
+    m, n, k, formatMode, dTypeMap[aType], blockDim);
+auto workspace_tensor = at::empty(
+    {1},
+    at::TensorOptions().dtype(at::kByte).device(input_a.options().device()));
+EXEC_KERNEL_CMD(catlass_matmul_basic, blockDim, input_a, input_b,
+                output_c, workspace_tensor, tiling_tensor);
+```
+
+These rely on current-Stream allocation and use, not another hidden lifetime API. A module that genuinely selects a side/communication Stream must instead combine:
+
+1. producer Event plus consumer wait for readiness;
+2. `record_stream(consumer)` for allocator lifetime; or
+3. a strong-reference keepalive until a completion Event, optionally with the allocation Stream waiting on that Event.
+
+SGLang's [`deepseek_v4.py#L2005-L2029`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/models/deepseek_v4.py#L2005-L2029) contains a real Event-plus-keepalive alternative: it stores an asynchronous communication input in `state.combine_keepalive`, waits for `combine_event`, and only then drops the reference. That code uses CUDA APIs, but the ownership pattern maps directly to `torch.npu.Stream/Event`.
+
+### 7.6 Two Experiments
+
+For a same-Stream A/B test, build one version with the two records and one without them, then loop over default-Stream calls under allocator pressure:
+
+```python
+import torch
+import torch_npu
+
+for _ in range(10_000):
+    logits = torch.randn((8, 32000), device="npu", dtype=torch.float16)
+    bitmask = torch.full((8, 1000), -1, device="npu", dtype=torch.int32)
+    out = torch.ops.npu.apply_token_bitmask(logits, bitmask)
+    pressure = torch.empty_like(bitmask)
+torch.npu.synchronize()
+```
+
+Cover task queue, graph capture, padding, indices, and all supported dtypes. Equal correctness plus fewer allocator Events supports the same-Stream redundancy conclusion.
+
+For a genuine cross-Stream test:
+
+```python
+producer = torch.npu.Stream()
+consumer = torch.npu.Stream()
+
+with torch.npu.stream(producer):
+    logits = torch.randn((8, 32000), device="npu", dtype=torch.float16)
+    bitmask = torch.full((8, 1000), -1, device="npu", dtype=torch.int32)
+    ready = producer.record_event()
+
+with torch.npu.stream(consumer):
+    consumer.wait_event(ready)       # readiness
+    out = torch.ops.npu.apply_token_bitmask(logits, bitmask)
+    bitmask.record_stream(consumer)  # lifetime
+```
+
+Removing the wait tests a data race. Removing the record, dropping `bitmask`, and applying allocation pressure on producer tests early reuse. They are different failures.
+
+### 7.7 Audit Checklist
+
+1. Which Stream allocated the storage?
+2. Which Stream performs its final asynchronous use?
+3. If they differ, where is producer-to-consumer readiness established?
+4. Is lifetime covered by `record_stream(consumer)`, a keepalive, or a completion Event waited by the allocation Stream?
+5. Are every alias and temporary covered?
+
+Do not use “asynchronous operator,” “raw pointer,” or “local variable” as standalone criteria. The decisive relationship is allocation Stream versus last-use Stream versus reuse Stream.
 
 ---
 
@@ -497,12 +624,12 @@ The types and responsibilities are:
 
 1. `workingLogits` and `workingBitmask` are Host-side `at::Tensor` handles whose storage resides in NPU GM;
 2. `npuStream` is a `c10_npu::NPUStream`;
-3. `record_stream` protects storage from premature allocator reuse;
+3. each `record_stream` inserts current Stream into that storage block's allocator `stream_uses`;
 4. `EXEC_KERNEL_CMD` is a Host launch wrapper, not CPU execution of the kernel's mathematics;
 5. the launch joins the current Stream's existing order;
-6. the wrapper may return before Device completion.
+6. the wrapper may return before Device completion, but allocation, kernel, and writeback never leave current Stream.
 
-Do not generalize this into “every raw-pointer launch must record every tensor.” These lines are an explicit defense for this wrapper's working tensors. Same allocation/current-Stream tensors are normally protected by caching-allocator ordering. See [Section 7.1](#71-why-only-apply_token_bitmask-calls-it-explicitly).
+The source-audit conclusion is that both calls are correctness-redundant for normal same-Stream execution; they are not required by token-bitmask semantics. They add limited protection only when working storage aliases an input allocated on another Stream and the caller may release it early. `causal_conv1d` and `catlass_matmul_basic` submit local workspace/tiling through the same asynchronous macro without recording because their use remains on current Stream. See [Section 7.4](#74-why-is-apply_token_bitmask-the-only-explicit-call-site).
 
 See the full algorithm in [the `apply_token_bitmask` walkthrough](../sgl-kernel-npu/03-ascend-c-apply-token-bitmask.md).
 
@@ -761,7 +888,7 @@ No. A Stream is a logical runtime sequence. Kernel type, `blockDim`, tiling, res
 
 ### 9. Does the single `apply_token_bitmask` call site prove that every other operator is missing it?
 
-No. The allocator already knows the allocation Stream, and same-Stream-only use usually requires no extra record. `apply_token_bitmask` conservatively records local/aliased working storage used through a raw-pointer callback and possibly a Host task queue. If allocation and current Stream are identical, it may be redundant insurance. Other operators are safe without it when they remain on one Stream or manually synchronize non-creation use back to the creation Stream; only a genuine cross-Stream use with neither mechanism is a lifetime defect.
+No. Branch-by-branch analysis shows that `apply_token_bitmask` creates no side Stream: index/zeros/contiguous preparation, its custom kernel, and copy/scatter all use current Stream. `workingLogits` either aliases the returned `logits` or is a current-Stream temporary; `workingBitmask` is likewise normally current-Stream storage. Both records are therefore correctness-redundant for normal PyTorch Stream usage, not an operator requirement. They only add limited protection when a working alias was allocated on another Stream and may lose its last reference early; they neither make data ready nor cover every possible alias. Other `EXEC_KERNEL_CMD` wrappers have no hidden equivalent—`causal_conv1d` and `catlass_matmul_basic` rely on same allocation/current-Stream ordering. A true side-Stream handoff instead needs `record_stream(consumer)` or an Event-plus-keepalive/reverse-wait lifetime scheme.
 
 ### 10. Why does Python not read a partially written tensor after the Host wrapper returns?
 
