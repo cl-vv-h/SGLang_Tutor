@@ -1,6 +1,6 @@
 # 05：计算图、torch.compile 与 SGLang NPU Graph 源码全链路
 
-> 本章基于 `SGLang@ddaf430e6c59a88da0a6cca4c71033cedf102a88`，回答三个问题：计算图到底是什么；一个模型是不是只有一张图；SGLang 如何把真实 `ForwardBatch` 更新到静态 buffer，再通过 `torch.npu.NPUGraph` capture/replay。
+> 本章基于 `SGLang@9a03bebf13996b628f8335628a691dcb3aa8400b`，回答四个问题：计算图到底是什么；一个模型是不是只有一张图；warmup 与 capture 有什么区别和关系；SGLang 如何从调度器一路进入 `torch.npu.NPUGraph` 的 capture/replay。
 
 ## 0. 先建立四个不同的“图”
 
@@ -166,7 +166,7 @@ def run(live_x):
 
 固定源码：
 
-- [`model_runner.py#L859-L866`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/model_runner.py#L859-L866)
+- [`model_runner.py#L909-L916`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L909-L916)
 
 ```python
 def init_cuda_graphs(self, capture_decode_cuda_graph: bool = True):
@@ -184,7 +184,7 @@ def init_cuda_graphs(self, capture_decode_cuda_graph: bool = True):
 
 固定源码：
 
-- [`model_runner.py#L1417-L1450`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/model_runner.py#L1417-L1450)
+- [`model_runner.py#L1479-L1516`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1479-L1516)
 
 核心真实语法：
 
@@ -251,7 +251,7 @@ classDiagram
 
 名称里的 CUDA 表示通用框架最初来自 CUDA Graph。NPU 子类复用 shape bucket、buffer、ForwardBatch 等平台无关逻辑，再把设备 graph backend 换成 `NPUCudaGraphBackend`。
 
-[`resolve_decode_backend()`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/runner_backend/utils.py#L52-L76) 明确写了：
+[`resolve_decode_backend()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner_backend/utils.py#L52-L73) 明确写了：
 
 ```python
 if model_runner.device == "npu":
@@ -293,24 +293,157 @@ if model_runner.device == "npu":
 
 ### 6.3 warmup 为什么在 capture 前
 
-[`NPUCudaGraphBackend.capture_one()`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L72-L127) 先执行两次：
+#### 6.3.1 先给出严格定义
+
+**Warmup（预热）** 是在正式计时、正式 capture 或正式服务前，使用与目标路径相同或足够相似的输入，实际执行若干次 forward，让“第一次才会发生”的工作提前发生。
+
+这里的“第一次工作”可能包括：
+
+- Python 模块的惰性初始化；
+- `torch.compile`/Dynamo/编译 backend 第一次生成可执行代码；
+- kernel 或算子二进制加载；
+- 算子选择、autotune、workspace 查询与分配；
+- allocator 建立缓存；
+- 通信器、attention backend metadata 或运行时资源初始化。
+
+**Capture（捕获）** 则是在 `torch.npu.graph(...)` 上下文中真正执行一次 forward，由 runtime 记录这次执行提交的 Device 任务、依赖和内存合同，最终生成可 `replay()` 的 `NPUGraph`。
+
+因此：
+
+| 比较项 | warmup | capture |
+|---|---|---|
+| 是否真的执行 forward | 是 | 是 |
+| 是否保存可 replay 的图 | 否 | 是 |
+| 输出是否作为正式 capture 输出句柄保存 | 否，通常丢弃 | 是，保存到 `_outputs[shape_key]` |
+| 主要目标 | 清掉首次运行副作用，逼近稳态 | 记录稳态 launch 序列 |
+| 是否位于 `torch.npu.graph(...)` 内 | 否 | 是 |
+| 对每个 shape 是否都要做 | 当前 NPU full-graph backend 会做 | 每个被捕获的 `ShapeKey` 都做 |
+
+最重要的关系是：
+
+```text
+warmup 不是 capture 的另一种叫法
+warmup 也不会“先录一张临时图”
+
+同一个静态 shape：
+  普通执行 warmup #1
+    -> 普通执行 warmup #2
+      -> 在 graph context 中执行 capture forward
+        -> 以后只 replay
+```
+
+Capture API 从抽象语义上并不规定“物理定律般必须先跑两遍”；这是 SGLang NPU backend 为了稳定性采用的工程策略。如果首次编译、分配或通信初始化落入 capture 区间，轻则 capture 时间异常长，重则把一次性工作错误地固化进图，或遇到 runtime 不支持捕获的操作。
+
+#### 6.3.2 SGLang 中其实有三种 warmup
+
+看到源码中的 `warmup`，必须先问“谁在 warmup、warmup 哪一层”。
+
+**第一种：通用 runner 的 kernel/autotune warmup。**
+
+[`DecodeCudaGraphRunner.capture()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L825-L857) 开头调用：
+
+```python
+self.warmup()
+```
+
+但 [`BaseRunner.warmup()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/base_runner.py#L210-L240) 有一个关键分支：
+
+```python
+if getattr(mr, "_kernel_warmed_up", False):
+    return
+mr._kernel_warmed_up = True
+
+if mr.device != "cuda":
+    return
+```
+
+所以在当前 NPU 路径中，它只设置“一次性调用过”的标记，随后立即返回；后面的 FlashInfer workspace、autotune、DeepGEMM warmup 都是 CUDA 专用逻辑。**不能因为调用名是 `self.warmup()`，就误以为这里已经执行了两次 NPU 模型 forward。**
+
+**第二种：NPU backend 针对每个 shape 的 capture 前 warmup。**
+
+真正的 NPU 两遍 forward 位于 [`NPUCudaGraphBackend.capture_one()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L78-L127)：
 
 ```python
 for _ in range(2):
     self._device_module.synchronize()
     self._tp_group.barrier()
     forward_fn()
+    if post_warmup_hook is not None:
+        post_warmup_hook()
 ```
 
-Warmup 用来提前支付：
+逐句解释：
 
-- kernel/module load；
-- lazy initialization；
-- autotune/compile；
-- 通信初始化；
-- 一次性内存分配。
+- `self._device_module.synchronize()`：让 Host 等待此前 NPU 工作完成。第一次循环得到较干净的起点；第二次循环开始前保证第一遍 warmup 已完成。
+- `self._tp_group.barrier()`：让所有 Tensor Parallel rank 在每遍 warmup 前对齐，避免某个 rank 已进入 collective、另一个 rank 仍在初始化。
+- `forward_fn()`：零参数 Python 闭包。它捕获了该 bucket 的静态 `ForwardBatch`、静态 buffer view、attention backend 和模型 `forward`，真正执行一遍模型。
+- `post_warmup_hook()`：让 attention backend 清理或复位 warmup 改动的内部状态，避免 capture 从脏状态开始。调用方从 `attn_backend.on_after_cuda_graph_warmup` 取得它。
 
-这些行为若首次发生在 capture 内，可能不可捕获、让 capture 极慢或使图包含不想重复的初始化任务。
+这里没有使用 warmup 的返回值：它返回的 tensor handle 会被丢弃，也不会放进 `_outputs`。随后 capture forward 重新执行，并把 capture 上下文中得到的 `out` 保存成这张图的静态输出句柄。
+
+为什么是两遍？源码注释给出的意图是“让 kernel 被加载并在 capture 前支付一次性设置”。第一遍最容易触发惰性初始化；第二遍更接近以后重复执行的稳态路径，也能暴露“第二次执行和第一次执行路径不同”的问题。**两遍是当前实现选择，不是所有 NPU 程序都固定需要两遍。**
+
+**第三种：`torch.compile` 的编译 warmup。**
+
+`NPUGraphRunner` 会在某些 `compile_bs` 上把 `model.forward` 替换成：
+
+```python
+torch.compile(
+    torch.no_grad()(model.forward),
+    fullgraph=True,
+    dynamic=False,
+    backend=get_compiler_backend("npugraph_ex"),
+)
+```
+
+这个 callable 第一次在 `forward_fn()` 中运行时，可能触发 Dynamo 抽图、guard 建立和 NPU 编译 backend 生成可执行代码。它发生在“每 shape 的两遍 warmup”中，因此 compiler 的一次性成本不会轻易落进外层 NPUGraph capture。
+
+三者可以画成：
+
+```text
+DecodeCudaGraphRunner.capture()
+  |
+  +-- BaseRunner.warmup()
+  |     `-- NPU: 当前版本立即返回，不执行 CUDA 专用 autotune
+  |
+  `-- 对每个 ShapeKey
+        `-- NPUCudaGraphBackend.capture_one()
+              +-- forward_fn()        # warmup 1；可能触发 torch.compile
+              +-- forward_fn()        # warmup 2；接近稳态
+              `-- torch.npu.graph(...)
+                    `-- forward_fn()  # capture run
+```
+
+#### 6.3.3 为什么 warmup 必须使用同一条目标路径
+
+假设 warmup 用 batch size 1、eager forward，而 capture 用 batch size 8、compiled forward，那么 size=8 的编译、kernel 选择和 workspace 分配仍可能第一次出现在 capture 内。有效 warmup 至少应尽量匹配：
+
+- 相同的 `ShapeKey`/bucket；
+- 相同的静态 buffer view 和地址合同；
+- 相同的模型分支与 attention backend；
+- 相同的 TP rank 集合与 collective 次序；
+- capture 时是否启用 `torch.compile`。
+
+当前实现正是在 `capture_one_shape()` 先构造一次 `run_once()`，再把同一个闭包交给 NPU backend 做两遍 warmup 和一遍 capture：
+
+```python
+def run_once():
+    attn_backend.init_forward_metadata_in_graph(forward_batch)
+    return forward(
+        forward_batch.input_ids,
+        forward_batch.positions,
+        forward_batch,
+    )
+
+self.backend.capture_one(
+    shape_key,
+    run_once,
+    capture_inputs=None,
+    post_warmup_hook=post_warmup_hook,
+)
+```
+
+这里的 `forward_batch` 不是线上请求的 live `ForwardBatch`，而是 `capture_prepare()` 基于 `DecodeInputBuffers` 前缀 view 构造的静态捕获批次。这样 warmup、capture 和未来 replay 看到的是同一套输入/metadata storage 地址合同；capture 产生的输出句柄则单独保存。
 
 ### 6.4 真正 capture
 
@@ -350,7 +483,7 @@ Capture context 并不把 Python 源码字符串存起来。Python 的 `forward_
 
 ### 7.1 `can_run_graph`
 
-[`DecodeCudaGraphRunner.can_run_graph()`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L502-L553) 会排除不兼容输入，并计算 graph key。
+[`DecodeCudaGraphRunner.can_run_graph()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L502-L553) 会排除不兼容输入，并计算 graph key。
 
 例如 `replace_embeds` 是每请求动态覆盖 embedding 的路径，源码直接返回 `False`。这体现了原则：无法映射到已捕获静态合同的动态行为应走 eager。
 
@@ -394,8 +527,8 @@ Host 不需要在中间同步。同 Stream 顺序保证 graph 读取时 copy 已
 
 固定源码：
 
-- [`npu_graph_runner.py#L209-L284`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L284)
-- [`npu_cudagraph_backend.py#L144-L175`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L144-L175)
+- [`npu_graph_runner.py#L209-L280`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280)
+- [`npu_cudagraph_backend.py#L145-L177`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L145-L177)
 
 某些 attention 调用的 `actual_seq_lengths_kv`/`context_lens` 每轮变化。SGLang 不为每组长度重新 capture，而是：
 
@@ -480,7 +613,7 @@ Event 将跨 Stream 数据依赖接到 graph replay 前。没有 Event，graph �
 
 ## 9. torch.compile 与 NPUGraph 的关系
 
-NPU runner 的 [`patch_model_npu()`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L67-L84)：
+NPU runner 的 [`patch_model_npu()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L67-L84)：
 
 ```python
 backend = get_compiler_backend("npugraph_ex")
@@ -517,7 +650,7 @@ Compiler graph 与 runtime graph 优化的开销层级不同，不能互换名�
 
 ## 10. Piecewise graph 是什么
 
-[`NPUPiecewiseBackend`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/compilation/npu_piecewise_backend.py) 接收 `torch.fx.GraphModule`，说明它位于 compiler/FX 分片路径。
+[`NPUPiecewiseBackend`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/compilation/npu_piecewise_backend.py) 接收 `torch.fx.GraphModule`，说明它位于 compiler/FX 分片路径。
 
 核心流程：
 
@@ -588,55 +721,272 @@ self.capture()
 
 ---
 
-## 13. 完整时序
+## 13. 从服务启动到一次 token 生成的完整源码链路
+
+这里的“端到端”边界是：Scheduler 收到请求并形成可运行批次，直到 graph replay 的 logits 被 sampler 消费。HTTP 协议、tokenizer 和 detokenizer 属于更外层的 serving 链路；本节聚焦决定 NPU Graph 是否执行的完整进程内路径。
+
+### 13.1 启动阶段：谁触发 capture
+
+入口是 [`Scheduler.init_model_worker()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/managers/scheduler.py#L901-L910)：
+
+```python
+def init_model_worker(self):
+    self.init_tp_model_worker()          # 加载模型
+    self.maybe_init_draft_worker()
+    self.init_memory_pools()             # KV cache/request pool
+    self.init_all_attention_backends()   # attention backend 必须先就绪
+    self.init_all_cuda_graphs()          # 名称沿用 CUDA，NPU 也从这里进入
+```
+
+顺序不能随意交换。Capture forward 会访问模型权重、KV cache pool 和 attention backend，因此这些对象必须先建立。
+
+`init_all_cuda_graphs()` 依次调用：
+
+```text
+Scheduler
+  -> TpModelWorker.init_cuda_graphs()
+    -> ModelRunner.init_cuda_graphs()
+      -> capture_cuda_graphs(model_runner=...)
+```
+
+[`capture_cuda_graphs()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py#L73-L135) 做三件事：
+
+1. 创建共享的 graph 输出/静态资源；
+2. 先建立 `EagerRunner`，作为 graph 不可用时的正确性 fallback；
+3. 分别准备 prefill runner 和 decode graph runner。
+
+Decode 分支进入 [`capture_decode_graph()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py#L285-L352)。当 `model_runner.device == "npu"` 时：
+
+```python
+graph_runners = {
+    "cpu": CPUGraphRunner,
+    "npu": NPUGraphRunner,
+    "xpu": XPUGraphRunner,
+}
+runner = graph_runners[model_runner.device](model_runner)
+```
+
+构造 `NPUGraphRunner` 本身就会触发 capture，而不是等第一个线上请求再捕获：
+
+```text
+NPUGraphRunner.__init__()
+  -> 将通用 patch_model 替换为 patch_model_npu
+  -> DecodeCudaGraphRunner.__init__()
+       -> 分配最大 DecodeInputBuffers
+       -> resolve_decode_backend(self)
+            -> NPUCudaGraphBackend
+       -> with model_capture_mode():
+            self.capture()
+```
+
+[`resolve_decode_backend()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner_backend/utils.py#L52-L73) 说明当前 NPU decode 无论配置中的通用 backend 名称如何，都返回 full-style 的 `NPUCudaGraphBackend`。
+
+### 13.2 每个 bucket 如何完成 warmup 与 capture
+
+[`DecodeCudaGraphRunner.capture()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L825-L867) 打开 capture stream/session，然后从大 bucket 到小 bucket 遍历。先捕获大图有利于后续小图共享 memory pool：
+
+```text
+capture()
+  -> graph_capture() 创建/选择 capture Stream
+  -> backend.capture_session(stream) 建立 graph memory pool
+  -> _capture_one_stream()
+       -> for bs in reversed(capture_bs)
+            -> patch_model(..., enable_compile = bs in compile_bs)
+            -> capture_one_shape(bs, forward)
+```
+
+`capture_one_shape()` 的关键数据流是：
+
+```text
+size/bucket
+  -> capture_prepare(size)
+       -> 从 DecodeInputBuffers 取得 size 对应的前缀 view
+       -> 构造静态 ForwardBatch
+       -> 选择 attention backend
+  -> init_forward_metadata_out_graph(...)
+  -> 定义 run_once() 闭包
+  -> backend.capture_one(shape_key, run_once, post_warmup_hook=...)
+```
+
+涉及的对象不是模糊的“输入”：
+
+| 对象 | 类型/职责 |
+|---|---|
+| `size`/`bs` | Python `int`，当前捕获 bucket 的 batch size |
+| `DecodeInputBuffers` | 一组最大尺寸 `torch.Tensor`，提供稳定 Device storage |
+| `forward_batch` | `ForwardBatch`，字段指向上述静态 tensor view |
+| `forward` | `model.forward` 或 `torch.compile` 后的 callable |
+| `run_once` | 零参数 Python closure，把前三者封装成一次完整模型调用 |
+| `ShapeKey` | 可哈希规格键，至少包含 size，还可包含 stream/LoRA variant |
+| `post_warmup_hook` | 可选 callable，用于复位 attention warmup 状态 |
+
+随后 NPU backend 对**同一个 `run_once`**执行：
+
+```text
+普通 forward #1 -> post hook
+  -> 普通 forward #2 -> post hook
+    -> torch.npu.graph(...) 内的 capture forward
+      -> 保存 ShapeKey -> NPUGraph
+      -> 保存 ShapeKey -> 静态输出 tensor handle
+```
+
+注意总共是三次模型执行，不是“两次 warmup 中第二次顺便被保存成图”。只有第三次位于 graph context 中。
+
+### 13.3 在线阶段：从请求批次进入 graph fast path
+
+正常调度循环见 [`Scheduler.event_loop_normal()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/managers/scheduler.py#L1580-L1609)：
+
+```python
+recv_reqs = self.request_receiver.recv_requests()
+self.process_input_requests(recv_reqs)
+plan = self.get_next_batch_to_run(...)
+batch = plan.batch_to_run
+result = self.run_batch(batch)
+self.process_batch_result(batch, result)
+```
+
+此处的 `batch` 是 `ScheduleBatch`：它服务于 Scheduler，保存请求对象、调度状态和较多 CPU 侧信息。`Scheduler.run_batch()` 最终调用 `model_worker.forward_batch_generation(batch)`。
+
+[`TpModelWorker.forward_batch_generation()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/managers/tp_worker.py#L532-L621) 完成关键的数据结构转换：
+
+```python
+forward_batch = ForwardBatch.init_new(
+    batch,
+    self.model_runner,
+    capture_hidden_mode=capture_hidden_mode,
+)
+out = self.model_runner.forward(forward_batch)
+```
+
+`ForwardBatch` 不是第二份模型输入值的随意包装，而是面向模型执行层的低级合同：它包含 `input_ids`、`positions`、`seq_lens`、request/KV pool 索引、sampling/attention/speculative metadata 等，绝大多数核心数据是 Device tensor。
+
+[`ModelRunner.forward()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1335-L1385) 建立 profiling、canary、专家统计等上下文，再调用 `_forward_raw()`。真正的 graph 分流在 [`_forward_raw()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1479-L1524)：
+
+```python
+can_run_graph = bool(
+    forward_batch.forward_mode.is_cuda_graph()
+    and self.decode_cuda_graph_runner
+    and self.decode_cuda_graph_runner.can_run_graph(forward_batch)
+)
+
+if can_run_graph:
+    ret = self.decode_cuda_graph_runner.execute(forward_batch, ...)
+    return ModelRunnerOutput(logits_output=ret, can_run_graph=True)
+```
+
+三道门分别表示：
+
+1. 当前 forward mode 是允许走 launch graph 的 decode/verify 模式；
+2. 启动时确实构造成功了 decode runner；
+3. live batch 的 shape、动态特性和 variant 能映射到已捕获的 `ShapeKey`。
+
+任一失败都会继续走 prefill graph 或 `EagerRunner`，而不是强行 replay 一张不兼容的图。
+
+### 13.4 `NPUGraphRunner.execute()` 内部发生什么
+
+NPU 覆盖的 [`execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) 可以拆成五步。
+
+**第一步：选择 bucket。**
+
+继承的 `load_batch()` 用 `_pad_to_bucket(raw_bs, capture_bs)` 得到 `bs`。例如 live batch 为 5、已捕获 `[1, 2, 4, 8]`，则 `raw_bs=5`、`bs=8`、graph key 为 size 8。
+
+**第二步：把 live 值写入静态地址。**
+
+`buffer_registry.fill_from(...)` 把 live `ForwardBatch` 的值复制到 capture 时使用的 `DecodeInputBuffers`；padding 区也按合同准备。这里改变的是 storage 中的内容，不是 graph 绑定的地址。
+
+**第三步：重建 graph 外的 attention metadata。**
+
+`attn_backend.init_forward_metadata_out_graph(fb_view)` 处理 replay 前可以动态准备、但不应成为捕获任务的 metadata。`fb_view` 指向静态 buffer，并记录 `raw_bs` 与 padded `bs`。
+
+**第四步：更新 NPU 图属性并 replay。**
+
+MLA/MHA 等路径的真实 KV 长度每轮变化。`NPUGraphRunner` 根据架构选择属性名，例如 `actual_seq_lengths_kv` 或 `context_lens`，然后：
+
+```python
+output = self.backend.replay_with_input_update(
+    graph_key,
+    seq_lens=seq_lens,
+    attr_name=self._get_update_attr_name(),
+    attr_type=self._get_update_attr_type(),
+)
+```
+
+Backend 创建 Host `threading.Thread` 调用 `graph.update(...)`，主线程调用 `graph.replay()`，最后 `join()`。源码没有先 `join` 再 replay，因此不能把它解释成普通 Python 的“update 完成后才 replay”；正确性依赖 torch_npu 的 `NPUGraph.update/replay` 内部协调合同，这个 Host 线程只是发起 update，不是 NPU 计算 Stream。
+
+**第五步：裁掉 padding 并交给 sampler。**
+
+Graph 返回静态 `LogitsProcessorOutput` handle。Runner 用 `[:raw_num_token]` 只保留有效部分。回到 `TpModelWorker.forward_batch_generation()` 后：
+
+```python
+batch_result.next_token_ids = self.model_runner.sample(
+    logits_output,
+    forward_batch,
+)
+```
+
+Sampler 作为同一执行流水中的后续 consumer 读取 replay 刚写入的 logits；需要返回 CPU 的结果再由调度层安排 D2H copy/Event 同步。
+
+### 13.5 把两条链合在一张图中
 
 ```mermaid
 sequenceDiagram
+  participant SCH as "Scheduler"
+  participant TP as "TpModelWorker"
   participant MR as "ModelRunner"
-  participant DR as "DecodeCudaGraphRunner"
+  participant DR as "NPUGraphRunner"
   participant NB as "NPUCudaGraphBackend"
-  participant TG as "torch.npu.NPUGraph"
-  participant S as "NPU Stream"
-  participant N as "NPU Device"
+  participant G as "torch.npu.NPUGraph"
+  participant NPU as "NPU Device"
 
   rect rgb(235,245,255)
-    Note over MR,N: 初始化 / capture
-    MR->>DR: "创建 runner，选择 capture_bs"
-    DR->>DR: "分配静态 DecodeInputBuffers"
+    Note over SCH,NPU: "服务启动：为每个 bucket 建图"
+    SCH->>TP: "init_cuda_graphs()"
+    TP->>MR: "init_cuda_graphs()"
+    MR->>DR: "NPUGraphRunner(model_runner)"
     DR->>NB: "capture_session(capture_stream)"
     loop "每个 ShapeKey"
-      DR->>NB: "capture_one(shape_key, forward_fn)"
-      NB->>N: "两次 warmup forward"
-      NB->>TG: "torch.npu.graph(...): forward_fn"
-      TG->>S: "捕获 kernel/memcpy/Event launch"
-      NB->>NB: "保存 graph 与静态 output handle"
+      DR->>DR: "capture_prepare()：静态 ForwardBatch"
+      DR->>NB: "capture_one(shape_key, run_once)"
+      NB->>NPU: "普通 forward warmup #1"
+      NB->>NPU: "普通 forward warmup #2"
+      NB->>G: "graph context 中执行 capture forward"
+      NB->>NB: "保存 graph 和 output handle"
     end
   end
 
   rect rgb(240,255,240)
-    Note over MR,N: 每轮 replay
-    MR->>DR: "execute(live ForwardBatch)"
-    DR->>S: "copy live data 到静态 buffers"
-    DR->>NB: "replay(shape_key)"
-    NB->>TG: "update dynamic attrs + replay"
-    TG->>S: "提交已捕获任务"
-    S->>N: "按 Stream/Event 依赖执行"
-    NB-->>DR: "返回静态 output handle"
-    DR-->>MR: "slice 有效 token/batch"
+    Note over SCH,NPU: "在线 decode：一次 token 生成"
+    SCH->>SCH: "get_next_batch_to_run()"
+    SCH->>TP: "forward_batch_generation(ScheduleBatch)"
+    TP->>TP: "ForwardBatch.init_new()"
+    TP->>MR: "forward(ForwardBatch)"
+    MR->>DR: "can_run_graph() + execute()"
+    DR->>DR: "选择 bucket；live 值 copy 到静态 buffer"
+    DR->>NB: "update(seq_lens) + replay(ShapeKey)"
+    NB->>G: "replay()"
+    G->>NPU: "提交已捕获的算子任务"
+    NB-->>DR: "静态 output handle"
+    DR-->>TP: "裁掉 padding 后的 logits"
+    TP->>TP: "sample(logits, ForwardBatch)"
+    TP-->>SCH: "GenerationBatchResult"
   end
 ```
+
+这张图也回答了“实际运行时怎么进到 sgl kernel”：Python 并不会寻找一个名为 Host 的独立进程。Scheduler、`TpModelWorker`、`ModelRunner`、runner/backend 都是 Host 侧软件层；capture forward 执行模型算子时，PyTorch/torch_npu dispatcher 进入相应 operator 实现。由 sgl-kernel-npu 提供的算子会继续进入它的 C++/NPU wrapper，再提交底层 kernel；其他算子则可能由 torch_npu/CANN 等实现。NPUGraph 记录这些 Device 提交，在线 replay 时不再逐个重跑原来的 Python operator 调用。
 
 ---
 
 ## 14. 源码阅读顺序
 
-1. `model_runner.py`：graph fast path 在哪里被选择；
-2. `base_cuda_graph_runner.py`：通用 runner 合同；
-3. `decode_cuda_graph_runner.py`：bucket、静态 buffer、capture 与 replay；
-4. `runner_backend/utils.py`：NPU backend 工厂；
-5. `npu_cudagraph_backend.py`：真正创建、保存和 replay `NPUGraph`；
-6. `npu_graph_runner.py`：NPU seq lengths update 与输出裁剪；
-7. `npu_piecewise_backend.py`：FX/compiler piecewise graph。
+1. `scheduler.py`：启动 capture 的入口以及在线 `run_batch`；
+2. `tp_worker.py`：`ScheduleBatch -> ForwardBatch -> ModelRunner`；
+3. `forward_batch_info.py`：模型执行层的 batch 合同；
+4. `model_runner.py`：graph fast path 在哪里被选择；
+5. `decode_cuda_graph_runner.py`：bucket、静态 buffer、warmup/capture 与 replay；
+6. `runner_backend/utils.py`：NPU backend 工厂；
+7. `npu_cudagraph_backend.py`：真正创建、保存和 replay `NPUGraph`；
+8. `npu_graph_runner.py`：NPU seq lengths update 与输出裁剪；
+9. `npu_piecewise_backend.py`：FX/compiler piecewise graph。
 
 ---
 
@@ -673,6 +1023,18 @@ Decode 单轮 token 数小、调用频繁，重复 Host/runtime launch 开销占
 ### 8. 为什么每个 TP rank 通常各自 capture？
 
 各 rank 持有不同权重分片、Device context、storage 地址和通信参与身份。NPUGraph 绑定这些运行时资源，不能把 rank 0 的 Python graph 对象直接当成 rank 1 的图。
+
+### 9. Warmup 与 capture 最本质的区别是什么？
+
+Warmup 是普通执行，目的在于让惰性初始化、编译、kernel 加载、workspace 分配等一次性行为提前发生；它不产生可 replay 的图。Capture 是在 `torch.npu.graph(...)` 中执行并记录 Device 提交序列，会生成 `NPUGraph` 和静态输出句柄。当前每个 NPU shape 的完整顺序是“两次普通 warmup forward + 一次 capture forward”。
+
+### 10. `DecodeCudaGraphRunner.capture()` 调用 `self.warmup()`，是否就是 NPU 的两遍 forward？
+
+不是。当前 `BaseRunner.warmup()` 对非 CUDA device 会在设置 `_kernel_warmed_up` 后立即返回。NPU 的两遍模型 forward 位于 `NPUCudaGraphBackend.capture_one()`，并且对每个 `ShapeKey` 分别执行。两个地方都用了 warmup 这个词，但层级和行为不同。
+
+### 11. 第一个线上请求会不会触发完整 capture？
+
+标准初始化路径不会。Scheduler 加载模型、建立 memory pool 和 attention backend 后，就调用 `init_all_cuda_graphs()`；构造 `NPUGraphRunner` 时已经遍历 buckets 完成 warmup/capture。线上请求只做资格检查、live-to-static copy、必要的图属性 update 和 replay。隐藏状态 capture mode 等合同变化时，运行中仍可能触发 cleanup/recapture。
 
 ---
 

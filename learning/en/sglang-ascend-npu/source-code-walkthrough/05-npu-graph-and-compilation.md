@@ -1,6 +1,6 @@
 # 05: Computation Graphs, torch.compile, and the SGLang NPU Graph Source Path
 
-> Source baseline: `SGLang@ddaf430e6c59a88da0a6cca4c71033cedf102a88`. This chapter distinguishes four meanings of “graph” and traces a live `ForwardBatch` through static buffers, `torch.npu.NPUGraph` capture, and replay.
+> Source baseline: `SGLang@9a03bebf13996b628f8335628a691dcb3aa8400b`. This chapter distinguishes four meanings of “graph,” separates warmup from capture, and traces the complete in-process path from `Scheduler` to `torch.npu.NPUGraph` replay.
 
 ## 0. Four Different Graphs
 
@@ -115,9 +115,9 @@ Changing a Python variable to reference a new tensor does not rewrite addresses 
 
 ## 4. Where SGLang Selects the Graph Path
 
-[`ModelRunner.init_cuda_graphs`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/model_runner.py#L859-L866) installs eager, prefill-graph, and decode-graph runners. The historical `cuda_graph` name is cross-platform and does not imply CUDA on NPU.
+[`ModelRunner.init_cuda_graphs`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L909-L916) installs eager, prefill-graph, and decode-graph runners. The historical `cuda_graph` name is cross-platform and does not imply CUDA on NPU.
 
-At runtime, [`model_runner.py#L1417-L1450`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/model_runner.py#L1417-L1450) checks:
+At runtime, [`model_runner.py#L1479-L1516`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1479-L1516) checks:
 
 ```python
 can_run_graph = bool(
@@ -149,7 +149,7 @@ classDiagram
 - `NPUGraphRunner`: NPU-specific sequence-length updates, dtype, profiling, output slicing.
 - `NPUCudaGraphBackend`: creates, stores, updates, and replays real `torch.npu.NPUGraph` objects.
 
-[`resolve_decode_backend`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/runner_backend/utils.py#L52-L76) returns `NPUCudaGraphBackend` for an NPU device.
+[`resolve_decode_backend`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner_backend/utils.py#L52-L73) returns `NPUCudaGraphBackend` for an NPU device.
 
 ---
 
@@ -165,16 +165,128 @@ More buckets reduce fallback but increase capture time and graph/static-memory u
 
 ### 6.2 Warmup
 
-[`NPUCudaGraphBackend.capture_one`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L72-L127) performs two warmups:
+#### 6.2.1 Precise Definitions
+
+**Warmup** means executing a real forward pass before measurement, capture, or serving so that first-use work happens early. Such work can include:
+
+- lazy Python/module initialization;
+- first invocation of Dynamo, `torch.compile`, or the compiler backend;
+- kernel/operator binary loading;
+- operator selection, autotuning, and workspace allocation;
+- allocator cache creation;
+- communicator and attention-metadata initialization.
+
+**Capture** means executing a forward pass inside `torch.npu.graph(...)`. The runtime records the submitted Device work, dependencies, and memory contract and produces a replayable `NPUGraph`.
+
+| Property | Warmup | Capture |
+|---|---|---|
+| Executes a real forward | Yes | Yes |
+| Produces a replayable graph | No | Yes |
+| Saves its output as the captured output handle | No | Yes, in `_outputs[shape_key]` |
+| Primary goal | Remove first-run effects and reach steady state | Record the steady-state launch sequence |
+| Inside `torch.npu.graph(...)` | No | Yes |
+
+The exact sequence is:
+
+```text
+ordinary forward warmup #1
+  -> ordinary forward warmup #2
+    -> capture forward inside graph context
+      -> future requests replay only
+```
+
+Warmup does not record a temporary graph, and the second warmup is not reused as the captured execution. Two warmups are an SGLang NPU backend engineering choice, not a universal hardware rule. First-use compilation, allocation, or communication inside capture can make capture unexpectedly slow, record unwanted one-time work, or invoke operations the runtime cannot capture.
+
+#### 6.2.2 Three Different Warmup Contexts in This Source Tree
+
+First, [`DecodeCudaGraphRunner.capture()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L825-L857) calls the common runner method:
+
+```python
+self.warmup()
+```
+
+However, [`BaseRunner.warmup()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/base_runner.py#L210-L240) contains:
+
+```python
+if getattr(mr, "_kernel_warmed_up", False):
+    return
+mr._kernel_warmed_up = True
+
+if mr.device != "cuda":
+    return
+```
+
+On the current NPU path it sets the run-once flag and immediately returns. The later FlashInfer workspace, autotune, and DeepGEMM logic is CUDA-specific. This call therefore is **not** the two-forward NPU warmup.
+
+Second, the real per-shape NPU warmup is in [`NPUCudaGraphBackend.capture_one()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L78-L127):
 
 ```python
 for _ in range(2):
     self._device_module.synchronize()
     self._tp_group.barrier()
     forward_fn()
+    if post_warmup_hook is not None:
+        post_warmup_hook()
 ```
 
-This pays kernel loading, lazy initialization, compilation/autotuning, communication setup, and one-time allocations before capture.
+- `synchronize()` waits for earlier NPU work. At the start of the second iteration it also guarantees that the first warmup has completed.
+- `barrier()` aligns all Tensor Parallel ranks before each attempt, avoiding mismatched collective progress.
+- `forward_fn` is a zero-argument Python closure over the static `ForwardBatch`, static buffer views, attention backend, and selected model callable.
+- `post_warmup_hook` lets the attention backend reset state mutated by warmup. The caller obtains it from `attn_backend.on_after_cuda_graph_warmup`.
+
+The warmup return value is discarded. The first pass usually triggers lazy setup; the second more closely resembles steady-state repetition and exposes paths that differ between first and subsequent invocations.
+
+Third, some captured buckets use a `torch.compile` callable:
+
+```python
+torch.compile(
+    torch.no_grad()(model.forward),
+    fullgraph=True,
+    dynamic=False,
+    backend=get_compiler_backend("npugraph_ex"),
+)
+```
+
+Its first call may run Dynamo graph extraction, guards, and NPU backend compilation. Because that call occurs during the per-shape warmup, compiler first-use cost is less likely to leak into the outer NPUGraph capture.
+
+```text
+DecodeCudaGraphRunner.capture()
+  |
+  +-- BaseRunner.warmup()
+  |     `-- current NPU path returns before CUDA-only autotune
+  |
+  `-- for each ShapeKey
+        `-- NPUCudaGraphBackend.capture_one()
+              +-- forward_fn()        # warmup 1; may trigger torch.compile
+              +-- forward_fn()        # warmup 2; closer to steady state
+              `-- torch.npu.graph(...)
+                    `-- forward_fn()  # capture run
+```
+
+#### 6.2.3 Why Warmup Must Match the Target Path
+
+A batch-1 eager warmup does not fully warm a batch-8 compiled capture. Effective warmup should match the capture bucket, static buffer views and addresses, model/attention branch, TP collective order, and compile setting.
+
+`capture_one_shape()` defines one closure and passes that same closure to the backend:
+
+```python
+def run_once():
+    attn_backend.init_forward_metadata_in_graph(forward_batch)
+    return forward(
+        forward_batch.input_ids,
+        forward_batch.positions,
+        forward_batch,
+    )
+
+self.backend.capture_one(
+    shape_key,
+    run_once,
+    capture_inputs=None,
+    post_warmup_hook=post_warmup_hook,
+)
+```
+
+This `forward_batch` is not a live serving request. `capture_prepare()` builds it from prefix views of `DecodeInputBuffers`, so warmup, capture, and later replay share the same input/metadata storage-address contract; the output handle created by capture is stored separately.
 
 ### 6.3 Real Capture
 
@@ -210,7 +322,7 @@ Python executes `forward_fn()` during capture; NPUGraph records the resulting NP
 
 ### 7.1 Eligibility and Padding
 
-[`can_run_graph`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L502-L553) rejects incompatible dynamic features and computes a key.
+[`can_run_graph`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L502-L553) rejects incompatible dynamic features and computes a key.
 
 For raw batch 5 and buckets `[1,2,4,8]`, `load_batch`:
 
@@ -239,9 +351,9 @@ No Host synchronization is needed between them because same-Stream order carries
 
 ### 7.3 Updating NPU Sequence-Length Attributes
 
-[`NPUGraphRunner.execute`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L284) calls `replay_with_input_update` for supported attention paths.
+[`NPUGraphRunner.execute`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) calls `replay_with_input_update` for supported attention paths.
 
-[`NPUCudaGraphBackend`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L144-L175) runs:
+[`NPUCudaGraphBackend`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L145-L177) runs:
 
 ```python
 def _update():
@@ -288,7 +400,7 @@ The Event connects the external producer to replay. A graph cannot infer a cross
 
 ## 9. torch.compile Versus NPUGraph
 
-[`patch_model_npu`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L67-L84) can produce:
+[`patch_model_npu`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L67-L84) can produce:
 
 ```python
 torch.compile(
@@ -319,7 +431,7 @@ SGLang control flow
 
 ## 10. Piecewise NPU Graph
 
-[`NPUPiecewiseBackend`](https://github.com/sgl-project/sglang/blob/ddaf430e6c59a88da0a6cca4c71033cedf102a88/python/sglang/srt/compilation/npu_piecewise_backend.py) receives an `fx.GraphModule`, selects concrete runtime-shape entries, warms up, captures `entry.runnable`, and replays a graph per piece.
+[`NPUPiecewiseBackend`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/compilation/npu_piecewise_backend.py) receives an `fx.GraphModule`, selects concrete runtime-shape entries, warms up, captures `entry.runnable`, and replays a graph per piece.
 
 In debug mode it verifies stable addresses:
 
@@ -379,43 +491,237 @@ This is another reason eager forward remains the correctness baseline: the graph
 
 ---
 
-## 13. Full Timeline
+## 13. Complete Source Path: Service Startup to One Generated Token
+
+“End to end” here begins when the Scheduler receives requests and forms an executable batch, and ends when the sampler consumes replayed logits. HTTP protocol handling, tokenization, and detokenization are outside this NPU Graph chapter.
+
+### 13.1 Startup: Who Triggers Capture?
+
+The entry point is [`Scheduler.init_model_worker()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/managers/scheduler.py#L901-L910):
+
+```python
+def init_model_worker(self):
+    self.init_tp_model_worker()          # load the model
+    self.maybe_init_draft_worker()
+    self.init_memory_pools()             # KV-cache and request pools
+    self.init_all_attention_backends()   # must exist before capture
+    self.init_all_cuda_graphs()          # historical cross-platform name
+```
+
+The order matters because a capture forward needs model weights, memory pools, and an initialized attention backend.
+
+The call chain is:
+
+```text
+Scheduler.init_all_cuda_graphs()
+  -> TpModelWorker.init_cuda_graphs()
+    -> ModelRunner.init_cuda_graphs()
+      -> capture_cuda_graphs(model_runner=...)
+```
+
+[`capture_cuda_graphs()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py#L73-L135) creates shared graph output/static resources, builds an `EagerRunner` as the correctness fallback, and then prepares prefill and decode runners.
+
+The decode branch enters [`capture_decode_graph()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py#L285-L352). For `model_runner.device == "npu"`:
+
+```python
+graph_runners = {
+    "cpu": CPUGraphRunner,
+    "npu": NPUGraphRunner,
+    "xpu": XPUGraphRunner,
+}
+runner = graph_runners[model_runner.device](model_runner)
+```
+
+Constructing `NPUGraphRunner` captures immediately rather than waiting for the first live request:
+
+```text
+NPUGraphRunner.__init__()
+  -> replace the common patch_model hook with patch_model_npu
+  -> DecodeCudaGraphRunner.__init__()
+       -> allocate maximum-size DecodeInputBuffers
+       -> resolve_decode_backend(self)
+            -> NPUCudaGraphBackend
+       -> with model_capture_mode():
+            self.capture()
+```
+
+[`resolve_decode_backend()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner_backend/utils.py#L52-L73) currently returns the full-style `NPUCudaGraphBackend` for NPU decode.
+
+### 13.2 Per-Bucket Warmup and Capture
+
+[`DecodeCudaGraphRunner.capture()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L825-L867) opens a capture stream/session and visits large buckets before small ones so smaller graphs can reuse the pool:
+
+```text
+capture()
+  -> graph_capture() selects a capture Stream
+  -> backend.capture_session(stream) establishes the graph memory pool
+  -> _capture_one_stream()
+       -> for bs in reversed(capture_bs)
+            -> patch_model(..., enable_compile = bs in compile_bs)
+            -> capture_one_shape(bs, forward)
+```
+
+`capture_one_shape()` performs:
+
+```text
+bucket size
+  -> capture_prepare(size)
+       -> take prefix views from DecodeInputBuffers
+       -> construct a static ForwardBatch
+       -> select the attention backend
+  -> init_forward_metadata_out_graph(...)
+  -> define the run_once() closure
+  -> backend.capture_one(shape_key, run_once, post_warmup_hook=...)
+```
+
+| Object | Type and role |
+|---|---|
+| `size`/`bs` | Python `int`; current capture bucket |
+| `DecodeInputBuffers` | Maximum-size `torch.Tensor` collection with stable Device storage |
+| `forward_batch` | `ForwardBatch` whose fields point to static tensor views |
+| `forward` | `model.forward` or a `torch.compile`-produced callable |
+| `run_once` | Zero-argument closure assembling one complete model call |
+| `ShapeKey` | Hashable size/stream/variant lookup key |
+| `post_warmup_hook` | Optional attention-state reset callable |
+
+The NPU backend executes the same closure three times:
+
+```text
+ordinary forward #1 -> post hook
+  -> ordinary forward #2 -> post hook
+    -> capture forward inside torch.npu.graph(...)
+      -> store ShapeKey -> NPUGraph
+      -> store ShapeKey -> static output tensor handle
+```
+
+### 13.3 Online Request to Graph Fast Path
+
+[`Scheduler.event_loop_normal()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/managers/scheduler.py#L1580-L1609) receives requests, selects a batch, runs it, and processes its result:
+
+```python
+recv_reqs = self.request_receiver.recv_requests()
+self.process_input_requests(recv_reqs)
+plan = self.get_next_batch_to_run(...)
+batch = plan.batch_to_run
+result = self.run_batch(batch)
+self.process_batch_result(batch, result)
+```
+
+`batch` is a `ScheduleBatch`: a scheduler-facing structure with request objects, scheduling state, and substantial CPU-side data. `Scheduler.run_batch()` eventually calls `model_worker.forward_batch_generation(batch)`.
+
+[`TpModelWorker.forward_batch_generation()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/managers/tp_worker.py#L532-L621) converts the structure:
+
+```python
+forward_batch = ForwardBatch.init_new(
+    batch,
+    self.model_runner,
+    capture_hidden_mode=capture_hidden_mode,
+)
+out = self.model_runner.forward(forward_batch)
+```
+
+`ForwardBatch` is the model-execution contract. It contains `input_ids`, positions, sequence lengths, request/KV-pool indices, and sampling, attention, and speculative-decoding metadata; most core values are Device tensors.
+
+[`ModelRunner.forward()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1335-L1385) establishes profiling and bookkeeping contexts. [`_forward_raw()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1479-L1524) selects the graph path:
+
+```python
+can_run_graph = bool(
+    forward_batch.forward_mode.is_cuda_graph()
+    and self.decode_cuda_graph_runner
+    and self.decode_cuda_graph_runner.can_run_graph(forward_batch)
+)
+
+if can_run_graph:
+    ret = self.decode_cuda_graph_runner.execute(forward_batch, ...)
+    return ModelRunnerOutput(logits_output=ret, can_run_graph=True)
+```
+
+The three gates mean: this forward mode permits launch-graph decode/verify; a decode runner exists; and the live batch maps to a compatible captured `ShapeKey`. A failed gate falls through to the prefill graph or `EagerRunner`.
+
+### 13.4 Inside `NPUGraphRunner.execute()`
+
+The NPU override [`execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) has five conceptual steps.
+
+1. Inherited `load_batch()` selects a bucket. With live batch 5 and `[1,2,4,8]`, `raw_bs=5` and padded `bs=8`.
+2. `buffer_registry.fill_from(...)` copies live values into the captured `DecodeInputBuffers`. Values change; bound storage addresses do not.
+3. `attn_backend.init_forward_metadata_out_graph(fb_view)` prepares dynamic metadata that belongs outside the captured task sequence.
+4. The runner chooses an attribute such as `actual_seq_lengths_kv` or `context_lens`, calls `replay_with_input_update(...)`, and replays the graph.
+5. It slices the static `LogitsProcessorOutput` to `raw_num_token` before returning it.
+
+The backend starts a Host `threading.Thread` for `graph.update(...)`, calls `graph.replay()` on the main thread, and then joins. The source does not join before replay, so this must not be explained as ordinary Python sequencing where update visibly completes first. Correctness relies on the torch_npu `NPUGraph.update/replay` coordination contract; the Host thread is not an NPU computation Stream.
+
+Back in `TpModelWorker.forward_batch_generation()`:
+
+```python
+batch_result.next_token_ids = self.model_runner.sample(
+    logits_output,
+    forward_batch,
+)
+```
+
+The sampler consumes logits written by the replay. CPU-facing results are later transferred under the Scheduler's D2H-copy and Event ordering.
+
+### 13.5 Combined Timeline
 
 ```mermaid
 sequenceDiagram
+  participant SCH as "Scheduler"
+  participant TP as "TpModelWorker"
   participant MR as "ModelRunner"
-  participant DR as "DecodeCudaGraphRunner"
+  participant DR as "NPUGraphRunner"
   participant NB as "NPUCudaGraphBackend"
-  participant TG as "torch.npu.NPUGraph"
-  participant S as "NPU Stream"
-  participant N as "NPU Device"
-  MR->>DR: "initialize capture sizes and static buffers"
-  loop "each ShapeKey"
-    DR->>NB: "capture_one(shape_key, forward_fn)"
-    NB->>N: "warmup twice"
-    NB->>TG: "capture forward_fn"
-    TG->>S: "record submissions"
+  participant G as "torch.npu.NPUGraph"
+  participant NPU as "NPU Device"
+
+  rect rgb(235,245,255)
+    Note over SCH,NPU: "Startup: build one graph per bucket"
+    SCH->>TP: "init_cuda_graphs()"
+    TP->>MR: "init_cuda_graphs()"
+    MR->>DR: "NPUGraphRunner(model_runner)"
+    DR->>NB: "capture_session(capture_stream)"
+    loop "Each ShapeKey"
+      DR->>DR: "capture_prepare(): static ForwardBatch"
+      DR->>NB: "capture_one(shape_key, run_once)"
+      NB->>NPU: "ordinary warmup forward #1"
+      NB->>NPU: "ordinary warmup forward #2"
+      NB->>G: "capture forward inside graph context"
+      NB->>NB: "store graph and output handle"
+    end
   end
-  MR->>DR: "execute(live ForwardBatch)"
-  DR->>S: "copy live values to static buffers"
-  DR->>NB: "replay(shape_key)"
-  NB->>TG: "update attributes and replay"
-  TG->>S: "submit captured tasks"
-  S->>N: "execute with Stream/Event ordering"
-  NB-->>MR: "return static output handle and valid slice"
+
+  rect rgb(240,255,240)
+    Note over SCH,NPU: "Online decode: generate one token"
+    SCH->>SCH: "get_next_batch_to_run()"
+    SCH->>TP: "forward_batch_generation(ScheduleBatch)"
+    TP->>TP: "ForwardBatch.init_new()"
+    TP->>MR: "forward(ForwardBatch)"
+    MR->>DR: "can_run_graph() + execute()"
+    DR->>DR: "select bucket; copy live values to static buffers"
+    DR->>NB: "update(seq_lens) + replay(ShapeKey)"
+    NB->>G: "replay()"
+    G->>NPU: "submit captured operator tasks"
+    NB-->>DR: "static output handle"
+    DR-->>TP: "logits with padding removed"
+    TP->>TP: "sample(logits, ForwardBatch)"
+    TP-->>SCH: "GenerationBatchResult"
+  end
 ```
+
+There is no separate process named “Host.” `Scheduler`, `TpModelWorker`, `ModelRunner`, and the runner/backend are Host-side software. During the capture forward, PyTorch/torch_npu dispatch enters operator implementations. Operators supplied by sgl-kernel-npu continue into its C++/NPU wrapper and submit the underlying kernel; other operators may be implemented by torch_npu/CANN. NPUGraph records these Device submissions, so online replay avoids re-running the original Python operator calls one by one.
 
 ---
 
 ## 14. Source Reading Order
 
-1. `model_runner.py`: where the graph fast path is selected;
-2. `base_cuda_graph_runner.py`: the common runner contract;
-3. `decode_cuda_graph_runner.py`: buckets, static buffers, capture, and replay;
-4. `runner_backend/utils.py`: the NPU backend factory;
-5. `npu_cudagraph_backend.py`: actual `NPUGraph` construction, storage, update, and replay;
-6. `npu_graph_runner.py`: NPU sequence-length update and output slicing;
-7. `npu_piecewise_backend.py`: FX/compiler piecewise graphs.
+1. `scheduler.py`: startup capture and online `run_batch`;
+2. `tp_worker.py`: `ScheduleBatch -> ForwardBatch -> ModelRunner`;
+3. `forward_batch_info.py`: the model-execution batch contract;
+4. `model_runner.py`: graph fast-path selection;
+5. `decode_cuda_graph_runner.py`: buckets, static buffers, warmup/capture, and replay;
+6. `runner_backend/utils.py`: the NPU backend factory;
+7. `npu_cudagraph_backend.py`: actual `NPUGraph` construction, storage, update, and replay;
+8. `npu_graph_runner.py`: NPU sequence-length update and output slicing;
+9. `npu_piecewise_backend.py`: FX/compiler piecewise graphs.
 
 ---
 
@@ -452,6 +758,18 @@ Its repeated small steps make Host/runtime launch overhead proportionally large,
 ### 8. Why does each TP rank capture separately?
 
 Ranks have distinct weights, contexts, addresses, and communication identities, all of which are runtime graph dependencies.
+
+### 9. What is the essential difference between warmup and capture?
+
+Warmup is ordinary execution that moves lazy initialization, compilation, kernel loading, and workspace allocation ahead of capture. It produces no replayable graph. Capture executes inside `torch.npu.graph(...)`, records Device submissions, and produces an `NPUGraph` plus a static output handle. The current per-shape NPU sequence is two ordinary warmup forwards followed by one capture forward.
+
+### 10. Is `self.warmup()` in `DecodeCudaGraphRunner.capture()` the two-forward NPU warmup?
+
+No. The current `BaseRunner.warmup()` returns for non-CUDA devices after setting `_kernel_warmed_up`. The two actual NPU model forwards live in `NPUCudaGraphBackend.capture_one()` and run separately for every `ShapeKey`.
+
+### 11. Does the first live request perform the complete capture?
+
+Not on the standard initialization path. After model, memory-pool, and attention-backend initialization, the Scheduler invokes `init_all_cuda_graphs()`. Constructing `NPUGraphRunner` captures all configured buckets. Live requests perform eligibility checks, live-to-static copies, supported attribute updates, and replay. A changed hidden-state capture contract can still trigger cleanup and recapture later.
 
 ---
 
