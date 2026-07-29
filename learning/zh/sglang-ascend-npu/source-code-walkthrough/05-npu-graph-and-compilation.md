@@ -385,18 +385,167 @@ for _ in range(2):
 
 **第三种：`torch.compile` 的编译 warmup。**
 
-`NPUGraphRunner` 会在某些 `compile_bs` 上把 `model.forward` 替换成：
+先不要把它理解成“把 Python 文件编译成一个二进制”。这里真正发生的是：PyTorch 先从这一次 `forward` 中提取一张**算子语义图**，再把图交给 Ascend 的 TorchAir backend 转换成 NPU 可执行路径。
+
+完整入口要从 `compile_bs` 开始看。
+
+##### 第一步：哪些 bucket 会启用 compile
+
+[`get_batch_sizes_to_capture()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/base_cuda_graph_runner.py#L58-L103) 返回两个列表：
 
 ```python
-torch.compile(
-    torch.no_grad()(model.forward),
-    fullgraph=True,
-    dynamic=False,
-    backend=get_compiler_backend("npugraph_ex"),
+capture_bs = ...  # 需要建立 NPUGraph 的全部 batch-size buckets
+compile_bs = (
+    [bs for bs in capture_bs if bs <= server_args.torch_compile_max_bs]
+    if get_flags().capture.enable_torch_compile
+    else []
 )
 ```
 
-这个 callable 第一次在 `forward_fn()` 中运行时，可能触发 Dynamo 抽图、guard 建立和 NPU 编译 backend 生成可执行代码。它发生在“每 shape 的两遍 warmup”中，因此 compiler 的一次性成本不会轻易落进外层 NPUGraph capture。
+例如：
+
+```text
+capture_bs = [1, 2, 4, 8, 16]
+torch_compile_max_bs = 8
+enable_torch_compile = True
+
+得到 compile_bs = [1, 2, 4, 8]
+```
+
+这意味着 size 1/2/4/8 的 capture forward 先经过 `torch.compile`，size 16 仍直接调用原始 `model.forward`；但五个 bucket 最后都可以被外层 NPUGraph capture。**`compile_bs` 决定是否使用 compiler，`capture_bs` 决定是否建立 launch graph，它们不是同一个集合概念。**
+
+##### 第二步：NPU runner 把通用 patch 函数换成 NPU 版本
+
+[`NPUGraphRunner.__init__()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L87-L108) 在进入父类 capture 逻辑前执行：
+
+```python
+from sglang.srt.compilation import torch_compile_decoration
+
+torch_compile_decoration.patch_model = patch_model_npu
+super().__init__(model_runner, ...)
+```
+
+这是一次 Python **monkey patch（猴子补丁）**：运行时把模块属性指向另一个函数。通用 decode runner 仍调用统一名字 `torch_compile_decoration.patch_model`，但 NPU 实际进入 `patch_model_npu`。
+
+##### 第三步：遍历 bucket 时决定返回哪一种 callable
+
+[`_capture_one_stream()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L875-L912)：
+
+```python
+for bs in reversed(self.capture_bs):
+    with torch_compile_decoration.patch_model(
+        self.model_runner.model,
+        bs in self.compile_bs,
+        num_tokens=bs * self.captured_req_width,
+        tp_group=self.model_runner.tp_group,
+    ) as forward:
+        self.capture_one_shape(bs, forward, ...)
+```
+
+变量逐项解释：
+
+| 变量 | 类型 | 含义 |
+|---|---|---|
+| `bs` | Python `int` | 当前正在捕获的 bucket size |
+| `self.compile_bs` | `list[int]` | 允许经过 `torch.compile` 的 buckets |
+| `bs in self.compile_bs` | Python `bool` | 传给 `enable_compile` |
+| `self.model_runner.model` | `torch.nn.Module` | 已加载权重的 SGLang 模型对象 |
+| `forward` | Python callable | 原始 bound method，或 `torch.compile` 返回的优化 callable |
+
+`patch_model_npu` 是一个 `@contextmanager`。源码中的 `yield` 不是计算结果，而是把 callable 暂时交给 `with ... as forward`：
+
+```python
+@contextmanager
+def patch_model_npu(model, enable_compile, num_tokens, tp_group):
+    if enable_compile:
+        backend = get_compiler_backend("npugraph_ex")
+        yield torch.compile(
+            torch.no_grad()(model.forward),
+            fullgraph=True,
+            dynamic=False,
+            backend=backend,
+        )
+    else:
+        yield model.forward
+```
+
+其中：
+
+- `model.forward` 是 Python **bound method（绑定方法）**，已经绑定到当前模型实例；
+- `torch.no_grad()` 关闭 autograd 反向图记录，符合推理路径；
+- `torch.compile(...)` 返回一个可调用包装器；执行到这一行时并不等于已经用真实输入完成全部编译；
+- `fullgraph=True` 要求 Dynamo 尽量把该调用形成一个完整 compiler graph，不能随意 graph break 后悄悄退回 Python；
+- `dynamic=False` 针对当前静态规格特化，这与按 bucket 捕获相匹配；
+- `num_tokens` 与 `tp_group` 是为了满足通用 patch 接口而保留的参数，当前 `patch_model_npu` 函数体没有使用它们。
+
+若 `enable_compile=False`，这里直接 `yield model.forward`。后面仍会执行两次 NPU warmup 和一次 NPUGraph capture，只是少了 compiler graph 这一层。
+
+##### 第四步：`npugraph_ex` backend 到底是什么
+
+[`get_compiler_backend("npugraph_ex")`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/utils/common.py#L969-L995) 在 NPU 环境中并不返回字符串 `"npugraph_ex"`，而是构造 TorchAir backend callable：
+
+```python
+compiler_config = CompilerConfig()
+compiler_config.mode = "reduce-overhead"
+compiler_config.debug.run_eagerly = True
+npu_backend = torchair.get_npu_backend(compiler_config=compiler_config)
+return npu_backend
+```
+
+**TorchAir** 是连接 PyTorch compiler graph 与昇腾图/算子执行栈的编译适配层。`torchair.get_npu_backend(...)` 返回一个符合 `torch.compile` backend 协议的函数。按照 TorchAir 的接口，这个 backend 会接收：
+
+```text
+gm: torch.fx.GraphModule
+example_inputs: 当前这次调用的示例输入
+```
+
+**FX GraphModule** 是“图节点 + 模块属性”的 Python 对象：节点描述 `linear`、attention、reshape 等算子及其数据依赖，不是 NPU Stream 上的任务队列。TorchAir backend 再执行 decomposition/AOT 处理，将 FX 图转换成 NPU concrete graph/可执行 callable。官方 TorchAir 的 [`npu_fx_compiler.py`](https://gitee.com/ascend/torchair/blob/2640db9816afa31fa933cd32e8e51ba94cdeaf87/python/torchair/npu_fx_compiler.py#L831-L928) 可以看到 `GraphModule + example_inputs -> NpuGraphConverter -> inference callable` 这条主线。
+
+配置项的含义：
+
+- `mode="reduce-overhead"`：目标偏向减少重复 Host/launch 开销，适合与图执行路径配合；
+- `debug.run_eagerly=True`：TorchAir 上游将它描述为在 graph compiler 执行前先 eager 执行 FX graph。这里的 eager 指 TorchAir 对 FX 图的预执行/调试路径，**不是** SGLang 的 `EagerRunner` fallback，也不等于关闭 `torch.compile`。
+
+##### 第五步：为什么说“编译发生在第一次 warmup 调用”
+
+`capture_one_shape()` 中的 `run_once()` 最终执行：
+
+```python
+out = forward(
+    forward_batch.input_ids,
+    forward_batch.positions,
+    forward_batch,
+)
+```
+
+当 `forward` 是 compiled callable 时，时间线是：
+
+```text
+创建 compiled callable
+  torch.compile(model.forward, ...)
+  # 此时还没有调用真实的静态 ForwardBatch
+
+warmup #1 第一次调用 forward(...)
+  -> TorchDynamo 观察 Python bytecode 和 tensor 操作
+  -> 为当前输入建立 FX GraphModule
+  -> 建立 guard
+  -> 调用 TorchAir backend(gm, example_inputs)
+  -> TorchAir 转换/准备 NPU callable
+  -> 执行并得到本次 warmup 输出
+
+warmup #2 再次调用同一个 forward(...)
+  -> 输入满足 guard
+  -> 通常复用已生成的 compiler artifact
+  -> 支付仍残留的 kernel load、allocator/workspace 等首次开销
+
+capture forward 第三次调用
+  -> 在 torch.npu.graph(...) 内执行趋于稳态的 compiled callable
+  -> NPUGraph 记录它产生的 Device 任务提交
+```
+
+**Guard（守卫条件）** 是 compiled artifact 的适用条件，例如 tensor 类型、维度/shape、某些模块状态是否与编译时一致。若条件不满足，`torch.compile` 可能重编译或失效；SGLang 用固定 bucket、静态 view 和 `dynamic=False`，就是尽量让 capture 时命中同一份 artifact。
+
+因此“编译 warmup”的本质不是预热 NPUGraph，而是：**在进入 NPUGraph capture 前，先调用 compiled callable，让 Dynamo/TorchAir 的抽图、转换、编译和首次执行成本发生在 graph context 外。**
 
 三者可以画成：
 
