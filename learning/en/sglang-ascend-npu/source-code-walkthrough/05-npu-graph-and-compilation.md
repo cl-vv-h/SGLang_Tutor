@@ -157,7 +157,31 @@ classDiagram
 
 ### 6.1 Buckets and Static Buffers
 
-A bucket is a preselected capture size. With `[1, 2, 4, 8]`, a live batch of 5 can be padded to 8 and use the size-8 graph.
+Keep **batch size** and **bucket** distinct:
+
+- **Batch size** is the number of requests/sequences in one forward; source code abbreviates it as `bs`.
+- A **batch-size bucket** is a preselected reusable execution specification keyed by one discrete batch size.
+- `capture_bs` is the list of batch sizes to capture, such as `[1, 2, 4, 8]`.
+
+Therefore, `bs` expands to **batch size**, not “bucket size.” In `for bs in capture_bs`, the same integer has two related roles:
+
+```text
+bs = 8
+  role 1: execute this graph at batch size 8
+  role 2: select the batch-size=8 bucket/ShapeKey
+```
+
+For a live batch:
+
+```text
+raw_bs = 5
+capture_bs = [1, 2, 4, 8]
+
+selected bs = 8
+graph_key = ShapeKey(size=8)
+```
+
+The five real requests are padded to captured batch size 8 and use the graph keyed by 8. A bucket is not a container holding eight batches; the value 8 is the batch size supported by that graph.
 
 `DecodeInputBuffers` owns stable maximum-size buffers including input IDs, positions, request-pool indices, sequence lengths, cache locations, and attention/speculative metadata. Smaller captures use prefix views of these buffers.
 
@@ -295,7 +319,7 @@ for bs in reversed(self.capture_bs):
 
 | Variable | Type | Meaning |
 |---|---|---|
-| `bs` | Python `int` | Current capture bucket |
+| `bs` | Python `int` | Captured batch size of this graph; also its batch-size-bucket key |
 | `self.compile_bs` | `list[int]` | Buckets allowed to use `torch.compile` |
 | `bs in self.compile_bs` | Python `bool` | The `enable_compile` argument |
 | `self.model_runner.model` | `torch.nn.Module` | Loaded SGLang model |
@@ -465,9 +489,11 @@ Python executes `forward_fn()` during capture; NPUGraph records the resulting NP
 
 ## 7. Replay With a Live ForwardBatch
 
-### 7.1 Eligibility and Padding
+### 7.1 Eligibility
 
 [`can_run_graph`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L502-L553) rejects incompatible dynamic features and computes a key.
+
+### 7.2 Padding to a Captured Batch Size
 
 For raw batch 5 and buckets `[1,2,4,8]`, `load_batch`:
 
@@ -477,40 +503,311 @@ For raw batch 5 and buckets `[1,2,4,8]`, `load_batch`:
 4. replays size 8;
 5. slices the output back to five valid rows.
 
-### 7.2 Why Copy Then Replay Is Safe
+### 7.3 `replay_with_input_update`: How Dynamic Sequence Lengths Are Updated
 
-```python
-self.buffers.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
-output = self.backend.replay(graph_key, forward_batch)
-```
+The short answer is:
 
-Both are normally submitted to the same current Stream:
+> `replay_with_input_update` is an **SGLang NPU-backend wrapper**, not a same-named native `torch.npu.NPUGraph` method. It sends fresh Host-side attention-length attributes to `NPUGraph.update(...)`, then replays the same captured graph. It neither creates a new graph nor reruns the complete Python `model.forward`.
+
+#### 7.3.1 Why `seq_lens` Cannot Remain Fixed at Capture Time
+
+`seq_lens` describes the current sequence/KV length of every request:
 
 ```text
-copy live input -> static buffer
-  -> replay reads static buffer
-  -> downstream sampling reads static output
+decode step 1: [10, 25, 7]
+decode step 2: [11, 26, 8]
 ```
 
-No Host synchronization is needed between them because same-Stream order carries the dependency.
+Batch size may remain 3, but each generated token extends the readable KV region. These lengths affect valid KV-cache extent, fused-attention work, tiling/dispatch parameters, and whether a padded slot is valid.
 
-### 7.3 Updating NPU Sequence-Length Attributes
+There are two different kinds of dynamic input:
 
-[`NPUGraphRunner.execute`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) calls `replay_with_input_update` for supported attention paths.
+| Dynamic value | Typical carrier | Update mechanism |
+|---|---|---|
+| Device-tensor contents such as `input_ids` and `positions` | Fixed-address NPU tensor | Write the static buffer |
+| Operator keyword/Host attributes such as `actual_seq_lengths_kv` | Python `list[int]` or CPU tensor | `NPUGraph.update(cpu_update_input=...)` |
 
-[`NPUCudaGraphBackend`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L145-L177) runs:
+For fused attention, a sequence length may be a Host-side keyword embedded in the captured dispatch record rather than only data at a fixed Device-tensor address. Updating `DecodeInputBuffers.seq_lens` does not automatically rewrite that copied Host attribute.
+
+#### 7.3.2 Difference From Plain `replay()`
+
+The ordinary NPU-backend [`replay()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L136-L143) is:
 
 ```python
+def replay(self, shape_key, static_forward_batch, **kwargs):
+    self._graphs[shape_key].replay()
+    return self._outputs[shape_key]
+```
+
+`static_forward_batch` exists for the common backend interface; this NPU implementation does not inspect it. Plain replay uses captured tasks with their existing Host attributes.
+
+[`replay_with_input_update()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L145-L177) first patches supported captured-task parameters:
+
+| Property | `replay()` | `replay_with_input_update()` |
+|---|---|---|
+| Uses the same `NPUGraph` | Yes | Yes |
+| Recaptures | No | No |
+| Static Device tensors | Runner updates them before the call | Same |
+| Captured Host keyword | Unchanged | Patched through `graph.update(...)` |
+| Typical use | Fully reusable task parameters | Per-step FIA KV lengths |
+| Extra machinery | Direct replay | Host thread, update Stream, ExternalEvent |
+
+“Input update” therefore does not replace every model input tensor. It rebinds captured operator kwargs explicitly supported by torch_npu.
+
+#### 7.3.3 How the Caller Builds Current Lengths
+
+The standard path in [`NPUGraphRunner.execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) is:
+
+```python
+if forward_batch.forward_mode.is_target_verify():
+    seq_lens_cpu = forward_batch.seq_lens.cpu() + self.captured_req_width
+    seq_lens = seq_lens_cpu.tolist() + [0] * (self.bs - self.raw_bs)
+else:
+    seq_lens = forward_batch.seq_lens.cpu().tolist() + [0] * (
+        self.bs - self.raw_bs
+    )
+
+output = self.backend.replay_with_input_update(
+    graph_key,
+    seq_lens=seq_lens,
+    attr_name=self._get_update_attr_name(),
+    attr_type=self._get_update_attr_type(),
+)
+```
+
+- `forward_batch.seq_lens` is the live length tensor.
+- `.cpu().tolist()` materializes the lengths as a Host list for `cpu_update_input`.
+- `raw_bs` is the number of real requests.
+- `self.bs` is the padded captured batch size.
+- Zeroes fill synthetic padding slots.
+- Target verify adds `captured_req_width`, accounting for the verification width passed to attention.
+
+Example:
+
+```text
+raw_bs = 3
+self.bs = 4
+live seq_lens = [10, 25, 7]
+
+ordinary decode:
+  [10, 25, 7, 0]
+
+target verify with captured_req_width = 4:
+  [14, 29, 11, 0]
+```
+
+The final zero belongs to the fourth synthetic request.
+
+#### 7.3.4 `attr_name` and `attr_type`
+
+[`NPUGraphRunner._init_arch_map()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L120-L168) declares:
+
+| Path | `attr_name` | Meaning |
+|---|---|---|
+| MLA | `actual_seq_lengths_kv` | Actual readable KV length per request |
+| MHA | `context_lens` | Context length per request |
+| TARGET_VERIFY | `actual_seq_kvlen` | Actual KV length for verification attention |
+
+The current selector chooses the TARGET_VERIFY name for listed v2 architectures and otherwise selects the MLA name on this path. The MHA mapping exists as part of the reusable runner contract; dictionary presence alone does not mean every model reaches every entry.
+
+`attr_type` is not a `torch.dtype`. It is a representation marker:
+
+```python
+self.attr_type = {
+    AttentionArch.MLA: [],
+    AttentionArch.MHA: torch.Tensor(),
+    "TARGET_VERIFY": [],
+}
+```
+
+The backend checks:
+
+```python
+if isinstance(attr_type, torch.Tensor):
+    seq_lens = torch.from_numpy(np.array(seq_lens).astype(np.int32))
+```
+
+- `[]` keeps `list[int]`.
+- `torch.Tensor()` converts it to a CPU `torch.int32` tensor.
+- It is not moved to NPU; the API still calls it `cpu_update_input`.
+
+#### 7.3.5 The `cpu_update_input` Structure
+
+The ordinary calling convention becomes:
+
+```python
+cpu_update_input = [{attr_name: seq_lens}]
+```
+
+Its conceptual type is:
+
+```text
+list[dict[str, list[int] | torch.Tensor]]
+```
+
+For MLA:
+
+```python
+[
+    {
+        "actual_seq_lengths_kv": [10, 25, 7, 0],
+    }
+]
+```
+
+Why an outer list? One captured graph can contain multiple updatable fused-attention tasks. If current torch_npu receives one dictionary, it copies that dictionary for all recorded updatable tasks, allowing ordinary decode to apply the same batch lengths to every attention layer.
+
+The second calling convention supplies multiple dictionaries directly. An EAGLE draft graph can build per-speculative-step values:
+
+```python
+seq_lens_for_each_draft_step = [
+    [11, 26, 8, 0],
+    [12, 27, 9, 0],
+    [13, 28, 10, 0],
+]
+cpu_update_input = [
+    {attr_name: step_seq_lens}
+    for step_seq_lens in seq_lens_for_each_draft_step
+]
+
+self.backend.replay_with_input_update(
+    shape_key,
+    seq_lens=None,
+    cpu_update_input=cpu_update_input,
+)
+```
+
+Thus the two backend contracts are:
+
+1. `seq_lens + attr_name + attr_type`: wrap one update dictionary.
+2. Direct `cpu_update_input`: caller supplies multiple task/step updates.
+
+#### 7.3.6 Why Capture Requires `auto_dispatch_capture=True`
+
+SGLang captures with:
+
+```python
+with torch.npu.graph(
+    graph,
+    pool=self._pool,
+    stream=self._capture_stream,
+    auto_dispatch_capture=True,
+):
+    out = forward_fn()
+```
+
+This flag makes torch_npu enter `_GraphDispatchMode` in [`graphs.py`](https://gitee.com/ascend/pytorch/blob/master/torch_npu/npu/graphs.py#L630-L898). The current implementation specially intercepts:
+
+```text
+npu_fused_infer_attention_score
+npu_fused_infer_attention_score.out
+```
+
+Other operators execute normally. `NPUGraph.update` is therefore not a generic editor for arbitrary graph nodes; its central current target is an auto-dispatch-recorded fused infer attention task.
+
+For each supported FIA call during capture, torch_npu conceptually:
+
+```text
+1. selects/converts to the out variant
+2. prepares maximum workspace and fixed outputs
+3. creates an ExternalEvent
+4. calls graph_task_group_begin(stream)
+5. invokes FIA
+6. calls graph_task_group_end(stream) to obtain a handle
+7. stores a _GraphDispatchRecord
+```
+
+| Record field | Meaning |
+|---|---|
+| `handle` | Runtime handle for the updatable graph-task group |
+| `args`/`kwargs` | Captured FIA arguments |
+| `op_cache_entry` | Callable used to rebuild/update the task |
+| `event` | Dependency between update and replay Streams |
+
+Tensor arguments are retained through weak references; non-tensor keywords are generally deep-copied. That is why a captured Host list such as `actual_seq_lengths_kv` needs explicit replacement.
+
+Without `auto_dispatch_capture=True`, [`NPUGraph.update()`](https://gitee.com/ascend/pytorch/blob/master/torch_npu/npu/graphs.py#L1075-L1087) raises an error.
+
+#### 7.3.7 What `graph.update()` Does Inside torch_npu
+
+SGLang calls:
+
+```python
+graph.update(cpu_update_input=cpu_update_input)
+```
+
+`NPUGraph.update()` enters `_GraphDispatchMode.update_capture_record()`. For each captured FIA record:
+
+```text
+enter the dedicated update_stream
+  -> graph_task_update_begin(update_stream, record.handle)
+  -> overwrite selected keys in record.kwargs
+  -> invoke record.op_cache_entry with old args and new kwargs
+  -> graph_task_update_end(update_stream)
+  -> record.event.record(update_stream)
+```
+
+Reinvoking `op_cache_entry` inside the runtime update markers rebuilds/patches that captured task group. It does not run the complete model's Python forward and does not create a new `ShapeKey -> NPUGraph`.
+
+```text
+after capture:
+  FIA task handle H
+  kwargs.actual_seq_lengths_kv = capture-time lengths
+
+after update:
+  same handle H and same NPUGraph
+  kwargs.actual_seq_lengths_kv = current-request lengths
+```
+
+Graph topology, weights, bucket, and static tensor-address contracts do not become arbitrarily dynamic.
+
+#### 7.3.8 Why a Host Thread Starts Immediately Before Replay
+
+The SGLang backend runs:
+
+```python
+graph = self._graphs[shape_key]
+
 def _update():
+    self._device_module.set_device(self._device_id)
     graph.update(cpu_update_input=cpu_update_input)
 
 thread = threading.Thread(target=_update)
 thread.start()
 graph.replay()
 thread.join()
+return self._outputs[shape_key]
 ```
 
-The thread is a Host thread invoking the NPUGraph update API, not an NPU Stream and not attention computation. Only attributes supported by the graph/runtime contract can be updated; this is not arbitrary dynamic shape mutation.
+- A new Python thread should not assume it inherited the main thread's current NPU device, so it calls `set_device`.
+- `graph.update()` patches FIA tasks on torch_npu's dedicated `update_stream`.
+- The main thread does not join first; it immediately starts replay.
+- An `ExternalEvent` inserted during capture makes the corresponding replay task wait for the update Stream.
+- Update completion records that Event on `update_stream`.
+- `thread.join()` ensures the Host update thread ends before this method returns.
+
+The dependency is therefore:
+
+```text
+Host update thread:
+  graph.update()
+      -> update_stream patches FIA task
+      -> records ExternalEvent
+
+Host main thread:
+  graph.replay()
+      -> replay stream reaches Event wait
+      -> waits for update-stream record
+      -> executes FIA with new lengths
+```
+
+`threading.Thread` only launches Host APIs concurrently. The captured `ExternalEvent` orders the two NPU Streams.
+
+#### 7.3.9 Paths That Do Not Use It
+
+The current standard `NPUGraphRunner.execute()` uses plain `backend.replay(...)` for DeepSeek DSA or DeepSeek v4 configurations and `replay_with_input_update(...)` for the shown other paths. This only indicates a different captured-input/attention contract; it does not imply those models have no dynamic lengths.
+
+Not every NPU operator needs or supports this method. It applies when a request-varying value was captured as a supported operator task's Host parameter and torch_npu auto-dispatch recorded an update handle for it.
 
 ### 7.4 Why Returning the Stored Output Is Correct
 
@@ -618,7 +915,7 @@ Piecewise capture provides smaller regions and dynamic boundaries, but adds boun
 A captured graph is normally a runtime optimization artifact owned by the current serving process, not part of the model weights. Recapture may be required when any of these changes:
 
 - the captured hidden-state mode;
-- graph configuration or bucket sizes;
+- graph configuration or the batch-size bucket set;
 - model or LoRA execution variant;
 - Device storage addresses;
 - attention backend or kernel path;
@@ -709,7 +1006,7 @@ capture()
 `capture_one_shape()` performs:
 
 ```text
-bucket size
+captured batch size (the bucket key)
   -> capture_prepare(size)
        -> take prefix views from DecodeInputBuffers
        -> construct a static ForwardBatch
@@ -721,7 +1018,7 @@ bucket size
 
 | Object | Type and role |
 |---|---|
-| `size`/`bs` | Python `int`; current capture bucket |
+| `size`/`bs` | Python `int`; for ordinary decode, the graph's captured batch size and bucket key |
 | `DecodeInputBuffers` | Maximum-size `torch.Tensor` collection with stable Device storage |
 | `forward_batch` | `ForwardBatch` whose fields point to static tensor views |
 | `forward` | `model.forward` or a `torch.compile`-produced callable |
@@ -793,7 +1090,7 @@ The NPU override [`execute()`](https://github.com/sgl-project/sglang/blob/9a03be
 4. The runner chooses an attribute such as `actual_seq_lengths_kv` or `context_lens`, calls `replay_with_input_update(...)`, and replays the graph.
 5. It slices the static `LogitsProcessorOutput` to `raw_num_token` before returning it.
 
-The backend starts a Host `threading.Thread` for `graph.update(...)`, calls `graph.replay()` on the main thread, and then joins. The source does not join before replay, so this must not be explained as ordinary Python sequencing where update visibly completes first. Correctness relies on the torch_npu `NPUGraph.update/replay` coordination contract; the Host thread is not an NPU computation Stream.
+The backend starts a Host `threading.Thread` for `graph.update(...)`, calls `graph.replay()` on the main thread, and then joins. This is not an unspecified “internal guarantee.” As Sections 7.3.6–7.3.8 show, `auto_dispatch_capture` captures an `ExternalEvent.wait()` before each updateable FIA task, while `graph.update()` patches that task on a dedicated update Stream and then records the Event. Host code may therefore launch replay first, but the replay Stream cannot pass the captured wait until the update has finished. The final `thread.join()` only ensures that the Host update thread has exited before this function returns; it does not order the NPU tasks.
 
 Back in `TpModelWorker.forward_batch_generation()`:
 
@@ -880,41 +1177,53 @@ No. The mechanism is generic, while artifacts specialize to model path, rank, ad
 
 No. Python runs once during capture; runtime records the resulting NPU submissions.
 
-### 3. Why copy into static input rather than reassign a variable?
-
-Captured launches retain Device addresses. Copy changes contents at a known address; Python reassignment does not rewrite captured addresses.
-
-### 4. Why does a stored output handle contain fresh results?
+### 3. Why does a stored output handle contain fresh results?
 
 Replay rewrites its stable storage. Same-Stream consumers run afterward. Clone/copy is required only to preserve an old replay across a later overwrite.
 
-### 5. Are Event and graph interchangeable?
+### 4. Are Event and graph interchangeable?
 
 No. Events express Stream progress dependencies. Graph work still executes through Streams and needs Events for external cross-Stream producers.
 
-### 6. Are torch.compile and NPUGraph the same?
+### 5. Are torch.compile and NPUGraph the same?
 
 No. `torch.compile` builds/optimizes compiler IR; NPUGraph captures runtime launches. They may be composed.
 
-### 7. Why is decode the common target?
+### 6. Why is decode the common target?
 
 Its repeated small steps make Host/runtime launch overhead proportionally large, and its shapes are easier to bucket.
 
-### 8. Why does each TP rank capture separately?
+### 7. Why does each TP rank capture separately?
 
 Ranks have distinct weights, contexts, addresses, and communication identities, all of which are runtime graph dependencies.
 
-### 9. What is the essential difference between warmup and capture?
+### 8. What is the essential difference between warmup and capture?
 
 Warmup is ordinary execution that moves lazy initialization, compilation, kernel loading, and workspace allocation ahead of capture. It produces no replayable graph. Capture executes inside `torch.npu.graph(...)`, records Device submissions, and produces an `NPUGraph` plus a static output handle. The current per-shape NPU sequence is two ordinary warmup forwards followed by one capture forward.
 
-### 10. Is `self.warmup()` in `DecodeCudaGraphRunner.capture()` the two-forward NPU warmup?
+### 9. Is `self.warmup()` in `DecodeCudaGraphRunner.capture()` the two-forward NPU warmup?
 
 No. The current `BaseRunner.warmup()` returns for non-CUDA devices after setting `_kernel_warmed_up`. The two actual NPU model forwards live in `NPUCudaGraphBackend.capture_one()` and run separately for every `ShapeKey`.
 
-### 11. Does the first live request perform the complete capture?
+### 10. Does the first live request perform the complete capture?
 
 Not on the standard initialization path. After model, memory-pool, and attention-backend initialization, the Scheduler invokes `init_all_cuda_graphs()`. Constructing `NPUGraphRunner` captures all configured buckets. Live requests perform eligibility checks, live-to-static copies, supported attribute updates, and replay. A changed hidden-state capture contract can still trigger cleanup and recapture later.
+
+### 11. Does `bs` Mean Batch Size or Bucket Size?
+
+It means batch size. A bucket is a capture specification keyed by one discrete batch size. Mapping `raw_bs=5` to `bs=8` means padding five real requests to captured batch size 8 and selecting the batch-size=8 graph, not placing eight batches in a container.
+
+### 12. What Is the Essential Difference Between `replay_with_input_update` and `replay`?
+
+Both replay the same captured `NPUGraph`; neither recaptures. Plain `replay` reuses captured tasks unchanged. `replay_with_input_update` first calls `NPUGraph.update` to patch fresh Host keywords such as `actual_seq_lengths_kv` into FIA tasks recorded by torch_npu auto-dispatch, then replays.
+
+### 13. Why Can Replay Start Immediately After the Update Thread Instead of Waiting With `join()` First?
+
+torch_npu inserts an `ExternalEvent` wait while capturing an FIA task. The update thread patches the task on a dedicated update Stream and records the Event; replay waits when it reaches that captured wait. The Python thread only launches Host APIs—the Event orders NPU Streams. The final `join()` ensures the Host update thread exits.
+
+### 14. Can `NPUGraph.update` Modify Arbitrary Parameters, Shapes, or Operators?
+
+No. Current auto-dispatch source specially records `npu_fused_infer_attention_score` and its out variant and retains updateable task handles. Update can modify only operator kwargs explicitly recorded and supported by the runtime. It does not make topology, weight addresses, or buckets arbitrarily dynamic.
 
 ---
 
