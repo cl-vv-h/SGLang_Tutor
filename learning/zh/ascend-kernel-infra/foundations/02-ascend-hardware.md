@@ -171,6 +171,57 @@ GM 中的 A/B 矩阵 tile
 
 稳定不变的是设计原则：不要把某一款硬件的容量、核数和路径写成普适真理。Host tiling 应通过 Platform/runtime 查询目标设备资源；Device 代码应优先使用 Ascend C 的逻辑位置和官方 API 表达数据角色，再在具体目标硬件上验证容量、通路和性能。
 
+### 5.2 `A1/B1/C1`、`A2/B2/C2` 中的字母和数字到底表示什么
+
+这六个名字不是芯片型号，也不是“第一代 A 核、第二代 B 核”，而是 Ascend C `TPosition` 中服务 **Cube 矩阵计算**的逻辑位置。
+
+先把一次带 bias 的矩阵计算抽象成：
+
+```text
+Output = A @ B + Bias
+```
+
+字母表达操作数角色：
+
+| 字母 | 角色 | 直觉 |
+|---|---|---|
+| `A` | 左矩阵 | `A @ B` 左边的 tile |
+| `B` | 右矩阵 | `A @ B` 右边的 tile |
+| `C` | bias/偏置输入 | 加到矩阵乘结果上的偏置数据，不是最终输出 |
+| `CO` | Cube output | Cube 的计算/累加结果；`CO` 与 `C` 必须分开 |
+
+数字表达同一角色所处的逻辑阶段：
+
+| `TPosition` | 放什么 | 常见物理映射 | 为什么需要这一层 |
+|---|---|---|---|
+| `A1` | 左矩阵较大 tile | L1 Buffer | 从 GM 搬入后先暂存、复用 |
+| `B1` | 右矩阵较大 tile | L1 Buffer | 同上，服务右操作数 |
+| `C1` | bias 数据 | L1 Buffer 或 UB，依产品而变 | 保存还未切成计算近端小块的偏置 |
+| `A2` | 适配 Cube 的左矩阵小块 | L0A Buffer | 直接供 Cube 的 A 端读取 |
+| `B2` | 适配 Cube 的右矩阵小块 | L0B Buffer | 直接供 Cube 的 B 端读取 |
+| `C2` | 适配近端 bias 容量的小块 | BiasTable/BT Buffer 或 L0C，依产品而变 | 供矩阵计算近端 bias 通路使用 |
+| `CO1` | 分块矩阵计算的累加结果 | L0C Buffer | 保存 Cube 的小块结果/累加值 |
+| `CO2` | 原始矩阵语义下的最终结果 | GM 或 UB，依产品而变 | 进入写回或后处理阶段 |
+
+因此 `C1/C2` 不是 `CO1/CO2` 的缩写，也不能把 `C2` 简单解释为“矩阵乘输出的第二级缓存”。官方术语中 `C1/C2` 主要描述 **bias 操作数**，`CO1/CO2` 才描述 **Cube 输出**。
+
+一条概念性数据通路可以写成：
+
+```text
+A: GM -> A1(L1) -> A2(L0A) --+
+B: GM -> B1(L1) -> B2(L0B) --+-> Cube/Mmad -> CO1(L0C) -> CO2/后处理 -> GM
+Bias: GM -> C1(L1或UB) -> C2(BT或L0C) --+
+```
+
+这张图只表达角色，不保证每个 API 都显式走完每个位置：
+
+- 无 bias 的 MatMul 不需要 `C1/C2`；
+- Ascend C 高阶 `Matmul` API 可能替开发者管理部分搬运、切块和近端 buffer；
+- Vector 算子通常走 `GM -> VECIN/VECCALC/VECOUT(UB) -> GM`，根本不会使用这套 A/B/C 位置；
+- 不同产品上最容易变化的是 `C1/C2/CO2` 等位置的物理映射，所以必须查目标 CANN 版本的映射表。
+
+“1”和“2”应理解为逻辑数据通路中的阶段，不能机械套用成通用计算机里的 L1/L2 Cache。这里的 `A1` 恰好常映射 L1、`A2` 恰好映射 L0A，但 `C1/C2` 的跨产品差异已经说明：`TPosition` 的目的正是隐藏一部分物理架构差异。
+
 ## 6. AI Core、AIC、AIV 的关系
 
 在分离模式下，官方术语通常是：
@@ -287,9 +338,18 @@ Ascend C 用 `TPosition` 抽象角色，例如 `VECIN`、`VECOUT`、`A1`、`A2`�
 
 是否不同硬件不一样？是的。不同架构可能改变 AIC/AIV 数量、UB/L1/L0 容量、合法搬运路径、对齐要求、FixPipe 能力和 `TPosition -> physical memory` 映射。因此文档和课程可以教稳定概念，但生产代码必须查目标硬件规格，并在 Host tiling 中用 Platform/runtime API 获取资源，而不是写死某个型号的数值。
 
+### 7. `C1/C2` 和 `CO1/CO2` 是不是同一份矩阵结果的不同阶段？
+
+**答案：**不是。`C1/C2` 主要表示 Cube 的 bias 输入角色，`CO1/CO2` 表示 Cube output。把 `C` 和 `CO` 混为一谈，会直接把输入数据通路和输出数据通路读反。
+
+对于 `Output=A@B+Bias`，`A1/A2` 与 `B1/B2` 分别承载左右矩阵从较大中转 tile 到计算近端小块的角色；存在 bias 时，`C1/C2` 承载 bias 的相应阶段；`Mmad/Matmul` 产生的分块累加结果则进入 `CO1`，再经 `CO2`、FixPipe、UB 或 GM 等目标架构允许的输出通路。
+
+它们也不是所有 kernel 必须手写的固定流水。无 bias 时没有 C 输入；高阶 Matmul API 可封装部分资源管理；不同产品上 `C1/C2/CO2` 的物理映射会变化。开发时应先以 `TPosition` 理解逻辑角色，再用目标产品文档确认物理位置和合法搬运路径。
+
 ## 官方资料
 
 - [Ascend C 8.5：基本硬件架构与术语](https://www.hiascend.com/document/detail/zh/canncommercial/850/opdevg/Ascendcopdevg/atlas_ascendc_10_0008.html)
 - [Ascend C：计算单元](https://www.hiascend.com/document/detail/zh/canncommercial/80RC3/developmentguide/opdevg/Ascendcopdevg/atlas_ascendc_10_0009.html)
 - [Ascend C：存储与搬运单元](https://www.hiascend.com/document/detail/zh/canncommercial/80RC3/developmentguide/opdevg/Ascendcopdevg/atlas_ascendc_10_0010.html)
 - [Ascend C：逻辑位置与物理存储映射](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0004.html)
+- [Ascend C 8.5 术语表：A1/B1/C1、A2/B2/C2 与 CO1/CO2](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850alpha002/opdevg/Ascendcopdevg/atlas_ascendc_10_00013.html)

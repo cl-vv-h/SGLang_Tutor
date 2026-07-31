@@ -44,16 +44,23 @@
 | Term | Definition |
 |---|---|
 | AI Core | Ascend NPU's compute unit (Da Vinci architecture) |
-| AIC | AI Core — general compute core |
-| AIV | AI Vector Core — vector compute unit |
+| AIC | Cube Core in an AI Core separation-mode group |
+| AIV | Vector Core in an AI Core separation-mode group |
 | Cube Unit | Matrix multiply-accumulate unit within AI Core |
 | Vector Unit | Element-wise/SIMD unit within AI Core |
 | Scalar Unit | Scalar/control flow unit within AI Core |
 | MTE | Memory Transfer Engine — DMA unit |
 | HBM | High Bandwidth Memory — main device memory (Global Memory / GM) |
 | L2 | On-chip L2 cache between HBM and AI Cores |
-| L1 | Per-core L1 buffer |
-| UB | Unified Buffer — per-core scratchpad (L0 equivalent) |
+| L1 | On-chip staging/reuse buffer, commonly serving larger Cube tiles |
+| L0A/L0B | Near-Cube buffers for left/right matrix operand blocks |
+| L0C | Cube accumulator/result buffer |
+| UB | Unified Buffer — main on-chip Vector input/output/temporary workspace; it is not an alias for L0A/L0B/L0C |
+| A1/B1 | Ascend C logical locations for larger left/right Cube operands, commonly mapped to L1 |
+| C1 | Logical bias-input location mapped to L1 or UB depending on product; not Cube output |
+| A2/B2 | Near-Cube logical locations for left/right blocks, commonly mapped to L0A/L0B |
+| C2 | Near-compute logical bias-input location mapped to BT or L0C depending on product |
+| CO1/CO2 | Cube-output logical stages: block-wise L0C result and final GM/UB result, respectively, subject to product mapping |
 | HCCS | Huawei Cache Coherence System — inter-chip interconnect |
 | RoCE | RDMA over Converged Ethernet — cross-node networking |
 
@@ -61,10 +68,11 @@
 
 | Term | Definition |
 |---|---|
+| JIT | Just-In-Time compilation: compile a kernel variant when an uncached specialization is first needed, then reuse matching in-process or disk cache entries |
 | SPMD | Single Program Multiple Data — same code, different data per core |
 | Program | The full computation specification |
-| Grid | Distribution of work across physical cores |
-| Tile | A chunk of data processed by one core in one iteration |
+| Grid | Logical set of Triton program instances; runtime maps them onto physical cores |
+| Tile | A chunk of data processed by one program instance or one of its internal iterations |
 | BlockDim | Number of AI Cores allocated for a kernel launch |
 | Tiling | Partitioning computation into tiles for parallel execution |
 | Pipeline | Overlapping data movement with computation |
@@ -79,7 +87,8 @@
 | Term | Definition |
 |---|---|
 | GlobalTensor | Ascend C: view of data in Global Memory (HBM) |
-| LocalTensor | Ascend C: view of data in UB (on-chip buffer) |
+| LocalTensor | Ascend C: typed view of on-chip Local Memory such as UB/L1/L0 according to its logical position |
+| TPosition | Ascend C logical data-path location such as VECIN, A1, A2, C1, C2, CO1, or CO2 |
 | TPipe | Ascend C: pipeline abstraction connecting stages |
 | TQue | Ascend C: queue connecting producer to consumer in a pipeline |
 | Format FRACTAL_NZ | Ascend's specialized matrix layout for Cube Unit efficiency |

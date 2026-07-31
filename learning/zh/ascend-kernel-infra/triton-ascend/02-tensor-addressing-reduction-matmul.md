@@ -256,7 +256,109 @@ pid_n = pid % num_pid_n
 
 例如 `MatMul + Bias + Activation` 可能是 CV 融合候选。收益来自不写回中间矩阵，但需要处理 AIC/AIV 数据交换、负载比例和同步。
 
-## 10. Tile 选择的约束
+## 10. Triton 中为什么没有 `TPosition::A1`，它怎样使用 UB/L1/L0
+
+先给结论：
+
+> 普通 Triton kernel 不需要、也通常不能像 Ascend C 那样给每个 `LocalTensor` 显式写 `TPosition::A1`、`VECIN`。开发者写 tile 级数据流，Triton-Ascend compiler 在 lowering、bufferization 和后端 codegen 中选择 UB、L1、L0A/L0B/L0C 等物理地址空间并生成搬运。但开发者仍必须在容量、tile、对齐和性能层面关心这些存储。
+
+### 10.1 两种编程模型的控制边界
+
+| 问题 | Ascend C | Triton-Ascend |
+|---|---|---|
+| GM 输入 view | `GlobalTensor<T>` | pointer 参数 + `tl.load` |
+| 本地存储角色 | `LocalTensor<T>`、`TQue<TPosition::...>` | `tl.tensor`/SSA block value；源码通常不声明物理位置 |
+| Cube 输入通路 | 可显式写 A1/B1、A2/B2，或交给高阶 Matmul API | 写 `tl.dot` 与 tile shape，backend 选择 Cube lowering 和存储 |
+| Vector 临时数据 | 显式 VECIN/VECCALC/VECOUT、Queue/TBuf | 编译器通常把 block 临时值规划到 UB 等资源 |
+| 搬运/同步 | `DataCopy`、Queue、Event/Barrier 等显式 API | 由 `tl.load/store` 语义和 compiler pass 生成大部分搬运/同步 |
+| 资源失败 | 开发者的 buffer/通路配置错误 | 常表现为 UB overflow、非法 layout/tile 或 backend lowering 失败 |
+
+`tl.tensor` 也不能直接等同于“一块已经分配好的 UB LocalTensor”。它首先是 Triton IR 中的 SSA value：compiler 可能让它驻留本地存储、融合掉、重算、切成内部循环，或根据后续 `tl.dot`/Vector 使用选择不同数据通路。
+
+### 10.2 编译器并没有忽略硬件位置
+
+Triton 源码层不写 `TPosition`，不代表 backend 只有一个模糊的 “local memory”。固定版本的 [`ascend_ir.cc`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/third_party/ascend/ascend_ir.cc#L461-L466) 明确向编译器 Python binding 暴露：
+
+```text
+AddressSpace::L1
+AddressSpace::UB
+AddressSpace::L0A
+AddressSpace::L0B
+AddressSpace::L0C
+```
+
+同时，Triton tensor/memory op 会经过 TTIR 到 Linalg/Ascend IR 的 lowering，`triton::DotOp` 也会被转换成矩阵乘语义。控制权实际发生了转移：
+
+```text
+Ascend C:
+  开发者明确声明 A1/A2/B1/B2/CO1 等逻辑位置
+
+Triton:
+  开发者声明 load -> tile compute/tl.dot -> store
+  compiler/backend 决定物理 address space、内部 tile 和搬运
+```
+
+硬件存储没有消失，只是不再由普通 Triton 源码逐 buffer 指定。
+
+### 10.3 Vector Add 与 MatMul 分别会怎样理解
+
+Vector Add：
+
+```python
+x = tl.load(x_ptr + offsets, mask=mask)
+y = tl.load(y_ptr + offsets, mask=mask)
+z = x + y
+tl.store(out_ptr + offsets, z, mask=mask)
+```
+
+概念数据通路通常是：
+
+```text
+GM pointers
+  -> backend 生成 GM 到 UB 的搬运
+  -> Vector 在 UB/相关本地资源上完成加法
+  -> backend 生成写回 GM
+```
+
+开发者没有写 `VECIN`，但 `BLOCK_SIZE`、dtype、同时存活的 `x/y/z`、mask 和 multibuffer 会共同决定 UB 压力。
+
+MatMul：
+
+```python
+a = tl.load(a_ptrs, mask=...)
+b = tl.load(b_ptrs, mask=...)
+acc = tl.dot(a, b, acc)
+```
+
+概念数据通路是：
+
+```text
+GM A/B tiles
+  -> backend 为 Cube 规划 L1 与 L0A/L0B 等输入层次
+  -> Cube 产生/累加 L0C 结果
+  -> 必要的 Vector 后处理与输出写回
+```
+
+开发者没有显式写 `A1/A2/B1/B2/CO1`；`tl.dot`、tile shape、dtype、layout 与 target backend 给了 compiler 足够的意图。`C1/C2` 是 bias 输入位置，只有生成的矩阵路径确实融合 bias 时才有对应资源需求。A/B/C/CO 的完整含义见[硬件基础第 5.2 节](../foundations/02-ascend-hardware.md#52-a1b1c1a2b2c2-中的字母和数字到底表示什么)。
+
+### 10.4 Triton 开发者仍然必须关心什么
+
+不手写 `TPosition` 不等于可以不懂硬件。至少需要关心：
+
+1. **tile 容量**：`BLOCK_M/N/K`、accumulator、mask、临时值和多缓冲能否放入目标 UB/L1/L0；
+2. **计算单元**：`tl.dot` 是否形成合适的 Cube matmul，逐元素/归约是否主要落到 Vector；
+3. **对齐与 layout**：尾轴、stride、dtype 和矩阵基本块是否满足高效搬运与 Cube 要求；
+4. **值的 live range**：融合过多中间 block 会让它们同时存活，导致 UB/L0C 压力；
+5. **compiler options**：`num_stages`、`multibuffer`、CV fusion 选项会改变本地 buffer 与流水；
+6. **验证工具**：通过 IR dump、编译日志、UB memory report 和 profiler 检查实际 lowering，而不是仅凭 Python 源码猜测。
+
+Triton-Ascend 还提供少量更硬件化的扩展，例如某些 `gather_out_to_ub`/`scatter_ub_to_out` 语义和 compile hint。它们允许高级开发者向 backend 表达更多意图，但仍不是在 Python kernel 中直接创建 `TQue<TPosition::A1>`。
+
+因此两种技术栈的差别可以压缩成：
+
+> Ascend C 要你更直接地管理“数据放在哪、什么时候搬”；Triton 要你准确描述“按什么 tile 读、算、写”，再对 compiler 自动选择的存储与流水负责验证和调优。
+
+## 11. Tile 选择的约束
 
 对矩阵乘，`BM/BN/BK` 同时影响：
 
@@ -270,7 +372,7 @@ pid_n = pid % num_pid_n
 
 没有脱离 shape 分布的“最佳 BLOCK”。LLM decode 常有很小的 M，prefill 则有较大 M；同一个 config 不一定适合二者。
 
-## 11. 从简单到复杂的练习顺序
+## 12. 从简单到复杂的练习顺序
 
 1. 1D vector add：掌握 pid、offset、mask；
 2. 2D add：掌握 stride 和广播地址；
@@ -280,7 +382,7 @@ pid_n = pid % num_pid_n
 6. fused matmul epilogue：理解 CV fusion 价值；
 7. attention：组合 matmul、softmax、mask 与 streaming reduction。
 
-## 12. 本章检查点与参考答案
+## 13. 本章检查点与参考答案
 
 ### 1. 为什么 shape 相同的两个 tensor 可能需要不同地址计算？
 
@@ -321,6 +423,14 @@ RMSNorm 的平方和可以用 `other=0`，但分母仍必须除以真实维度�
 Prefill 一次处理大量 prompt token，matmul 的 M 通常较大，有足够输出 tile 填满多核，适合较大的 BM/BN 来提高数据复用和吞吐。Decode 每个活跃序列通常只产生一个新 token，M 很小；过大的 BM 会产生大量 padding 和无效计算，或让可并行 tile 数不足。
 
 Decode 更关注单步延迟、小 M 利用率和减少 launch，prefill 更关注大矩阵吞吐。即便 K/N 相同，也常需不同 config、persistent 策略或直接选择不同 vendor kernel。最佳选择必须覆盖真实 batch 和并发分布，而不是只测一个方形矩阵。
+
+### 6. Triton kernel 不写 `TPosition`，是否意味着无需理解 UB、L1 和 L0？
+
+**答案：**不是。普通 Triton 源码把物理位置选择交给 compiler，但 tile、dtype、layout、同时存活的中间值和流水选项仍决定能否合法、高效地使用这些资源。
+
+Vector block 通常需要 UB；`tl.dot` 的 A/B tile 与 accumulator 会触发 Cube 的 L1、L0A/L0B、L0C 规划。若 `BLOCK` 太大或融合产生太多 live values，即使源码没有任何 `TPosition`，仍会出现 UB overflow、layout 不支持或性能下降。
+
+正确工作方式是：源码层用 `tl.load/tl.dot/tl.store` 表达数据流；编译阶段用 IR、memory report 和错误信息核对 address-space/buffer 规划；运行阶段用 profiler 观察 MTE、Vector、Cube 与等待时间。只有 Ascend C 才通常要求开发者在 API 层显式写 A1/A2 等逻辑位置。
 
 ## 官方源码与文档
 

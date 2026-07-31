@@ -24,6 +24,22 @@ PipeBarrier<LocalTensor<float>> local_input_pipe;
 local_input = local_input_pipe.AllocTensor<float>();
 ```
 
+## `TPosition`: Logical Placement
+
+`TPosition` describes a tensor's role in the Device data path. It hides part of the product-specific physical-memory mapping:
+
+| Logical location | Common physical role | Meaning |
+|---|---|---|
+| `VECIN` / `VECCALC` / `VECOUT` | UB | Vector input, temporary, and output |
+| `A1` / `B1` | L1 | Larger left/right Cube operand tiles |
+| `C1` | L1 or UB | Bias input, product-dependent |
+| `A2` / `B2` | L0A/L0B | Near-Cube left/right blocks |
+| `C2` | BT or L0C | Near-compute bias block, product-dependent |
+| `CO1` | L0C | Block-wise Cube result/accumulator |
+| `CO2` | GM or UB | Final Cube output stage, product-dependent |
+
+The `C` in `C1/C2` denotes the bias-input role, while `CO` denotes Cube output. The suffix is a logical pipeline stage, not a hardware generation or an ordinary CPU L1/L2 cache number. See [Foundation 02](../foundations/02-ascend-hardware.md#a1b1c1-a2b2c2-and-co1co2) for the complete path.
+
 ## TPipe: Pipeline Framework
 
 ```cpp

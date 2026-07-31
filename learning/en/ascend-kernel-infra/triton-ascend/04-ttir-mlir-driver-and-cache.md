@@ -24,7 +24,9 @@ NPU Binary:
 
 ```python
 # Triton-Ascend caches compiled kernels
-# Cache key: (kernel_hash, grid, signature)
+# The key is derived from source/dependencies, argument specialization,
+# target/backend, compiler options, and cache-invalidating environment state.
+# A numeric launch grid is not, by itself, a reason to compile another binary.
 # Cache location: ~/.triton/cache/ (default)
 
 # Force recompile:

@@ -68,7 +68,7 @@
 | `solve_tril` | 下三角矩阵求解/求逆相关阶段；`tril` 表示 lower triangular，下三角 |
 | WY / `wy_fast` | FLA chunk 递推中的紧凑中间因子构造阶段；在当前源码中主要把 `A_inv`、`k/v/beta/g` 合成后续 `chunk_h` 可复用的 `w/u` 张量 |
 | DSL | 领域专用语言；Triton 是面向并行 kernel 的 Python DSL |
-| JIT | Just-In-Time，运行时按参数编译 kernel；Triton 常用此方式 |
+| JIT | Just-In-Time（即时编译）：Python 进程运行后，首次遇到未缓存的参数 specialization 时编译 kernel 变体；命中进程内/磁盘 cache 时复用，不是每次 launch 都重编译 |
 | AOT | Ahead-Of-Time，部署前编译；Ascend C shared library 常走此路线 |
 | IR | Intermediate Representation，编译器在前端与机器代码之间使用的中间表示 |
 | TTIR | Triton IR，Triton 编译链中的核心中间表示之一 |
@@ -150,11 +150,13 @@
 | L2 Cache | 多核共享的 GM 访问缓存 |
 | L1 Buffer | 较大的片上中转/复用存储，常服务 Cube 数据 |
 | A1/B1 | Ascend C `TPosition` 中常见的 Cube A/B 操作数在 L1 阶段的逻辑位置；它描述数据角色，不应被硬编码理解为所有架构上的固定物理分区 |
+| C1 | Ascend C 中 Cube bias 输入的第一级逻辑位置，物理上可映射 L1 或 UB，依产品而变；不是 Cube output |
 | L1A/L1B | 资料或口语中有时用来描述 L1 中服务 A/B 操作数的区域或角色；不同硬件映射可能不同，初学时优先用 A1/B1 这种逻辑位置理解 |
 | L0A/L0B | Cube A/B 输入操作数的近端存储 |
 | A2/B2 | Ascend C `TPosition` 中常见的 Cube A/B 操作数在 L0 阶段的逻辑位置，通常对应 L0A/L0B 角色 |
+| C2 | Ascend C 中分块后的 Cube bias 输入逻辑位置，物理上可映射 BiasTable/BT 或 L0C，依产品而变；不要与 CO2 混淆 |
 | L0C | Cube 累加结果存储 |
-| CO1/CO2 | Cube 输出或累加结果相关的逻辑位置/阶段命名，常与 L0C、输出格式转换和写回路径相关；具体含义需看目标架构和 API 文档 |
+| CO1/CO2 | Cube output 的逻辑阶段：CO1 常对应 L0C 中的分块累加结果，CO2 常对应进入 GM 或 UB 的最终矩阵结果；具体物理映射需看目标架构 |
 | UB | Unified Buffer，Vector 输入输出和临时数据的主要片上存储 |
 
 ## E. Ascend C 数据与资源

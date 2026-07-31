@@ -72,7 +72,101 @@ def add_kernel(
 
 ## 3. `@triton.jit`
 
-`@triton.jit` 表示这个函数不是普通 Python 函数。首次遇到某组参数和 meta-parameter 时，Triton 会编译 kernel；后续满足缓存键的调用可复用编译产物。
+`JIT` 是 **Just-In-Time Compilation（即时编译）**。这里的“即时”不是“安装 Triton 时编译”，也不是“每次执行每条算术语句时编译”，而是：
+
+> Python 程序已经运行起来；当某个 Triton kernel 第一次以一种尚未编译过的参数特征被 launch 时，Triton 才为这个特征生成并编译 Device kernel。以后命中同一编译变体时直接复用。
+
+因此要把三个时刻分开。
+
+### 3.1 写下装饰器时，还没有执行 NPU kernel
+
+Python 导入模块并执行：
+
+```python
+@triton.jit
+def add_kernel(...):
+    ...
+```
+
+等价于“先定义 Python 函数，再把它交给 `triton.jit(...)`”。[`jit()`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/runtime/jit.py#L880-L936) 返回的是 `JITFunction` 包装对象。此时通常只是保存函数源码、签名、参数注解和依赖，还没有因为这一行就把 kernel 发到 NPU。
+
+这也解释了为什么被装饰后的对象不能像普通 Host 函数一样直接写：
+
+```python
+add_kernel(x, y, out, n)  # 错误：没有 grid，也不是普通 Python 调用
+```
+
+作为顶层 kernel 时应使用：
+
+```python
+add_kernel[grid](x, y, out, n, BLOCK_SIZE=256)
+```
+
+`JITFunction.__getitem__(grid)` 返回一个记住 `grid` 的 launch proxy，最终进入 `JITFunction.run(..., warmup=False)`。另一个 `@triton.jit` 函数可以在 Device 语义中调用它，但这与 Host 直接调用仍不是一回事。
+
+### 3.2 第一次 launch 内部发生什么
+
+结合 [`KernelInterface.__getitem__()` 与 `JITFunction.run()`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/runtime/jit.py#L411-L419) 以及 [`run()` 的编译/launch 分支](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/runtime/jit.py#L709-L748)，一次调用可以拆成：
+
+```text
+add_kernel[grid](...)
+  -> 取得 current NPU device 与 current stream
+  -> 把 Python 实参与函数形参绑定
+  -> 推导 signature、constexpr、specialization 和 compiler options
+  -> 计算当前变体的内存 cache key
+  -> 内存 cache 命中？
+       是：复用 CompiledKernel
+       否：进入 compiler.compile(...)
+             -> 检查磁盘 cache
+             -> 未命中才生成 TTIR、执行 lowering、调用后端编译
+             -> 保存编译产物与 metadata
+  -> 计算本次 launch 的 grid
+  -> launcher 在 current stream 上提交已编译 kernel
+```
+
+这里有两层 cache：
+
+1. `JITFunction` 的**进程内 cache**保存当前 Python 进程已经得到的 `CompiledKernel`；
+2. compiler 的**磁盘 cache**保存 IR、NPU binary、metadata 和 launcher 等产物，让新进程也可能避免完整重编译。
+
+[`compiler.compile()`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/compiler/compiler.py#L228-L393) 会把源码、target、compiler options 和会使缓存失效的环境变量等纳入编译缓存判定。完整 TTIR、MLIR、BiSheng、driver 与磁盘缓存链路见[第 04 讲](./04-ttir-mlir-driver-and-cache.md)。
+
+### 3.3 什么变化会产生新的 JIT 变体
+
+最常见的变体因素包括：
+
+- pointer 指向元素的 dtype，例如 FP16 输入与 BF16 输入；
+- `tl.constexpr` 的值，例如 `BLOCK_SIZE=256` 与 `BLOCK_SIZE=1024`；
+- backend 选择的参数 specialization，例如某些整数值或对齐属性；
+- target NPU/backend、编译选项以及会使 cache 失效的环境变量；
+- kernel 源码、被捕获的编译期全局值或依赖发生变化。
+
+反过来，**运行时 tensor shape 变化不必然重编译**。如果 `n_elements` 只是普通运行时整数，`1000` 与 `2000` 可以使用同一 binary，通过 mask 处理尾块；如果 shape 被拿来计算不同的 `BLOCK_SIZE: tl.constexpr`，才会间接选中另一个变体。
+
+`grid` 也通常是 launch 时才求值的调度规格，不会仅仅因为 program 数从 4 变成 8 就自动重编译同一 kernel。若 grid lambda 同时根据 shape 选择了不同 meta-parameter，则变化的是 meta-parameter 对应的编译变体，而不是“grid 数字本身必然进 cache key”。
+
+### 3.4 JIT、warmup 与稳定执行时间
+
+第一次正常调用的耗时可能包含：
+
+```text
+Python 参数绑定
++ JIT 编译/磁盘 cache 查询
++ launcher 或 runtime 初始化
++ kernel launch
++ Device 执行
+```
+
+后续命中热 cache 的调用通常只剩参数绑定、launch 与 Device 执行。因此不能把第一次 wall time 当成稳定 kernel latency。
+
+还要区分两种常被简称为 warmup 的操作：
+
+- `kernel.warmup(...)` 是 Triton 提供的接口；源码进入 `run(..., warmup=True)`，可以准备/编译变体而跳过实际 launch；
+- benchmark 前重复调用若干次 kernel，是工程上的运行 warmup，用来同时消化 JIT、runtime、allocator、cache 等一次性成本。
+
+二者目的相关，但不是同一个 API，也不能默认产生完全相同的 Device 状态。
+
+### 3.5 JIT 编译的不是“任意 Python”
 
 Kernel 函数里只能使用 Triton 支持的语言构造。不要期待任意 Python 对象、动态容器和运行时反射都能进入 device code。
 
@@ -297,6 +391,14 @@ Reduction 还要求选择正确的 `other`：sum 常用 0，max 常用 `-inf`。
 `grid=ceil(N/BLOCK)` 让每个逻辑 tile 对应一个 program，容易理解、负载划分直接，并且结果完全正确。但当 N 很大、BLOCK 较小时，grid 可能远大于物理 Vector Core 数，runtime 要多轮启动和初始化 program。
 
 固定 `grid=num_vectorcore` 后，每个 program 通过 `for tile_id in range(pid,num_tiles,num_programs)` 处理多块数据，可减少逻辑 program 数和下发开销。代价是 kernel 内循环更长，负载均衡和小任务行为可能不同。它是需要 benchmark 验证的 NPU 亲和优化，不是对入门实现正确性的否定。
+
+### 6. `@triton.jit` 是在装饰器执行时、第一次 launch 时，还是每次 launch 时编译？
+
+**答案：**装饰器执行时主要创建 `JITFunction`；第一次遇到未命中的 specialization 时才编译；以后命中同一进程内或磁盘缓存时复用，因而不是每次 launch 都重编译。
+
+调用 `kernel[grid](...)` 后，runtime 先根据实参 dtype、`tl.constexpr`、specialization 属性、target 和 compiler options 等确定当前变体。内存 cache 未命中才进入 compiler；compiler 又会检查磁盘 cache。只有对应编译产物仍不存在或被强制失效时，才完整运行 lowering 和后端编译。
+
+所以“这是同一个 Python 函数”不等于“永远只有一个 binary”，而“输入 shape 变了”也不等于“一定产生新 binary”。判断关键是：变化是否进入 signature、constexpr、specialization 或 compiler cache key。
 
 ## 官方源码与文档
 

@@ -98,12 +98,16 @@ DeQue -> 消费 -> FreeTensor
 | `VECIN` | UB | Vector 输入 |
 | `VECCALC` | UB | Vector 中间计算 |
 | `VECOUT` | UB | Vector 输出 |
-| `A1/B1` | L1 | Cube 输入中转 |
-| `A2/B2` | L0A/L0B | Cube 指令输入 |
+| `A1/B1` | L1 | Cube 左/右矩阵输入的较大中转 tile |
+| `C1` | L1 或 UB，依产品而变 | Cube bias 输入的第一级逻辑位置 |
+| `A2/B2` | L0A/L0B | 适配 Cube 近端容量的左/右矩阵小块 |
+| `C2` | BiasTable/BT 或 L0C，依产品而变 | 分块后的 Cube bias 输入 |
 | `CO1` | L0C 等 | Cube 累加结果 |
-| `CO2` | 架构相关输出位置 | Cube 输出中转 |
+| `CO2` | GM 或 UB，依产品而变 | Cube 最终输出/输出中转 |
 
 映射随产品架构可能不同，因此代码使用逻辑位置，文档负责给出目标硬件映射。
+
+特别注意：`C1/C2` 中的 `C` 主要表示 bias 输入角色，`CO1/CO2` 中的 `CO` 才表示 Cube output。`A/B/C` 是矩阵计算操作数角色，数字 `1/2` 是逻辑数据通路阶段，不是两代硬件，也不能直接读成普通 CPU Cache 的 L1/L2。完整数据通路与跨产品差异见[硬件基础第 5.2 节](../foundations/02-ascend-hardware.md#52-a1b1c1a2b2c2-中的字母和数字到底表示什么)。
 
 ## 6. TQue
 

@@ -23,25 +23,79 @@
 
 ## Memory Hierarchy
 
-| Level | Name | Size (typical) | Bandwidth | Latency |
-|---|---|---|---|---|
-| HBM | Global Memory (GM) | 32-64 GB | ~1-2 TB/s | ~hundreds ns |
-| L2 | On-chip Cache | ~32-64 MB | ~4-8 TB/s | ~tens ns |
-| L1 | Per-core Buffer | ~1 MB | ~8-16 TB/s | ~few ns |
-| L0/UB | Unified Buffer | ~192 KB | ~16-32 TB/s | ~single cycle |
+Do not merge L0 and UB into one memory level. They serve different compute paths:
+
+| Storage | Main role |
+|---|---|
+| GM/HBM | Full tensors, weights, KV cache, and kernel inputs/outputs |
+| L2 | Shared cache on the path to GM; normally not allocated as an Ascend C tensor |
+| L1 Buffer | On-chip staging and reuse of larger Cube tiles |
+| L0A/L0B | Near-Cube buffers for the left and right matrix operands |
+| L0C | Cube accumulation/result buffer |
+| UB | Main on-chip workspace for Vector inputs, outputs, and temporaries |
+
+The two common paths are:
+
+```text
+Vector: GM -> UB -> Vector -> UB -> GM
+Cube:   GM -> L1 -> L0A/L0B -> Cube -> L0C -> output path -> GM
+```
+
+Capacities, legal transfers, alignment, and some logical-to-physical mappings vary by Ascend product. Query or consult the target product instead of treating a capacity from one model as universal.
+
+## `A1/B1/C1`, `A2/B2/C2`, and `CO1/CO2`
+
+These names are Ascend C `TPosition` logical locations for Cube computation, not chip generations or physical-core names. Start from:
+
+```text
+Output = A @ B + Bias
+```
+
+The letters describe operand roles:
+
+- `A`: left matrix;
+- `B`: right matrix;
+- `C`: bias input;
+- `CO`: Cube output.
+
+The suffix describes a logical stage:
+
+| TPosition | Data role | Common physical mapping |
+|---|---|---|
+| `A1` | Larger left-matrix tile | L1 Buffer |
+| `B1` | Larger right-matrix tile | L1 Buffer |
+| `C1` | Bias before near-compute blocking | L1 or UB, product-dependent |
+| `A2` | Near-Cube left block | L0A |
+| `B2` | Near-Cube right block | L0B |
+| `C2` | Near-compute bias block | BiasTable/BT or L0C, product-dependent |
+| `CO1` | Block-wise Cube accumulation/result | L0C |
+| `CO2` | Final matrix result/output stage | GM or UB, product-dependent |
+
+Conceptually:
+
+```text
+A: GM -> A1(L1) -> A2(L0A) --+
+B: GM -> B1(L1) -> B2(L0B) --+-> Cube/Mmad -> CO1(L0C) -> CO2/output -> GM
+Bias: GM -> C1(L1 or UB) -> C2(BT or L0C) --+
+```
+
+`C1/C2` are not abbreviations for `CO1/CO2`: the former are bias-input roles; the latter are output roles. A no-bias matmul does not need C1/C2, and a high-level Ascend C Matmul API may manage several stages internally.
+
+See the official [Ascend C glossary](https://www.hiascend.com/document/detail/en/canncommercial/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00013.html) and [logical-to-physical TPosition mapping](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0004.html).
 
 ## Compute Units
 
-| Unit | Purpose | Data Types | Peak Throughput |
-|---|---|---|---|
-| Cube Unit | Matrix multiply-accumulate | FP16, BF16, INT8, FP8 | ~256 TFLOPS (FP16) |
-| Vector Unit | Element-wise ops, reductions, activations | FP32, FP16, BF16 | ~32 TFLOPS (FP32) |
-| Scalar Unit | Control flow, address calculation | INT32, FP32 | Low, for control only |
+| Unit | Purpose |
+|---|---|
+| Cube | Matrix multiply-accumulate |
+| Vector | Element-wise operations, reductions, activations, and layout work |
+| Scalar | Control flow, address calculation, and instruction issue |
+| MTE | Moving data among GM and on-chip storage |
 
 ## Key Hardware Constraints
 
-1. **Cube Unit efficiency**: Works best with matrices aligned to 16×16 blocks
-2. **UB capacity**: Only ~192KB — kernels must tile data to fit within UB
-3. **Data movement cost**: GM→UB transfer is ~10-100× slower than UB access
-4. **Double buffering**: Must overlap compute with data movement to hide latency
-5. **Bank conflicts**: UB memory banks can cause stalls if accessed poorly
+1. Cube instructions impose dtype-, layout-, and tile-alignment constraints.
+2. UB/L1/L0 capacity is limited, so kernels must tile.
+3. Data movement is part of the performance model, not free bookkeeping.
+4. Double or multiple buffering can overlap movement and computation.
+5. Every exact core count, capacity, and supported path must be checked for the target product.
