@@ -1157,6 +1157,85 @@ Online Python does not enter every model layer and does not call `AttentionBacke
 
 #### 6.4.3 Why Does `torch.compile` Bypass `forward_decode_graph()`?
 
+The most important sentence is:
+
+> `forward_decode_graph()` does not start compilation or graph capture. It is a manually prepared attention implementation for raw NPUGraph capture when `torch.compile` is disabled.
+
+A less misleading name would be:
+
+```text
+forward_decode_for_raw_npugraph_capture()
+```
+
+not:
+
+```text
+compile_and_capture_attention_graph()
+```
+
+There are two independent axes:
+
+| Axis | Switch/entry | Artifact |
+|---|---|---|
+| Compiler graph | `torch.compile(...)`, Dynamo, FX, TorchAir backend | FX variants, guards, and a backend-returned callable |
+| Runtime launch graph | `with torch.npu.graph(...)` | A Device-task sequence in `torch.npu.NPUGraph` |
+
+Outer runtime capture does not require `forward_decode_graph()` to begin. Whether `forward` is a raw bound method or a Dynamo callable, it eventually enters the same backend capture:
+
+```python
+# The upstream layer only selects which callable forward is.
+with patch_model_npu(model, enable_compile=...) as forward:
+    capture_one_shape(bs, forward)
+
+# The downstream layer always performs NPUGraph capture.
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph, ...):
+    out = forward_fn()
+```
+
+Both cases therefore build an NPUGraph:
+
+```text
+without torch.compile:
+  raw model.forward
+    -> optional manual forward_decode_graph branch
+    -> submit attention tasks
+    -> outer torch.npu.graph captures them
+
+with torch.compile:
+  Dynamo callable / FX runner
+    -> trace or execute common forward_decode
+    -> submit attention tasks
+    -> outer torch.npu.graph captures them
+```
+
+`torch.compile` builds its FX compiler graph by taking over ordinary Python `forward` bytecode and tensor operations. It neither requires nor searches for a function whose name contains `_graph`.
+
+Why does the uncompiled path need a manual helper? With no compiler preparing that raw Python path, the Ascend backend explicitly spells out an attention implementation suitable for runtime capture. In the fixed source, `forward_decode_graph()` manually handles:
+
+- graph-specific static `ForwardMetadata`, block tables, and padding;
+- FIA workspace queries and fixed output allocation;
+- explicit out variants such as `npu_fused_infer_attention_score.out`;
+- Host length keywords that `NPUGraph.update()` can patch after capture.
+
+With compilation enabled, the engineering choice is to make the **common `forward_decode()`** suitable for Dynamo/TorchAir input semantics, let the compiler extract FX from ordinary model code, and then let the outer NPUGraph record the resulting Device tasks. The older raw-capture-specialized branch is not layered on top of that compiler path.
+
+This is not a theoretical rule that a compiler could never call `forward_decode_graph()`; it is the current SGLang responsibility split. The historical change makes it explicit: NPU `torch.compile` support changed:
+
+```python
+if self.graph_mode:
+    return self.forward_decode_graph(...)
+```
+
+to:
+
+```python
+if self.graph_mode and (not self.enable_torch_compile):
+    return self.forward_decode_graph(...)
+```
+
+while adding FIA length handling to common `forward_decode()`. The associated [TorchAir compile support PR](https://github.com/sgl-project/sglang/pull/13410) describes host-value-tiling NPU kernels, static inputs, and compiled-forward NPUGraph support. In other words, `forward_decode_graph()` is the older manual raw-graph route; common `forward_decode()` is the selected compiler route.
+
 The fixed condition explicitly includes:
 
 ```python

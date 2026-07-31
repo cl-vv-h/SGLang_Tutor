@@ -1331,6 +1331,85 @@ ModelRunner._forward_raw()
 
 #### 6.5.3 为什么开启 `torch.compile` 时反而不进 `forward_decode_graph()`
 
+最重要的一句话是：
+
+> `forward_decode_graph()` 不是“开始编译/开始建图”的函数；它只是“没有 `torch.compile` 时，为 raw NPUGraph capture 手工准备的 attention forward 实现”。
+
+如果重新命名，它更接近：
+
+```text
+forward_decode_for_raw_npugraph_capture()
+```
+
+而不是：
+
+```text
+compile_and_capture_attention_graph()
+```
+
+这里存在两条互相独立的轴：
+
+| 轴 | 开关/入口 | 产物 |
+|---|---|---|
+| compiler graph | `torch.compile(...)`、Dynamo、FX、TorchAir backend | FX variant、guards 与 backend 返回的 callable |
+| runtime launch graph | `with torch.npu.graph(...)` | `torch.npu.NPUGraph` 中的 Device task 序列 |
+
+外层 runtime capture 不依赖 `forward_decode_graph()` 才能开始。无论当前 `forward` 是原始方法还是 Dynamo callable，最终都进入相同的 backend 代码：
+
+```python
+# 上游只决定 forward 是哪一种 callable
+with patch_model_npu(model, enable_compile=...) as forward:
+    capture_one_shape(bs, forward)
+
+# 下游无条件负责 NPUGraph capture
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph, ...):
+    out = forward_fn()
+```
+
+所以两种情况都是：
+
+```text
+未开 torch.compile：
+  raw model.forward
+    -> 可选 forward_decode_graph 手工专用分支
+    -> 提交 attention task
+    -> 外层 torch.npu.graph 捕获
+
+开启 torch.compile：
+  Dynamo callable / FX runner
+    -> 通用 forward_decode 被跟踪或执行
+    -> 提交 attention task
+    -> 外层 torch.npu.graph 捕获
+```
+
+`torch.compile` 建立 FX compiler graph 的方式是接管普通 Python `forward` 的 bytecode 与 tensor operation；它不需要、也不会通过搜索函数名中是否有 `_graph` 来建图。
+
+为什么未编译路径需要一个手工专用函数？因为没有 compiler 替这条 raw Python 路径做图级准备，Ascend backend 需要自己明确写出一条适合 runtime capture 的 attention 实现。固定源码中的 `forward_decode_graph()` 手工处理了：
+
+- graph 专用的静态 `ForwardMetadata`、block table 与 padding；
+- FIA workspace 查询和固定 output 分配；
+- `npu_fused_infer_attention_score.out` 这样的显式 out 入口；
+- capture 后可由 `NPUGraph.update()` 修补的 Host length keyword。
+
+开启 compile 后，工程选择是把**通用 `forward_decode()`**改造成 Dynamo/TorchAir 能处理的输入语义，让 compiler 从通用模型代码抽取 FX 图；随后依然由外层 NPUGraph 记录它产生的 Device task。这样不会再套用早于 compile 支持就存在的 raw-capture 专用分支。
+
+这不是理论上“开启 compiler 绝对不能调用 `forward_decode_graph()`”，而是当前 SGLang 的实现分工。历史提交也能证明这一点：引入 NPU `torch.compile` 支持时，源码把：
+
+```python
+if self.graph_mode:
+    return self.forward_decode_graph(...)
+```
+
+改成：
+
+```python
+if self.graph_mode and (not self.enable_torch_compile):
+    return self.forward_decode_graph(...)
+```
+
+并同时补齐通用 `forward_decode()` 的 FIA length 处理。[对应的 TorchAir compile 支持 PR](https://github.com/sgl-project/sglang/pull/13410)也把目标描述为让 host-value tiling 的 NPU kernel 支持 NPUGraph、静态输入与 compiled forward 工作流。也就是说，`forward_decode_graph()` 是旧的手工 raw-graph 路线，通用 `forward_decode()` 才被选作 compiler 路线。
+
 固定源码的条件明确包含：
 
 ```python
