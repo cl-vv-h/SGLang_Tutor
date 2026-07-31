@@ -1949,6 +1949,93 @@ SGLang Python control flow
 
 因此，这里的“compiled callable”不等于“已经生成 TorchAir GE/ACL 二进制”。`torch.compile` 这一层仍负责 Python 图抽取、guard 和 FX/AOT 处理；`NPUGraph` 负责记录运行时提交。只有改为 `run_eagerly=False` 时，TorchAir 才会沿本章 6.3.2 第六步所述的 `GeConcreteGraph`/`AclConcreteGraph` 分支建立自己的 concrete graph。Compiler graph 与 runtime graph 优化的开销层级不同，不能互换名称。
 
+### 9.1 “图下沉”是上述哪一张图
+
+先给出结论：
+
+> “通过图引擎在编译期统一处理算子依赖、中间内存和调度，再把整图加载到 Device 侧执行”最接近 CANN/GE 的**整图下沉或模型下沉**。它不是 NPUGraph；也不等于 `torch.compile` 抽出的 FX 图本身。FX 图是编译输入，经过 TorchAir 转换、GE 编译后形成的 Ascend Graph/可执行模型，才是被下沉执行的对象。
+
+这里的**下沉（sinking）**是“把执行控制权从 Host 逐算子调度转移给 Device 侧已加载的模型任务”的意思，不是把一个 Python `fx.GraphModule` 对象原封不动地复制到 NPU。Host 仍要加载模型、准备输入、触发一次模型执行并处理输出；省掉的是模型内部每个算子都回到 Host 再下发一次的往返。
+
+[CANN 的 GE 文档](https://www.hiascend.com/document/redirect/CannCommunityAscendGraph)把 GE 定义为计算图编译和运行的控制中心：框架图先转换成 Ascend IR，GE 再做图优化、多流并行、内存复用和模型下沉。[TorchAir 官方说明](https://gitee.com/ascend/torchair/blob/master/README.md)则给出了 PyTorch 入口：TorchAir 承接 Dynamo，负责把 FX 图转换成 GE 图并提供 GE 图在 NPU 上的编译和执行能力。
+
+#### 9.1.1 三者处在不同层级
+
+| 名称 | 图里主要保存什么 | 怎样产生 | 主要解决什么 |
+|---|---|---|---|
+| Dynamo/FX graph | `aten`/高层算子的输入、输出和数据依赖，以及与输入规格对应的 guard | `torch.compile` 包装后的 callable 首次遇到真实输入时，由 Dynamo 抽取 | 给 backend 一份可分析、变换和 lowering 的算子语义 IR |
+| GE/Ascend Graph 与模型下沉 | Ascend IR 节点以及 GE 编译后确定的执行计划；在满足条件的整图路径中包含中间 tensor 生命周期/内存复用、Stream 与 task 调度、算子 tiling 等结果 | TorchAir converter 将 FX 节点转换成 GE 节点，GE 再优化、编译并加载模型 | 利用全图语义做融合、内存规划和调度，让一次 Host 触发驱动模型内部任务 |
+| NPUGraph | capture 期间某个 Stream 上实际产生的 NPU work/task 及其运行时依赖 | callable 真实执行一次时由 `torch.npu.graph(...)` 捕获 | replay 已有任务序列，减少 Python、dispatcher 和逐算子 launch 开销 |
+
+“内存全部固化”也需要更精确地理解。GE 能在编译期分析**中间 tensor**的生命周期，让不同时存活的 tensor 复用 storage，并安排 workspace；这不意味着权重、输入、输出以及所有动态临时需求都从此不再由 runtime 管理。“一次性下发”通常也是先加载编译模型，随后每轮推理仍由 Host 发起一次模型执行，而不是程序启动后 Host 永远消失。
+
+#### 9.1.2 `torch.compile` 为什么既有关，又不能与图下沉画等号
+
+在 TorchAir 正常 GE 编译路径中，调用链可以写成：
+
+```text
+Python model.forward
+  -> TorchDynamo 抽取 FX GraphModule
+  -> TorchAir converter：FX/ATen node -> Ascend IR/GE node
+  -> GE 做图优化、内存规划、tiling 和调度编排
+  -> 生成并加载 GE concrete graph / 可执行模型
+  -> Host 每轮触发一次模型执行
+  -> Device 按已编排的 task/Stream 关系完成整图
+```
+
+所以 `torch.compile` 是**进入编译链的前端 API 和调度器**，FX graph 是**前端编译器 IR**，GE 下沉图是某个 Ascend backend 产生的**后端执行产物**。换成 Inductor、其他 backend，或者让 backend 返回 eager FX runner，同一个 `torch.compile` 调用就不会产生 GE 模型下沉。把三者统称为“`torch.compile` 的图”在口头交流中很常见，但读源码时必须继续追问“是哪一个 backend、返回了什么 callable”。
+
+#### 9.1.3 NPUGraph 为什么看起来很像，却不是同一机制
+
+NPUGraph 的路径更像这样：
+
+```text
+Python/eager FX callable 真实执行
+  -> dispatcher、torch_npu、CANN/custom op 逐步提交 Device work
+  -> NPUGraph 在 capture Stream 上记录已经产生的 work
+  -> 后续 NPUGraph.replay() 重放记录
+```
+
+两者都能让在线阶段的 Host 调用从“逐算子”变粗，因此现象上都像“一次调用跑完整段模型”。本质区别是：
+
+- GE 在执行前持有算子语义图，能够据此做整图编译优化、内存生命周期分析与执行编排；
+- NPUGraph 从一次真实执行中捕获较低层的运行时任务；capture 本身不会因为看到了这些任务，就重新获得完整 FX/Ascend IR 语义并替代 GE 的编译优化；
+- GE 模型执行的核心是“执行预先编译的模型计划”，NPUGraph 的核心是“重放捕获过的运行时 work”。
+
+torch_npu 的 [`NPUGraph`](https://gitee.com/ascend/pytorch/blob/master/torch_npu/npu/graphs.py) 接口也直接体现了这个模型：`capture_begin()` 开始记录当前 Stream 的 NPU work，`capture_end()` 结束捕获，`replay()` 重放捕获的 work。
+
+#### 9.1.4 当前 SGLang 固定版本到底是哪一种
+
+本章源码基线的实际组合是：
+
+```text
+torch.compile / Dynamo FX
+  -> TorchAir AOT/decomposition/FX 准备
+  -> run_eagerly=True：返回 eager FX runner，不生成 GE concrete graph
+  -> eager operator dispatch
+  -> 外层 torch.npu.NPUGraph capture/replay
+```
+
+因此，**当前这条 SGLang `npugraph_ex` 路径使用了 `torch.compile`，也使用了 NPUGraph，但没有完成上面所说的 GE 模型下沉**。`npugraph_ex` 这个名字不能作为已经下沉 GE 图的证据；决定性证据是 backend 的 `run_eagerly=True` 分支返回了 eager FX runner。
+
+如果改成 `run_eagerly=False` 并走 TorchAir 的 `GeConcreteGraph` 路径，才会出现：
+
+```text
+FX graph -> TorchAir lowering -> GE graph/compile -> GE model execution
+```
+
+至于是否还能在最外层再 capture 某个 GE launch，要看 backend/runtime 的支持与收益；即使可以，NPUGraph 也只是捕获这个粗粒度 launch，不会变成 GE 图本身。不要默认所有版本都会或都应该把两种机制嵌套。
+
+#### 9.1.5 “整图下沉”也有成立条件
+
+资料中“整个模型全部固化”的说法通常隐含了**静态 shape、算子都可入图、控制流可静态表达、没有不兼容 Host callback/fallback**等条件。动态 shape、数据依赖的 Python 分支、不支持入图的算子或必须由 Host 执行的逻辑，都可能导致多份专用图、子图切分、fallback 或 Host 调度，而不是一张万能整图。
+
+还要区分**整图/模型下沉**与 **Tiling 下沉**。[CANN 的 Tiling 下沉文档](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/opdevg/Ascendcopdevg/atlas_ascendc_10_00014.html)说明：整图已经位于 Device 侧时，如果某个算子的 tiling 参数依赖运行时输入值，可以进一步把 tiling 计算放到 Device 的 AI CPU 上。后者只是解决“运行时 tiling 仍需 Host 参与”的局部问题，不是另一张等价于 FX/NPUGraph 的模型图。
+
+一个便于记忆、但仍然准确的压缩说法是：
+
+> FX graph 描述“要算什么”，GE 编译/下沉决定“整图怎样在 Ascend 上组织和执行”，NPUGraph 记住“这次实际提交了哪些 Device work，以后照着重放”。
+
 ---
 
 ## 10. Piecewise graph 是什么
@@ -2372,6 +2459,10 @@ Warmup 是普通执行，目的在于让惰性初始化、编译、kernel 加载
 ### 17. 线上 graph fast path 会不会调用 `model.forward()` 或 `forward_decode_graph()`？
 
 不会。启动 capture 时 `run_once -> model.forward -> AttentionBackend.forward -> forward_decode_graph`（仅未开 compile 的 graph 分支）真正执行并产生待捕获 task。线上 `_forward_raw -> NPUGraphRunner.execute -> backend.replay* -> NPUGraph.replay` 直接重放这些 task，不重新进入模型层循环或 attention Python forward。Replay 前的 `init_forward_metadata_out_graph()` 只是刷新静态 metadata storage 的值，不等于重新计算 attention。
+
+### 18. 图下沉、`torch.compile` FX graph 和 NPUGraph 是同一张图吗？
+
+不是。FX graph 是 Dynamo 抽出的算子语义 IR；它只有经过 TorchAir lowering 和 GE 编译，形成可执行 Ascend Graph/模型后，才可能进入 GE 整图或模型下沉。NPUGraph 则捕获一次真实执行产生的较低层 Device work 并 replay。三者可以出现在一条系统链路中，但表示层级、生成时机和优化职责都不同。当前固定 SGLang 的 `run_eagerly=True` 跳过 GE concrete graph 生成，所以实际是“FX 准备 + eager dispatch + 外层 NPUGraph”，不是 GE 模型下沉。
 
 ---
 

@@ -1726,6 +1726,93 @@ SGLang control flow
 
 Thus “compiled callable” does not mean that a TorchAir GE/ACL binary already exists. This `torch.compile` layer still performs Python graph extraction, guarding, and FX/AOT preparation; NPUGraph records runtime submissions. TorchAir creates its own `GeConcreteGraph`/`AclConcreteGraph` only on the `run_eagerly=False` alternative described in Step 6 of Section 6.2. Compiler graphs and runtime graphs optimize different cost layers.
 
+### 9.1 Which Graph Does “Graph Sinking” Mean?
+
+The short answer is:
+
+> “Let a graph engine resolve operator dependencies, intermediate memory, and scheduling at compile time, then load the whole graph onto the Device” most closely describes CANN/GE **whole-graph or model sinking**. It is not NPUGraph, and it is not the FX graph extracted by `torch.compile` itself. The FX graph is a compiler input; the Ascend Graph/executable model produced after TorchAir conversion and GE compilation is the object that can execute in sunk form.
+
+Here, **sinking** means transferring control of the model's internal execution from Host-side per-operator dispatch to a model task plan already loaded on the Device. It does not mean copying a Python `fx.GraphModule` object verbatim to the NPU. The Host still loads the model, prepares inputs, triggers a model execution, and consumes outputs. What disappears is the Host round trip for every internal operator.
+
+The [official CANN GE overview](https://www.hiascend.com/document/redirect/CannCommunityAscendGraph) defines GE as the control center for graph construction, compilation, optimization, and execution. Framework graphs become Ascend IR, after which GE can apply graph optimization, multi-Stream parallelism, memory reuse, and model sinking. The [official TorchAir overview](https://gitee.com/ascend/torchair/blob/master/README.md) supplies the PyTorch entry: TorchAir builds on Dynamo, converts FX graphs to GE graphs, and supports their compilation and execution on Ascend NPUs.
+
+#### 9.1.1 The Three Artifacts Live at Different Levels
+
+| Name | What It Primarily Stores | How It Is Produced | Primary Purpose |
+|---|---|---|---|
+| Dynamo/FX graph | Inputs, outputs, dependencies among `aten`/high-level operators, and guards for an input specialization | Dynamo extracts it when a `torch.compile` wrapper first receives real inputs | Supply a semantic IR that a backend can analyze, transform, and lower |
+| GE/Ascend Graph and model sinking | Ascend IR nodes and the execution plan produced by GE; on a supported whole-graph path this can include intermediate-tensor lifetimes and memory reuse, Streams/tasks, and operator tiling results | TorchAir converts FX nodes to GE nodes; GE optimizes, compiles, and loads the model | Use whole-graph semantics for fusion, memory planning, and Device-side model scheduling |
+| NPUGraph | NPU work/tasks actually emitted on a Stream during capture and their runtime dependencies | `torch.npu.graph(...)` observes one real callable execution | Replay an existing task sequence and avoid repeated Python, dispatcher, and per-operator launch overhead |
+
+“All memory is fixed” also needs qualification. GE can analyze **intermediate tensor** lifetimes, reuse storage for values that are not live at the same time, and arrange workspaces. This does not mean weights, inputs, outputs, and every dynamic temporary allocation cease to have runtime ownership. Likewise, “one-time dispatch” normally means loading a compiled model and then issuing one model-execution trigger per inference, not that the Host disappears after process startup.
+
+#### 9.1.2 Why `torch.compile` Is Related but Not Identical
+
+On a regular TorchAir GE compilation path, the chain is:
+
+```text
+Python model.forward
+  -> TorchDynamo extracts an FX GraphModule
+  -> TorchAir converter: FX/ATen node -> Ascend IR/GE node
+  -> GE performs graph optimization, memory planning, tiling, and scheduling
+  -> a GE concrete graph/executable model is built and loaded
+  -> the Host triggers one model execution per iteration
+  -> the Device follows the prepared task/Stream plan
+```
+
+`torch.compile` is therefore the **frontend API and compiler orchestrator**; its FX graph is a **frontend compiler IR**; the sunk GE graph is an **Ascend-backend execution artifact**. The same `torch.compile` call could select Inductor, another backend, or a backend that returns an eager FX runner, none of which implies GE model sinking. Calling all of them a “`torch.compile` graph” is convenient in conversation but insufficient for source reading: always ask which backend ran and what callable it returned.
+
+#### 9.1.3 Why NPUGraph Looks Similar but Is a Different Mechanism
+
+The NPUGraph path is closer to:
+
+```text
+Python/eager FX callable executes for real
+  -> dispatcher, torch_npu, CANN/custom operators submit Device work
+  -> NPUGraph records the emitted work on the capture Stream
+  -> later NPUGraph.replay() replays that record
+```
+
+Both mechanisms can make online Host calls coarser than per-operator dispatch, so both may look like “one call runs the model segment.” Their fundamentals differ:
+
+- GE sees an operator-semantic graph before execution and uses it for whole-graph compilation, lifetime analysis, and scheduling;
+- NPUGraph captures lower-level runtime work from a real execution. Capture does not by itself recover complete FX/Ascend IR semantics or replace GE compilation;
+- a sunk GE model executes a precompiled model plan, while NPUGraph replays previously captured runtime work.
+
+The official torch_npu [`NPUGraph`](https://gitee.com/ascend/pytorch/blob/master/torch_npu/npu/graphs.py) API exposes exactly this model: `capture_begin()` starts recording NPU work on the current Stream, `capture_end()` closes capture, and `replay()` replays that work.
+
+#### 9.1.4 Which One Does the Fixed SGLang Version Use?
+
+The actual stack for this chapter's source baseline is:
+
+```text
+torch.compile / Dynamo FX
+  -> TorchAir AOT/decomposition/FX preparation
+  -> run_eagerly=True: return an eager FX runner; do not build a GE concrete graph
+  -> eager operator dispatch
+  -> outer torch.npu.NPUGraph capture/replay
+```
+
+Therefore, **this SGLang `npugraph_ex` path uses both `torch.compile` and NPUGraph, but it does not perform the GE model sinking described above**. The name `npugraph_ex` is not evidence that a GE graph was sunk. The decisive source behavior is that `run_eagerly=True` returns an eager FX runner.
+
+Changing to `run_eagerly=False` and taking TorchAir's `GeConcreteGraph` path would instead introduce:
+
+```text
+FX graph -> TorchAir lowering -> GE graph/compilation -> GE model execution
+```
+
+Whether a deployment can or should capture an outer GE launch again depends on backend/runtime support and measured benefit. Even if it can, NPUGraph would capture that coarse launch; it would not become the GE graph. Do not assume that every version nests both mechanisms.
+
+#### 9.1.5 Whole-Graph Sinking Has Preconditions
+
+Claims that “the entire model is fixed” usually assume **static shapes, graph-compatible operators, statically expressible control flow, and no incompatible Host callback/fallback**. Dynamic shapes, data-dependent Python branches, unsupported operators, or Host-only work can require specialized variants, graph partitioning, fallback, or Host scheduling instead of one universal whole graph.
+
+Also distinguish **whole-graph/model sinking** from **tiling sinking**. The [CANN tiling-sinking documentation](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/opdevg/Ascendcopdevg/atlas_ascendc_10_00014.html) explains that, after a whole graph is on the Device, an operator whose tiling depends on runtime input values may move its tiling calculation to the Device's AI CPU. That solves the narrower problem of runtime tiling otherwise requiring Host participation; it is not another model graph equivalent to FX or NPUGraph.
+
+A compact but still accurate mnemonic is:
+
+> The FX graph describes “what to compute”; GE compilation and sinking determine “how the whole graph is organized and executed on Ascend”; NPUGraph remembers “which Device work was actually submitted this time so it can be replayed.”
+
 ---
 
 ## 10. Piecewise NPU Graph
@@ -2103,6 +2190,10 @@ It combines runner inheritance with backend composition. `NPUGraphRunner` inheri
 ### 17. Does the Online Graph Fast Path Call `model.forward()` or `forward_decode_graph()`?
 
 No. During startup capture, `run_once -> model.forward -> AttentionBackend.forward -> forward_decode_graph` (only for the non-compiled graph branch) really executes and emits tasks for capture. Online execution is `_forward_raw -> NPUGraphRunner.execute -> backend.replay* -> NPUGraph.replay`; it directly replays those tasks without re-entering model layers or Python attention forward. The pre-replay `init_forward_metadata_out_graph()` refreshes values in static metadata storage; it does not recompute attention.
+
+### 18. Are Graph Sinking, the `torch.compile` FX Graph, and NPUGraph the Same Graph?
+
+No. The FX graph is an operator-semantic IR extracted by Dynamo. Only after TorchAir lowering and GE compilation produces an executable Ascend Graph/model can that artifact participate in GE whole-graph or model sinking. NPUGraph instead captures and replays lower-level Device work emitted by one real execution. All three may appear in one system pipeline, but they differ in representation level, creation time, and optimization responsibility. The fixed SGLang path's `run_eagerly=True` skips GE concrete-graph generation, so its actual combination is FX preparation, eager dispatch, and an outer NPUGraph—not GE model sinking.
 
 ---
 
