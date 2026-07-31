@@ -34,6 +34,7 @@ flowchart TD
   - [04-model-runner-attention.md](./04-model-execution/04-model-runner-attention.md)：理解 `ForwardBatch`、`ModelRunner` 前向分发、`RadixAttention` 与 attention backend 如何读写 KV cache。
 - [05-layer-communication](./05-layer-communication/)
   - [01-layer-communicator-and-common-layers.md](./05-layer-communication/01-layer-communicator-and-common-layers.md)：顺着 `DecoderLayer.forward()` 讲清楚 layer 层、`LayerCommunicator`、TP/EP/CP 通信、attention backend、linear/MoE kernel 的配合。
+  - [02-tp-dp-ep-sharding-and-ascend-npu.md](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md)：从启动参数、进程和 rank 网格走到 Linear 权重切片、expert 所有权与 token dispatch，区分通用切分逻辑和 Ascend NPU 的 HCCL、NPU MoE、`ascend_fuseep` 实现。
 - [06-advanced-features](./06-advanced-features/)
   - [05-speculative-decoding.md](./06-advanced-features/05-speculative-decoding.md)：理解 draft worker、target verify、`spec_info`、EAGLE/NGRAM、spec v1/v2 与接受 token 后处理。
   - [07-disaggregation-pd.md](./06-advanced-features/07-disaggregation-pd.md)：理解 Prefill/Decode 分离部署、bootstrap/prealloc/transfer 队列、KV sender/receiver 和 transfer backend。
@@ -44,7 +45,7 @@ flowchart TD
 1. 先读 [公共组件全景](./00-overview/01-public-components-code-walkthrough.md)，建立 `TokenizerManager -> Scheduler -> TpModelWorker -> ModelRunner -> LayerCommunicator` 的主链路。
 2. 再读 [请求生命周期](./01-entry-routing/01-request-lifecycle.md)，把一次 OpenAI API 请求串起来。
 3. 接着读 [Scheduler 核心](./02-scheduler-runtime/02-scheduler-core.md)、[KV Cache](./03-cache-memory/03-kv-cache-radix-cache.md)、[ModelRunner 与 attention](./04-model-execution/04-model-runner-attention.md)。
-4. 如果你正在看 decoder layer、MoE、TP/EP/CP 通信，进入 [Layer 层导读](./05-layer-communication/01-layer-communicator-and-common-layers.md)。
+4. 如果你正在看 decoder layer、MoE、TP/EP/CP 通信，先读 [Layer 层导读](./05-layer-communication/01-layer-communicator-and-common-layers.md)，再用 [TP/DP/EP 切分与 Ascend NPU](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md) 把 rank 拓扑、参数所有权和设备执行串起来。
 5. 最后按需要阅读 [Speculative Decoding](./06-advanced-features/05-speculative-decoding.md)、[PD 分离](./06-advanced-features/07-disaggregation-pd.md)、[LoRA Serving](./06-advanced-features/08-lora-serving.md) 和 [Router](./01-entry-routing/09-router.md)。
 
 ## 怎么使用这些笔记

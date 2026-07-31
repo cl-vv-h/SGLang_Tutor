@@ -75,3 +75,4 @@ After router Top-K:
 3. Understand TP all-reduce placement (after output projection)
 4. For MoE models, trace `fused_experts.py` for dispatch/combine
 5. Look at `parallel_state.py` for group initialization
+6. Continue with [TP/DP/EP Sharding and Ascend NPU](./02-tp-dp-ep-sharding-and-ascend-npu.md) to connect rank topology, parameter ownership, and hardware-specific execution.

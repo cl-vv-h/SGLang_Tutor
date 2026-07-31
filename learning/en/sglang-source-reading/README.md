@@ -34,6 +34,7 @@ flowchart TD
   - [04-model-runner-attention.md](./04-model-execution/04-model-runner-attention.md): Understanding `ForwardBatch`, `ModelRunner` forward dispatch, `RadixAttention`, and how the attention backend reads/writes KV cache.
 - [05-layer-communication](./05-layer-communication/)
   - [01-layer-communicator-and-common-layers.md](./05-layer-communication/01-layer-communicator-and-common-layers.md): Following `DecoderLayer.forward()` to explain the layer hierarchy, `LayerCommunicator`, TP/EP/CP communication, attention backend, and linear/MoE kernel coordination.
+  - [02-tp-dp-ep-sharding-and-ascend-npu.md](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md): From launch arguments, processes, and rank grids to Linear weight slicing, expert ownership, and token dispatch; separates common sharding logic from Ascend NPU HCCL, NPU MoE, and `ascend_fuseep` execution.
 - [06-advanced-features](./06-advanced-features/)
   - [05-speculative-decoding.md](./06-advanced-features/05-speculative-decoding.md): Understanding draft worker, target verify, `spec_info`, EAGLE/NGRAM, spec v1/v2, and accept token post-processing.
   - [07-disaggregation-pd.md](./06-advanced-features/07-disaggregation-pd.md): Understanding Prefill/Decode disaggregation deployment, bootstrap/prealloc/transfer queues, KV sender/receiver, and transfer backend.
@@ -44,7 +45,7 @@ flowchart TD
 1. Start with [Public Components Overview](./00-overview/01-public-components-code-walkthrough.md) to establish the main chain: `TokenizerManager -> Scheduler -> TpModelWorker -> ModelRunner -> LayerCommunicator`.
 2. Then read [Request Lifecycle](./01-entry-routing/01-request-lifecycle.md) to trace a complete OpenAI API request end-to-end.
 3. Next, read [Scheduler Core](./02-scheduler-runtime/02-scheduler-core.md), [KV Cache](./03-cache-memory/03-kv-cache-radix-cache.md), and [ModelRunner & Attention](./04-model-execution/04-model-runner-attention.md).
-4. If you're looking at decoder layers, MoE, or TP/EP/CP communication, go to [Layer Communication Guide](./05-layer-communication/01-layer-communicator-and-common-layers.md).
+4. If you're looking at decoder layers, MoE, or TP/EP/CP communication, read the [Layer Communication Guide](./05-layer-communication/01-layer-communicator-and-common-layers.md), then use [TP/DP/EP Sharding and Ascend NPU](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md) to connect rank topology, parameter ownership, and device execution.
 5. Finally, read [Speculative Decoding](./06-advanced-features/05-speculative-decoding.md), [PD Disaggregation](./06-advanced-features/07-disaggregation-pd.md), [LoRA Serving](./06-advanced-features/08-lora-serving.md), and [Router](./01-entry-routing/09-router.md) as needed.
 
 ## How to Use These Notes

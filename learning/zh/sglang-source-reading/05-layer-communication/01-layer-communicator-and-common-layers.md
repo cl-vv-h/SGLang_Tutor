@@ -245,4 +245,5 @@ Layer 层通常不会自己构造 process group，而是通过 `get_tp_group()`�
 
 - 上一层：`ModelRunner.forward()` 如何进入模型层，见 [04-model-execution/04-model-runner-attention.md](../04-model-execution/04-model-runner-attention.md)。
 - 同层总览：公共组件全景，见 [00-overview/01-public-components-code-walkthrough.md](../00-overview/01-public-components-code-walkthrough.md)。
+- 同层深入：TP/DP/EP 怎样映射到 rank、参数分片和 Ascend NPU 执行，见 [02-tp-dp-ep-sharding-and-ascend-npu.md](./02-tp-dp-ep-sharding-and-ascend-npu.md)。
 - 下一层：KV cache 的 slot/page 与 prefix cache，见 [03-cache-memory/03-kv-cache-radix-cache.md](../03-cache-memory/03-kv-cache-radix-cache.md)。
