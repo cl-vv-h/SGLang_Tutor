@@ -15,6 +15,8 @@ ForwardBatch → ModelRunner.forward() → _forward_raw()
   → ModelRunnerOutput → back to Scheduler
 ```
 
+Model-class resolution and weight loading are covered in `learning/en/tp-worker-model-runner/06-model-loading-and-architecture-resolution.md`. That lesson connects `TpModelWorker._init_model_config()`, `ModelConfig.__init__()`, `ModelRegistry.resolve_model_cls()`, and `DefaultModelLoader.load_model()` into the full `model_path -> config.json.architectures -> Python model class -> checkpoint weights` path.
+
 ## 2. ForwardBatch → Forward Dispatch
 
 ```python

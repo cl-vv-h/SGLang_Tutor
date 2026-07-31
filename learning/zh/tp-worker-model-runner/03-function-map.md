@@ -50,6 +50,23 @@
 | `ModelRunner.init_device_graphs()` | 捕获设备 graph | decode graph 主要在这里创建 |
 | `ModelRunner.init_piecewise_cuda_graphs()` | 捕获 piecewise graph | 对 attention/MoE 层做更细粒度的图优化 |
 
+## 模型识别与权重加载链路
+
+| 代码位置 | 作用 | 阅读重点 |
+| --- | --- | --- |
+| `TpModelWorker._init_model_config()` | 创建模型配置 | target worker 使用 `server_args.model_path`；draft worker 使用 `speculative_draft_model_path`，并把 `is_draft_model` 传入 `ModelConfig` |
+| `ModelConfig.from_server_args()` | 从启动参数生成 `ModelConfig` | 汇总 `model_path`、`revision`、`trust_remote_code`、`json_model_override_args`、`quantization`、`model_impl` 等配置 |
+| `ModelConfig.__init__()` | 读取并规范化 HF config | 通过 `get_config(...)` 得到 `hf_config`，后续模型类选择主要依赖 `hf_config.architectures` |
+| `ModelConfig._config_draft_model()` | draft/MTP architecture 改写 | 把 `DeepseekV4ForCausalLM`、`Glm4MoeForCausalLM` 等 target architecture 改成对应 NextN/MTP architecture |
+| `ModelRunner.load_model()` | 模型加载入口 | 构建 `LoadConfig`，选择 loader，并把加载后的 `nn.Module` 保存为 `self.model` |
+| `get_model_loader()` | loader 分派 | 根据 `LoadFormat` 选择 `DefaultModelLoader`、`GGUFModelLoader`、`RemoteModelLoader`、`LayeredModelLoader` 等 |
+| `DefaultModelLoader.load_model()` | 常规权重加载主流程 | 设置 dtype/device，实例化模型，读取 checkpoint 权重，执行量化后处理，最后返回 `model.eval()` |
+| `_initialize_model()` | 创建空模型结构 | 调用 `get_model_architecture()` 找到模型类，再执行 `model_cls(config=hf_config, quant_config=...)` |
+| `get_model_architecture()` | architecture 到模型类的解析入口 | 读取 `hf_config.architectures`，优先走 SGLang native registry，必要时走 Transformers fallback |
+| `ModelRegistry.import_model_classes()` | 注册模型类 | 扫描 `sglang.srt.models` 下模块的 `EntryClass`，用类名建立 architecture 到 Python 类的映射 |
+| `ModelRegistry.resolve_model_cls()` | 解析最终模型类 | 根据 `architectures` 返回第一个已注册的模型类，或者在不支持时抛错 |
+| `model.load_weights(weights)` | 模型类自己的权重映射 | 不同模型的 checkpoint tensor 名称到模块参数的映射通常在各自模型类中实现 |
+
 ## model_runner.py：forward 执行链路
 
 | 代码位置 | 作用 | 阅读重点 |

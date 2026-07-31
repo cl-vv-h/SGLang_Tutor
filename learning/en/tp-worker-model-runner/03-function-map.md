@@ -50,6 +50,23 @@ This file groups key functions from `tp_worker.py` and `model_runner.py` by read
 | `ModelRunner.init_device_graphs()` | Capture device graphs | Decode graph mainly created here |
 | `ModelRunner.init_piecewise_cuda_graphs()` | Capture piecewise graphs | Finer-grained graph optimization for attention/MoE layers |
 
+## Model Recognition & Weight Loading Chain
+
+| Code Location | Purpose | Reading Focus |
+| --- | --- | --- |
+| `TpModelWorker._init_model_config()` | Create model config | Target workers use `server_args.model_path`; draft workers use `speculative_draft_model_path` and pass `is_draft_model` into `ModelConfig` |
+| `ModelConfig.from_server_args()` | Build `ModelConfig` from startup args | Combines `model_path`, `revision`, `trust_remote_code`, `json_model_override_args`, `quantization`, `model_impl`, and related settings |
+| `ModelConfig.__init__()` | Read and normalize HF config | Calls `get_config(...)` to produce `hf_config`; later model-class selection mainly depends on `hf_config.architectures` |
+| `ModelConfig._config_draft_model()` | Rewrite draft/MTP architecture | Converts target architectures such as `DeepseekV4ForCausalLM` and `Glm4MoeForCausalLM` into NextN/MTP architectures |
+| `ModelRunner.load_model()` | Model loading entry | Builds `LoadConfig`, selects a loader, and stores the loaded `nn.Module` as `self.model` |
+| `get_model_loader()` | Loader dispatch | Chooses `DefaultModelLoader`, `GGUFModelLoader`, `RemoteModelLoader`, `LayeredModelLoader`, and others by `LoadFormat` |
+| `DefaultModelLoader.load_model()` | Regular weight-loading flow | Sets dtype/device, instantiates the model, reads checkpoint weights, runs quantization post-processing, and returns `model.eval()` |
+| `_initialize_model()` | Create empty model structure | Calls `get_model_architecture()` to find the model class, then runs `model_cls(config=hf_config, quant_config=...)` |
+| `get_model_architecture()` | Resolve architecture to model class | Reads `hf_config.architectures`, prefers the SGLang native registry, and falls back to Transformers when appropriate |
+| `ModelRegistry.import_model_classes()` | Register model classes | Scans `EntryClass` values under `sglang.srt.models` and maps class names to Python classes |
+| `ModelRegistry.resolve_model_cls()` | Resolve final model class | Returns the first registered class for `architectures`, or raises an unsupported-architecture error |
+| `model.load_weights(weights)` | Model-owned weight mapping | Each model class usually owns the mapping from checkpoint tensor names to module parameters |
+
 ## model_runner.py: Forward Execution Chain
 
 | Code Location | Purpose | Reading Focus |

@@ -16,9 +16,10 @@ No original source code is modified here; instead, this directory provides educa
 3. `03-function-map.md`: Locate key logic by function/code segment for easy cross-referencing with source code.
 4. `04-tp-worker-annotated-cn.py`: Chinese-annotated copy of `tp_worker.py`.
 5. `05-model-runner-annotated-cn.py`: Chinese-annotated copy of `model_runner.py`.
+6. `06-model-loading-and-architecture-resolution.md`: Understand end to end how `ModelRunner` resolves model classes from `config.json.architectures`, selects a loader, and loads weights.
 
 ## Core Insights
 
 `TpModelWorker` is the adapter between the Scheduler and the model execution layer. It understands the current process's TP rank, PP rank, draft/target worker identity, and converts a scheduled `ScheduleBatch` into a `ForwardBatch`.
 
-`ModelRunner` is the true model execution core. It handles distributed initialization, model loading, KV cache memory pool, attention backend, CUDA graph/piecewise graph, forward dispatch, logits preprocessing, and sampling.
+`ModelRunner` is the true model execution core. It handles distributed initialization, model loading, KV cache memory pool, attention backend, CUDA graph/piecewise graph, forward dispatch, logits preprocessing, and sampling. The question of “which model class is loaded” is mainly decided by the `ModelConfig.hf_config.architectures -> ModelRegistry -> ModelLoader` chain.

@@ -56,6 +56,8 @@ flowchart TD
 | 一个易读 backend | `python/sglang/srt/layers/attention/torch_flex_backend.py` | `TorchFlexAttnBackend.init_forward_metadata()`、`forward_extend()`、`forward_decode()` |
 | Llama 模型示例 | `python/sglang/srt/models/llama.py` | `LlamaForCausalLM.forward()`、`LlamaModel.forward()`、`LlamaAttention.forward()` |
 
+模型类识别和权重加载不在本讲展开，详见 `learning/zh/tp-worker-model-runner/06-model-loading-and-architecture-resolution.md`。那一讲从 `TpModelWorker._init_model_config()`、`ModelConfig.__init__()`、`ModelRegistry.resolve_model_cls()`、`DefaultModelLoader.load_model()` 串起 `model_path -> config.json.architectures -> Python 模型类 -> checkpoint 权重` 的完整链路。
+
 ---
 
 ## 1.1 CodeGraph 校准：先读执行骨架，再读具体模型

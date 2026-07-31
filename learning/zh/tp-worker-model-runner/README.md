@@ -16,9 +16,10 @@
 3. `03-function-map.md`：按函数/代码段定位关键逻辑，便于回到源码中查找。
 4. `04-tp-worker-annotated-cn.py`：`tp_worker.py` 的中文注释版副本。
 5. `05-model-runner-annotated-cn.py`：`model_runner.py` 的中文注释版副本。
+6. `06-model-loading-and-architecture-resolution.md`：端到端理解 `ModelRunner` 如何根据 `config.json.architectures` 解析模型类、选择 loader 并加载权重。
 
 ## 核心结论
 
 `TpModelWorker` 是 Scheduler 与模型执行层之间的适配器。它理解当前进程的 TP rank、PP rank、draft/target worker 身份，并把调度好的 `ScheduleBatch` 转成 `ForwardBatch`。
 
-`ModelRunner` 是真正的模型执行核心。它负责分布式初始化、模型加载、KV cache 内存池、attention backend、CUDA graph/piecewise graph、前向分发、logits 预处理和 sampling。
+`ModelRunner` 是真正的模型执行核心。它负责分布式初始化、模型加载、KV cache 内存池、attention backend、CUDA graph/piecewise graph、前向分发、logits 预处理和 sampling。其中“加载哪个模型类”主要由 `ModelConfig.hf_config.architectures -> ModelRegistry -> ModelLoader` 这条链路决定。
