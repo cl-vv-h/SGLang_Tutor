@@ -261,6 +261,118 @@ if model_runner.device == "npu":
     return NPUCudaGraphBackend(...)
 ```
 
+### 5.1 这里同时存在“继承”与“组合”
+
+用户最容易混淆的是：`NPUGraphRunner` 与 `NPUCudaGraphBackend` 不是平级的两个 graph runner，也不是父子类。
+
+```text
+继承（is-a）：
+NPUGraphRunner
+  是一种 DecodeCudaGraphRunner
+  因此继承 capture()、capture_one_shape()、load_batch() 等模型级流程
+
+组合（has-a）：
+NPUGraphRunner
+  持有 self.backend
+  在 NPU 上 self.backend 是 NPUCudaGraphBackend
+```
+
+[`NPUGraphRunner.__init__()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L87-L116) 自己没有直接写：
+
+```python
+self.backend = NPUCudaGraphBackend(...)
+```
+
+它调用 `super().__init__(...)`，进入 `DecodeCudaGraphRunner.__init__()`；父类完成 buffer、bucket、attention backend 等初始化后，才执行：
+
+```python
+self.backend = resolve_decode_backend(self)
+```
+
+工厂检查 `model_runner.device == "npu"` 后返回：
+
+```python
+NPUCudaGraphBackend(cuda_graph_runner=self, ...)
+```
+
+所以运行时对象关系可以写成：
+
+```python
+runner: NPUGraphRunner
+runner.backend: NPUCudaGraphBackend
+```
+
+Backend 构造函数又从 runner 取得 `device_module`、TP group、compile 开关等运行时依赖，但它不拥有模型语义、bucket padding 规则或如何构造 `ForwardBatch` 的知识。
+
+| 层 | 知道什么 | 不应该负责什么 |
+|---|---|---|
+| `NPUGraphRunner`/`DecodeCudaGraphRunner` | 模型、batch/bucket、静态输入 buffer、attention metadata、LoRA/PP/speculative 状态 | 不直接实现某种设备 runtime 图的 capture API |
+| `NPUCudaGraphBackend` | `torch.npu.NPUGraph`、capture stream、graph pool、`ShapeKey -> graph/output` 字典、update/replay | 不解析模型层，不决定 `input_ids`、KV pool 与 `ForwardBatch` 怎样组织 |
+
+这种分层让同一套 decode runner 能组合不同的 Device backend：CUDA 可以选择 full/breakable backend，NPU 则由工厂组合 `NPUCudaGraphBackend`。
+
+固定提交的 `NPUGraphRunner` 里还保留 `_create_device_graph()`、`_capture_graph()`、`_update_inputs()` 等 helper。对该提交做仓库内引用搜索时，只能看到这些定义，当前 decode 主链没有调用它们；主链走的是 `self.backend.capture_one()` 和 `self.backend.replay*()`。阅读时不要把这些残留 helper 与当前 backend 接口混成第二条执行路径。
+
+### 5.2 `capture_one_shape()` 与 `capture_one()` 是上下游，不是重复实现
+
+`capture_one_shape()` 是从 `DecodeCudaGraphRunner` 继承来的**模型/shape 层方法**。它回答：
+
+> “要为 batch-size bucket 4 建图时，这一次完整模型调用究竟需要哪些静态对象？”
+
+[`capture_one_shape()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L913-L1020) 主要完成：
+
+1. 把 `size` 换算成 `bs`、`num_tokens` 和 `ShapeKey`；
+2. `capture_prepare()` 构造静态 `ForwardBatch`、attention backend 和 PP tensor；
+3. 准备 LoRA、TBO、DeepEP 与 graph 外 attention metadata；
+4. 定义零参数闭包 `run_once()`；
+5. 在闭包里调用完整 `forward(input_ids, positions, forward_batch, ...)`；
+6. 把 `ShapeKey + run_once + post_warmup_hook` 交给 backend。
+
+最后一行才跨入 Device graph 层：
+
+```python
+self.backend.capture_one(
+    shape_key,
+    run_once,
+    capture_inputs=None,
+    post_warmup_hook=post_warmup_hook,
+)
+```
+
+`NPUCudaGraphBackend.capture_one()` 是**设备 runtime 层方法**。它不关心 `run_once()` 内部是 GLM、DeepSeek 还是 Qwen，只要求“调用这个 callable 会提交目标 Device 工作”。它负责：
+
+```python
+for _ in range(2):
+    forward_fn()                 # 两次普通 warmup
+
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph, ...):
+    out = forward_fn()           # 第三次执行并 capture
+
+self._graphs[shape_key] = graph
+self._outputs[shape_key] = out
+```
+
+两者的输入输出边界是：
+
+```text
+capture_one_shape(size=4, forward)
+  -> 构造静态 ForwardBatch
+  -> 构造 run_once
+  -> 构造 ShapeKey
+  -> backend.capture_one(ShapeKey, run_once)
+       -> warmup
+       -> torch.npu.graph capture
+       -> 保存 NPUGraph/output handle
+```
+
+所以方法名中的差别很有意义：
+
+- `capture_one_shape`：准备“某个 shape 下该跑什么”；
+- `capture_one`：把已经准备好的 callable“怎样记录成某种 Device graph”。
+
+如果把二者塞进一个类，通用 runner 就会同时耦合模型输入合同与 NPU runtime API，CUDA/NPU/backend 变体之间难以复用。
+
 ---
 
 ## 6. Capture：一张图怎样生成
@@ -1122,6 +1234,134 @@ Python context manager 有进入和退出两个边界。这里可以读成：
 
 最后，默认路径把 `graph` 保存在当前进程的 `_graphs` 字典，不会把整张 NPUGraph 自动序列化到模型目录。“从磁盘加载 kernel/编译 cache”和“加载这张 runtime NPUGraph”仍然是两回事。
 
+### 6.5 为什么 AttentionBackend 里还有 `forward_decode_graph()`
+
+先纠正一个非常关键的调用链误解：
+
+> **线上命中 graph fast path 时，`NPUGraphRunner.execute()` 不会再调用 Python `model.forward()`。**
+
+`model.forward()` 只在启动 capture 时，通过 `capture_one_shape()` 定义的 `run_once()` 执行。线上请求进入 [`ModelRunner._forward_raw()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1479-L1524) 后，如果 `can_run_graph=True`，会提前返回：
+
+```python
+ret = self.decode_cuda_graph_runner.execute(forward_batch, ...)
+return ModelRunnerOutput(logits_output=ret, can_run_graph=True)
+```
+
+而 [`NPUGraphRunner.execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) 的在线主线是：
+
+```text
+load_batch()/copy_ 静态输入
+  -> graph_key = ...
+  -> backend.replay_with_input_update(...) 或 backend.replay(...)
+  -> 裁掉 padding 后返回静态输出 handle
+```
+
+这里没有 `model.forward(...)`。必须把两个时间阶段分开。
+
+#### 6.5.1 启动 capture 阶段：Python 模型与 attention 方法都真正执行
+
+```text
+NPUGraphRunner 初始化
+  -> DecodeCudaGraphRunner.capture()
+  -> capture_one_shape()
+  -> 定义并调用 run_once()
+  -> model.forward(...)
+  -> 模型中的 attention layer
+  -> AttentionBackend.forward(...)
+  -> AscendAttnBackend.forward_decode(...)
+  -> 必要时 forward_decode_graph(...)
+  -> 这些 attention Device task 被外层 NPUGraph 捕获
+```
+
+[`AttentionBackend.forward()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/layers/attention/base_attn_backend.py#L195-L245) 是每个 attention layer 使用的算子级分发入口。它根据 `ForwardMode` 选择 `forward_decode()`、`forward_extend()` 等。它不是另一个模型 runner。
+
+Ascend backend 在 [`forward_decode()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/attention/ascend_backend.py#L2440-L2484) 中还有一层判断：
+
+```python
+if self.graph_mode and (not self.enable_torch_compile):
+    return self.forward_decode_graph(...)
+```
+
+这里的 `graph_mode` 不是“AttentionBackend 自己又创建了一张图”。它是一个 Python 状态标记，表示当前 `self.forward_metadata` 已切换到 graph 专用的静态 metadata。调用链是：
+
+```python
+attn_backend.init_forward_metadata_out_graph(forward_batch, in_capture=True)
+    -> _init_cuda_graph_metadata(...)
+    -> _apply_cuda_graph_metadata(...)
+         -> self.forward_metadata = metadata
+         -> self.graph_mode = True
+```
+
+`forward_decode_graph()` 的职责只是为 attention 这一小段选择**适合被外层图捕获的实现**，例如：
+
+- 使用按 bucket 预先建立的 `block_tables`、SWA mask 和 padding metadata；
+- 在固定 shape 下写 KV cache；
+- 调用 `npu_fused_infer_attention_score.out` 等可被捕获及后续 update 的 FIA 入口；
+- 避开普通 eager 路径中依赖 live shape、动态裁切或动态 metadata 构造的部分。
+
+它产生的仍然只是整个模型 `run_once()` 中的一组 NPU task：
+
+```text
+整张模型 NPUGraph
+  = embedding task
+  + 第 0 层 attention task（由 forward_decode_graph 发出）
+  + 第 0 层 MLP/MoE task
+  + ...
+  + logits task
+```
+
+因此 `forward_decode_graph()` 不是第二张 graph，不会嵌套保存一个 attention graph，也不负责 graph 生命周期。
+
+#### 6.5.2 在线 replay 阶段：不再调用这个 Python 方法
+
+启动时 capture 完成后，`forward_decode_graph()` 发出的 task 已成为 `NPUGraph` 的一部分。线上执行是：
+
+```text
+ModelRunner._forward_raw()
+  -> NPUGraphRunner.execute()
+       -> load_batch()
+            -> init_forward_metadata_out_graph(fb_view)
+               # 在 graph 外把本轮动态值写进静态 metadata storage
+       -> NPUCudaGraphBackend.replay*()
+            -> torch.npu.NPUGraph.replay()
+               # Device 自动重放已记录 attention task
+```
+
+线上 Python 不再依次进入每一层，也不再调用 `AttentionBackend.forward()` 或 `forward_decode_graph()`。不过 replay 前仍会调用 `init_forward_metadata_out_graph()`，因为 block table、sequence length 等**值**要更新，而 graph 绑定的 storage 地址保持不变。这是“更新图的输入/metadata”与“重新执行 Python attention forward”的区别。
+
+#### 6.5.3 为什么开启 `torch.compile` 时反而不进 `forward_decode_graph()`
+
+固定源码的条件明确包含：
+
+```python
+not self.enable_torch_compile
+```
+
+所以有三种情况：
+
+| 场景 | `graph_mode` | `enable_torch_compile` | Python capture 时的 attention 路径 |
+|---|---:|---:|---|
+| 普通 eager | `False` | 任意 | 通用 `forward_decode()` |
+| NPUGraph、未开 compile | `True` | `False` | `forward_decode_graph()` |
+| NPUGraph + `torch.compile` | `True` | `True` | 继续执行/追踪通用 `forward_decode()` |
+
+这里的 `AscendAttnBackend.enable_torch_compile` 是全局 capture 开关，不是“当前 bucket 是否在 `compile_bs`”的逐 bucket 标记。只要全局开关为真，attention 条件就不会进入 `forward_decode_graph()`：
+
+- 当前 bucket 在 `compile_bs`：Dynamo/TorchAir 跟踪通用 `forward_decode()`；
+- 当前 bucket 不在 `compile_bs`：原始 Python `model.forward` 仍执行通用 `forward_decode()`，但最终 task 依旧由外层 NPUGraph capture。
+
+支持 TorchAir compile 的提交同时加入了这个 `not self.enable_torch_compile` 条件，并补齐通用 `forward_decode()` 中 FIA 的长度处理。这说明 compiled 路径刻意让 Dynamo/TorchAir 处理通用 attention forward，而不是进入原先为 raw graph capture 准备的专用函数。
+
+但“没有调用 `forward_decode_graph()`”不等于“attention 没进 NPUGraph”。Compiled `forward_decode()`/FX runner 最终提交的 attention NPU task，仍然在第三次 `run_once()` 时被外层 `torch.npu.graph(...)` 捕获。
+
+把三种名字放在一起就不容易混淆：
+
+| 名字 | 层级 | 作用 |
+|---|---|---|
+| `NPUGraphRunner.execute()` | 整个模型/线上请求 | 准备静态输入并 replay 整张模型图 |
+| `NPUCudaGraphBackend.replay*()` | Device runtime | 调用 `NPUGraph.update/replay` |
+| `AttentionBackend.forward_decode_graph()` | 单个 attention layer/建图期 | 发出适合捕获的 attention task，不创建独立 graph |
+
 ---
 
 ## 7. Replay：新请求如何喂给旧图
@@ -1206,6 +1446,76 @@ def replay(self, shape_key, static_forward_batch, **kwargs):
 | 额外机制 | 直接 replay | Host thread、update Stream、ExternalEvent |
 
 所以方法名中的 “input update” 容易误导。它不是“把所有模型输入 tensor 换掉”，而是把 torch_npu 明确支持更新的 captured operator kwargs 重新绑定到新值。
+
+为什么不能永远只保留 `replay()`？用一次具体 decode 看：
+
+```text
+capture 时：
+  input_ids storage 地址 = 0x1000
+  captured FIA Host keyword actual_seq_lengths_kv = [8, 16]
+
+下一轮 replay 前：
+  新 input_ids 写进同一个 0x1000
+  新序列长度应为 [9, 17]
+```
+
+对于 `input_ids`，普通 `copy_()` 足够，因为 graph 读取的是地址 `0x1000`，里面的值已经变了。但 `actual_seq_lengths_kv=[8,16]` 可能是捕获 FIA task 时复制保存的 Host 参数，并不位于 `0x1000` 这样的固定 Device storage 中。若此时只调用：
+
+```python
+graph.replay()
+```
+
+attention task 仍可能按旧长度 `[8,16]` 执行。`replay_with_input_update()` 就是在 replay 前把这一份受支持的 captured Host 参数修补为 `[9,17]`。
+
+真实实现完整展示了两种输入合同：
+
+```python
+def replay_with_input_update(
+    self,
+    shape_key,
+    seq_lens,
+    attr_name=None,
+    attr_type=None,
+    cpu_update_input=None,
+):
+    if cpu_update_input is None:
+        if isinstance(attr_type, torch.Tensor):
+            seq_lens = torch.from_numpy(
+                np.array(seq_lens).astype(np.int32)
+            )
+        cpu_update_input = [{attr_name: seq_lens}]
+
+    graph = self._graphs[shape_key]
+
+    def _update():
+        self._device_module.set_device(self._device_id)
+        graph.update(cpu_update_input=cpu_update_input)
+
+    thread = threading.Thread(target=_update)
+    thread.start()
+    graph.replay()
+    thread.join()
+    return self._outputs[shape_key]
+```
+
+因此拆成两个方法还有两个工程原因：
+
+1. `replay()` 是所有 `BaseCudaGraphBackend` 都必须实现的最小公共接口；NPU 特有的可更新 FIA Host 参数不是所有 backend 都有。
+2. `graph.update()`、线程、Event 与 task patch 都有额外合同和开销。没有被捕获 Host keyword 需要更新的模型，应走更简单的 `replay()`，而不是无条件做一次空 update。
+
+当前标准 `NPUGraphRunner.execute()` 用模型配置显式选择：
+
+```python
+if not (
+    is_deepseek_dsa(hf_config)
+    or is_deepseek_v4(hf_config)
+):
+    output = self.backend.replay_with_input_update(...)
+else:
+    output = self.backend.replay(...)
+```
+
+这个条件只说明 DSA/v4 的 attention graph 使用另一套动态输入合同。例如固定源码中的 DSV4 metadata 把 `actual_seq_lengths_kv` 维护为 NPU tensor 并用 `copy_()` 更新；它不需要走这里面向 auto-dispatch FIA Host keyword 的通用 update wrapper。不能反推为 DSA/v4 的长度永远不变。
 
 #### 7.3.3 调用方怎样生成新的长度
 
@@ -1796,6 +2106,8 @@ if can_run_graph:
 
 任一失败都会继续走 prefill graph 或 `EagerRunner`，而不是强行 replay 一张不兼容的图。
 
+注意 `if can_run_graph` 分支在调用 `execute()` 后立刻 `return`。这意味着 online decode 不会继续落入本函数后面的 eager `model.forward()` 路径。`decode_cuda_graph_runner.execute()` 也不会替它再调用一次模型；它只准备静态 buffer/metadata 并进入 backend replay。模型 Python forward、每层循环和 `forward_decode_graph()` 已经在启动 capture 时执行过。
+
 ### 13.4 `NPUGraphRunner.execute()` 内部发生什么
 
 NPU 覆盖的 [`execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) 可以拆成五步。
@@ -1826,6 +2138,13 @@ output = self.backend.replay_with_input_update(
 ```
 
 Backend 创建 Host `threading.Thread` 调用 `graph.update(...)`，主线程调用 `graph.replay()`，最后 `join()`。这里不是依赖一个含糊的“内部保证”：如 7.3.6～7.3.8 所示，`auto_dispatch_capture` 在捕获 FIA task 时让 replay Stream 记录 `ExternalEvent.wait()`，而 `graph.update()` 在专用 update Stream 修补 task 后执行 `event.record()`。因此 replay 可以先被 Host 发起，但运行到该 Event wait 时必须等待更新完成；最后的 `thread.join()` 只保证 Host 更新线程在函数返回前结束，它本身不负责排序 NPU task。
+
+这一步是线上真正触发模型 Device 计算的位置，但它触发的是**已记录 task 的重放**，不是 Python：
+
+```text
+没有：NPUGraphRunner.execute() -> model.forward() -> 每层 attention
+实际：NPUGraphRunner.execute() -> NPUGraph.replay() -> Device 重放所有层 task
+```
 
 **第五步：裁掉 padding 并交给 sampler。**
 
@@ -1900,7 +2219,8 @@ sequenceDiagram
 6. `runner_backend/utils.py`：NPU backend 工厂；
 7. `npu_cudagraph_backend.py`：真正创建、保存和 replay `NPUGraph`；
 8. `npu_graph_runner.py`：NPU seq lengths update 与输出裁剪；
-9. `npu_piecewise_backend.py`：FX/compiler piecewise graph。
+9. `base_attn_backend.py` 与 NPU `ascend_backend.py`：模型每层怎样选择 graph-compatible attention 路径；
+10. `npu_piecewise_backend.py`：FX/compiler piecewise graph。
 
 ---
 
@@ -1961,6 +2281,18 @@ Warmup 是普通执行，目的在于让惰性初始化、编译、kernel 加载
 ### 14. `NPUGraph.update` 能否修改图中任意参数、shape 或算子？
 
 不能。当前 `auto_dispatch_capture` 源码主要特殊记录 `npu_fused_infer_attention_score` 及其 out 版本，并保存可更新 task handle。Update 只能修改这些 runtime 明确记录和支持的 operator kwargs，不能把固定图变成任意动态图，也不能随意更换图拓扑、模型权重地址或 bucket。
+
+### 15. `NPUGraphRunner` 与 `NPUCudaGraphBackend` 是什么关系？
+
+同时是“runner 继承 + backend 组合”。`NPUGraphRunner` 继承 `DecodeCudaGraphRunner`，拥有模型、bucket、静态 buffer、`ForwardBatch` 和完整 capture/replay 编排；父类通过 `resolve_decode_backend(self)` 给它组合一个 `NPUCudaGraphBackend`。Backend 只管理 `torch.npu.NPUGraph`、pool、stream、`ShapeKey -> graph/output` 与 update/replay。换言之，runner 决定“这一遍模型是什么”，backend 决定“怎样把 callable 记录/重放成 NPU runtime graph”。
+
+### 16. `capture_one_shape()` 与 `capture_one()` 为什么分开？
+
+`capture_one_shape()` 是上游模型/shape 层：根据一个 bucket 构造静态 `ForwardBatch`、attention metadata、`ShapeKey` 和完整 `run_once()`。随后它调用 `self.backend.capture_one(shape_key, run_once, ...)`。`capture_one()` 是下游 Device runtime 层：两次 warmup、进入 `torch.npu.graph` 执行第三次、保存 `NPUGraph` 和输出 handle。它们通过 closure 相接，不是两套重复 capture。
+
+### 17. 线上 graph fast path 会不会调用 `model.forward()` 或 `forward_decode_graph()`？
+
+不会。启动 capture 时 `run_once -> model.forward -> AttentionBackend.forward -> forward_decode_graph`（仅未开 compile 的 graph 分支）真正执行并产生待捕获 task。线上 `_forward_raw -> NPUGraphRunner.execute -> backend.replay* -> NPUGraph.replay` 直接重放这些 task，不重新进入模型层循环或 attention Python forward。Replay 前的 `init_forward_metadata_out_graph()` 只是刷新静态 metadata storage 的值，不等于重新计算 attention。
 
 ---
 

@@ -151,6 +151,118 @@ classDiagram
 
 [`resolve_decode_backend`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner_backend/utils.py#L52-L73) returns `NPUCudaGraphBackend` for an NPU device.
 
+### 5.1 Inheritance and Composition Exist at the Same Time
+
+`NPUGraphRunner` and `NPUCudaGraphBackend` are neither two peer graph runners nor a parent/child class pair:
+
+```text
+inheritance (is-a):
+NPUGraphRunner
+  is a DecodeCudaGraphRunner
+  and inherits capture(), capture_one_shape(), load_batch(), and related flow
+
+composition (has-a):
+NPUGraphRunner
+  owns self.backend
+  whose NPU value is an NPUCudaGraphBackend
+```
+
+[`NPUGraphRunner.__init__()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L87-L116) does not directly assign:
+
+```python
+self.backend = NPUCudaGraphBackend(...)
+```
+
+It calls `super().__init__(...)`. After the parent `DecodeCudaGraphRunner` initializes buffers, buckets, and the attention backend, it runs:
+
+```python
+self.backend = resolve_decode_backend(self)
+```
+
+The factory sees `model_runner.device == "npu"` and returns:
+
+```python
+NPUCudaGraphBackend(cuda_graph_runner=self, ...)
+```
+
+The runtime relationship is therefore:
+
+```python
+runner: NPUGraphRunner
+runner.backend: NPUCudaGraphBackend
+```
+
+The backend constructor borrows the Device module, TP group, and compile flag from the runner, but does not know model semantics, padding policy, or how to construct a `ForwardBatch`.
+
+| Layer | Knows | Does not own |
+|---|---|---|
+| `NPUGraphRunner`/`DecodeCudaGraphRunner` | Model, batch/bucket, static input buffers, attention metadata, LoRA/PP/speculative state | A concrete Device runtime capture API |
+| `NPUCudaGraphBackend` | `torch.npu.NPUGraph`, capture Stream, graph pool, `ShapeKey -> graph/output`, update and replay | Model layers or how inputs, KV pools, and `ForwardBatch` are organized |
+
+This split lets one decode runner compose with full/breakable CUDA backends or the NPU backend.
+
+The fixed `NPUGraphRunner` also contains helpers named `_create_device_graph()`, `_capture_graph()`, and `_update_inputs()`. Repository-wide reference search at this commit finds only their definitions; the current decode path calls `self.backend.capture_one()` and `self.backend.replay*()` instead. They should not be mistaken for a second active capture path.
+
+### 5.2 `capture_one_shape()` Feeds `capture_one()`; They Are Not Duplicates
+
+Inherited [`capture_one_shape()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py#L913-L1020) is a **model/shape-layer method**. It answers:
+
+> “For batch-size bucket 4, which static objects constitute one complete model invocation?”
+
+It:
+
+1. derives `bs`, `num_tokens`, and a `ShapeKey` from `size`;
+2. uses `capture_prepare()` to create a static `ForwardBatch`, attention backend, and PP tensors;
+3. prepares LoRA, TBO, DeepEP, and out-of-graph attention metadata;
+4. defines a zero-argument `run_once()` closure;
+5. makes that closure call the complete `forward(input_ids, positions, forward_batch, ...)`;
+6. passes `ShapeKey + run_once + post_warmup_hook` to the backend.
+
+Only the final call crosses into the Device-graph layer:
+
+```python
+self.backend.capture_one(
+    shape_key,
+    run_once,
+    capture_inputs=None,
+    post_warmup_hook=post_warmup_hook,
+)
+```
+
+`NPUCudaGraphBackend.capture_one()` is the **Device-runtime method**. It does not care whether `run_once()` represents GLM, DeepSeek, or Qwen. It only requires that calling the callable submits the intended Device work:
+
+```python
+for _ in range(2):
+    forward_fn()                 # two ordinary warmups
+
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph, ...):
+    out = forward_fn()           # third execution is captured
+
+self._graphs[shape_key] = graph
+self._outputs[shape_key] = out
+```
+
+The complete boundary is:
+
+```text
+capture_one_shape(size=4, forward)
+  -> build static ForwardBatch
+  -> build run_once
+  -> build ShapeKey
+  -> backend.capture_one(ShapeKey, run_once)
+       -> warm up
+       -> capture with torch.npu.graph
+       -> store NPUGraph/output handle
+```
+
+Thus:
+
+- `capture_one_shape` prepares **what to execute for one shape**;
+- `capture_one` decides **how an already-prepared callable becomes a Device graph**.
+
+Putting both responsibilities into one class would couple the generic model-input contract to one NPU runtime API and prevent clean reuse across backends.
+
 ---
 
 ## 6. Capture From Source
@@ -948,6 +1060,134 @@ Warmup #2 cannot “also become the graph” because its `forward_fn()` call occ
 
 The default path keeps `graph` in the process-local `_graphs` dictionary. It does not automatically serialize the whole NPUGraph into the model directory. Loading kernel/compiler caches from disk and loading this runtime NPUGraph are separate ideas.
 
+### 6.4 Why Does AttentionBackend Also Have `forward_decode_graph()`?
+
+First correct a crucial call-chain misconception:
+
+> **When an online request hits the graph fast path, `NPUGraphRunner.execute()` does not call Python `model.forward()` again.**
+
+`model.forward()` executes through the `run_once()` closure only while startup capture is building the graph. For an online hit, [`ModelRunner._forward_raw()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/model_executor/model_runner.py#L1479-L1524) returns early:
+
+```python
+ret = self.decode_cuda_graph_runner.execute(forward_batch, ...)
+return ModelRunnerOutput(logits_output=ret, can_run_graph=True)
+```
+
+The online body of [`NPUGraphRunner.execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) is:
+
+```text
+load_batch()/copy_ static inputs
+  -> compute graph_key
+  -> backend.replay_with_input_update(...) or backend.replay(...)
+  -> slice padding and return the static output handle
+```
+
+There is no `model.forward(...)` in this online sequence. Capture time and replay time must be separated.
+
+#### 6.4.1 Startup Capture: Model and Attention Python Really Execute
+
+```text
+initialize NPUGraphRunner
+  -> DecodeCudaGraphRunner.capture()
+  -> capture_one_shape()
+  -> define and invoke run_once()
+  -> model.forward(...)
+  -> an attention layer in the model
+  -> AttentionBackend.forward(...)
+  -> AscendAttnBackend.forward_decode(...)
+  -> possibly forward_decode_graph(...)
+  -> outer NPUGraph captures the resulting attention Device tasks
+```
+
+[`AttentionBackend.forward()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/layers/attention/base_attn_backend.py#L195-L245) is the operator-level dispatcher used by each attention layer. It selects `forward_decode()`, `forward_extend()`, and related methods from `ForwardMode`; it is not another model runner.
+
+Ascend's [`forward_decode()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/attention/ascend_backend.py#L2440-L2484) adds:
+
+```python
+if self.graph_mode and (not self.enable_torch_compile):
+    return self.forward_decode_graph(...)
+```
+
+`graph_mode` does not mean the AttentionBackend owns another graph. It is a Python state flag saying that `self.forward_metadata` now refers to graph-specific static metadata:
+
+```python
+attn_backend.init_forward_metadata_out_graph(forward_batch, in_capture=True)
+    -> _init_cuda_graph_metadata(...)
+    -> _apply_cuda_graph_metadata(...)
+         -> self.forward_metadata = metadata
+         -> self.graph_mode = True
+```
+
+`forward_decode_graph()` merely selects an **outer-graph-capturable implementation** for the attention portion. It can:
+
+- use bucket-prepared block tables, SWA masks, and padding metadata;
+- write KV cache at fixed shapes;
+- invoke update-aware FIA entry points such as `npu_fused_infer_attention_score.out`;
+- avoid live-shape slicing and dynamic metadata construction from the ordinary eager path.
+
+Its tasks remain only one portion of the complete model graph:
+
+```text
+whole-model NPUGraph
+  = embedding tasks
+  + layer-0 attention tasks (emitted by forward_decode_graph)
+  + layer-0 MLP/MoE tasks
+  + ...
+  + logits tasks
+```
+
+It does not create, nest, or own a separate attention graph.
+
+#### 6.4.2 Online Replay Does Not Invoke This Python Method
+
+After capture, the tasks emitted by `forward_decode_graph()` already belong to the stored `NPUGraph`:
+
+```text
+ModelRunner._forward_raw()
+  -> NPUGraphRunner.execute()
+       -> load_batch()
+            -> init_forward_metadata_out_graph(fb_view)
+               # write this iteration's values into static metadata storage
+       -> NPUCudaGraphBackend.replay*()
+            -> torch.npu.NPUGraph.replay()
+               # Device replays the recorded attention tasks
+```
+
+Online Python does not enter every model layer and does not call `AttentionBackend.forward()` or `forward_decode_graph()` again. It still calls `init_forward_metadata_out_graph()` before replay because block tables and sequence lengths need fresh **values**, while captured storage addresses stay fixed. Updating graph inputs/metadata is not the same as rerunning Python attention forward.
+
+#### 6.4.3 Why Does `torch.compile` Bypass `forward_decode_graph()`?
+
+The fixed condition explicitly includes:
+
+```python
+not self.enable_torch_compile
+```
+
+The resulting cases are:
+
+| Case | `graph_mode` | `enable_torch_compile` | Attention path during Python capture |
+|---|---:|---:|---|
+| Ordinary eager | `False` | either | Common `forward_decode()` |
+| NPUGraph without compile | `True` | `False` | `forward_decode_graph()` |
+| NPUGraph plus `torch.compile` | `True` | `True` | Continue/trace common `forward_decode()` |
+
+`AscendAttnBackend.enable_torch_compile` is the global capture setting, not a per-bucket “this `bs` belongs to `compile_bs`” flag. Once the global flag is true, attention does not enter `forward_decode_graph()`:
+
+- a bucket in `compile_bs` lets Dynamo/TorchAir trace the common `forward_decode()`;
+- a bucket outside `compile_bs` executes the common `forward_decode()` through raw Python, while the outer NPUGraph still captures its resulting tasks.
+
+The commit that added TorchAir compile support introduced this condition while adding FIA length handling to the common `forward_decode()` path. The compiled path is therefore intentionally traced/prepared through the common attention implementation rather than the older raw-graph helper.
+
+Bypassing `forward_decode_graph()` does not exclude attention from NPUGraph. The attention tasks submitted by compiled `forward_decode()`/the FX runner during the third `run_once()` are still captured by the outer `torch.npu.graph(...)`.
+
+Keep the three names at their own layers:
+
+| Name | Layer | Role |
+|---|---|---|
+| `NPUGraphRunner.execute()` | Whole model/online request | Fill static inputs and replay the whole-model graph |
+| `NPUCudaGraphBackend.replay*()` | Device runtime | Invoke `NPUGraph.update/replay` |
+| `AttentionBackend.forward_decode_graph()` | One attention layer/capture time | Emit capturable attention tasks; does not create a separate graph |
+
 ---
 
 ## 7. Replay With a Live ForwardBatch
@@ -1016,6 +1256,76 @@ def replay(self, shape_key, static_forward_batch, **kwargs):
 | Extra machinery | Direct replay | Host thread, update Stream, ExternalEvent |
 
 “Input update” therefore does not replace every model input tensor. It rebinds captured operator kwargs explicitly supported by torch_npu.
+
+Why not keep only `replay()`? Consider one concrete decode:
+
+```text
+at capture:
+  input_ids storage address = 0x1000
+  captured FIA Host keyword actual_seq_lengths_kv = [8, 16]
+
+before the next replay:
+  new input_ids are copied into the same 0x1000
+  the new sequence lengths should be [9, 17]
+```
+
+`copy_()` is enough for `input_ids`, because the graph rereads address `0x1000` and finds new contents. `actual_seq_lengths_kv=[8,16]`, however, may be a copied Host parameter retained in the captured FIA task rather than data in fixed Device storage. Plain:
+
+```python
+graph.replay()
+```
+
+may therefore run attention with stale lengths. `replay_with_input_update()` patches this supported captured Host parameter to `[9,17]` before the task executes.
+
+The complete implementation also exposes its two input contracts:
+
+```python
+def replay_with_input_update(
+    self,
+    shape_key,
+    seq_lens,
+    attr_name=None,
+    attr_type=None,
+    cpu_update_input=None,
+):
+    if cpu_update_input is None:
+        if isinstance(attr_type, torch.Tensor):
+            seq_lens = torch.from_numpy(
+                np.array(seq_lens).astype(np.int32)
+            )
+        cpu_update_input = [{attr_name: seq_lens}]
+
+    graph = self._graphs[shape_key]
+
+    def _update():
+        self._device_module.set_device(self._device_id)
+        graph.update(cpu_update_input=cpu_update_input)
+
+    thread = threading.Thread(target=_update)
+    thread.start()
+    graph.replay()
+    thread.join()
+    return self._outputs[shape_key]
+```
+
+The two methods also exist for two engineering reasons:
+
+1. `replay()` is the minimum common `BaseCudaGraphBackend` interface; an updateable NPU FIA Host parameter is not a property of every backend.
+2. `graph.update()`, its thread, Events, and task patching add a contract and overhead. A model with no such captured Host keyword should take the simpler `replay()` path rather than perform an unconditional empty update.
+
+The standard `NPUGraphRunner.execute()` makes the choice explicitly:
+
+```python
+if not (
+    is_deepseek_dsa(hf_config)
+    or is_deepseek_v4(hf_config)
+):
+    output = self.backend.replay_with_input_update(...)
+else:
+    output = self.backend.replay(...)
+```
+
+This says only that DSA/v4 attention graphs use another dynamic-input contract. In the fixed DSV4 source, for example, metadata keeps `actual_seq_lengths_kv` as an NPU tensor and refreshes it with `copy_()`; it does not need this generic auto-dispatch-FIA Host-keyword wrapper. It does not mean DSA/v4 lengths are constant.
 
 #### 7.3.3 How the Caller Builds Current Lengths
 
@@ -1548,6 +1858,8 @@ if can_run_graph:
 
 The three gates mean: this forward mode permits launch-graph decode/verify; a decode runner exists; and the live batch maps to a compatible captured `ShapeKey`. A failed gate falls through to the prefill graph or `EagerRunner`.
 
+The `can_run_graph` branch returns immediately after `execute()`. Online decode therefore does not fall through to the later eager `model.forward()` path, and `decode_cuda_graph_runner.execute()` does not call the model on its behalf. It only prepares static buffers/metadata and enters backend replay. Python model forward, layer iteration, and `forward_decode_graph()` already ran during startup capture.
+
 ### 13.4 Inside `NPUGraphRunner.execute()`
 
 The NPU override [`execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) has five conceptual steps.
@@ -1559,6 +1871,13 @@ The NPU override [`execute()`](https://github.com/sgl-project/sglang/blob/9a03be
 5. It slices the static `LogitsProcessorOutput` to `raw_num_token` before returning it.
 
 The backend starts a Host `threading.Thread` for `graph.update(...)`, calls `graph.replay()` on the main thread, and then joins. This is not an unspecified “internal guarantee.” As Sections 7.3.6–7.3.8 show, `auto_dispatch_capture` captures an `ExternalEvent.wait()` before each updateable FIA task, while `graph.update()` patches that task on a dedicated update Stream and then records the Event. Host code may therefore launch replay first, but the replay Stream cannot pass the captured wait until the update has finished. The final `thread.join()` only ensures that the Host update thread has exited before this function returns; it does not order the NPU tasks.
+
+This is where online model Device computation is triggered, but it is a **replay of recorded tasks**, not Python execution:
+
+```text
+not:    NPUGraphRunner.execute() -> model.forward() -> every attention layer
+actual: NPUGraphRunner.execute() -> NPUGraph.replay() -> Device replays all layer tasks
+```
 
 Back in `TpModelWorker.forward_batch_generation()`:
 
@@ -1631,7 +1950,8 @@ There is no separate process named “Host.” `Scheduler`, `TpModelWorker`, `Mo
 6. `runner_backend/utils.py`: the NPU backend factory;
 7. `npu_cudagraph_backend.py`: actual `NPUGraph` construction, storage, update, and replay;
 8. `npu_graph_runner.py`: NPU sequence-length update and output slicing;
-9. `npu_piecewise_backend.py`: FX/compiler piecewise graphs.
+9. `base_attn_backend.py` and NPU `ascend_backend.py`: per-layer graph-compatible attention selection;
+10. `npu_piecewise_backend.py`: FX/compiler piecewise graphs.
 
 ---
 
@@ -1692,6 +2012,18 @@ torch_npu inserts an `ExternalEvent` wait while capturing an FIA task. The updat
 ### 14. Can `NPUGraph.update` Modify Arbitrary Parameters, Shapes, or Operators?
 
 No. Current auto-dispatch source specially records `npu_fused_infer_attention_score` and its out variant and retains updateable task handles. Update can modify only operator kwargs explicitly recorded and supported by the runtime. It does not make topology, weight addresses, or buckets arbitrarily dynamic.
+
+### 15. What Is the Relationship Between `NPUGraphRunner` and `NPUCudaGraphBackend`?
+
+It combines runner inheritance with backend composition. `NPUGraphRunner` inherits `DecodeCudaGraphRunner` and owns the model, buckets, static buffers, `ForwardBatch`, and capture/replay orchestration. The parent attaches an `NPUCudaGraphBackend` through `resolve_decode_backend(self)`. That backend owns `torch.npu.NPUGraph`, the pool and Stream, `ShapeKey -> graph/output`, and update/replay. The runner determines what one model execution means; the backend determines how a callable becomes an NPU runtime graph.
+
+### 16. Why Are `capture_one_shape()` and `capture_one()` Separate?
+
+`capture_one_shape()` is the upstream model/shape layer. It builds the bucket's static `ForwardBatch`, attention metadata, `ShapeKey`, and complete `run_once()` closure. It then calls `self.backend.capture_one(shape_key, run_once, ...)`. `capture_one()` is the downstream Device-runtime layer: two warmups, a third execution inside `torch.npu.graph`, and storage of the `NPUGraph` and output handle. The closure connects them; they are not duplicate capture implementations.
+
+### 17. Does the Online Graph Fast Path Call `model.forward()` or `forward_decode_graph()`?
+
+No. During startup capture, `run_once -> model.forward -> AttentionBackend.forward -> forward_decode_graph` (only for the non-compiled graph branch) really executes and emits tasks for capture. Online execution is `_forward_raw -> NPUGraphRunner.execute -> backend.replay* -> NPUGraph.replay`; it directly replays those tasks without re-entering model layers or Python attention forward. The pre-replay `init_forward_metadata_out_graph()` refreshes values in static metadata storage; it does not recompute attention.
 
 ---
 
