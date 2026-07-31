@@ -321,6 +321,59 @@ captured batch-size buckets:
 
 ### 6.3 warmup 为什么在 capture 前
 
+这一节改用一个具体例子贯穿始终：当前正在为 `bs=4` 的普通 decode bucket 建图，且 `4 in self.compile_bs`，所以这个 bucket 开启 `torch.compile`。先不要记 Dynamo、FX、TorchAir 这些名字，先认清调用链里真正存在的五个对象：
+
+| 名字 | 运行时类型 | 谁创建它 | 它是不是一张图 |
+|---|---|---|---|
+| `model.forward` | Python bound method（绑定了模型实例的方法） | 模型类 | 不是 |
+| `forward` | Python callable；可能是原始 `model.forward`，也可能是 Dynamo 包装器 | `patch_model_npu()` | 不是；包装器内部以后会查找 compiler graph |
+| `forward_batch` | `ForwardBatch` Python 对象；其字段引用静态 NPU tensor view 和 Host metadata | `capture_prepare(4)` | 不是 |
+| `run_once` | 不接收参数的 Python closure（闭包） | `capture_one_shape()` | 不是 |
+| `graph` | `torch.npu.NPUGraph` runtime 对象 | `NPUCudaGraphBackend.capture_one()` | 是最终可以 replay 的设备任务图 |
+
+**Bound method（绑定方法）**表示函数已经记住 `self` 是哪个模型实例；调用 `model.forward(a, b, c)` 时，Python 会把 `model` 隐式作为第一个参数传给类中定义的 `forward(self, a, b, c)`。
+
+**Callable（可调用对象）**表示可以写成 `forward(...)` 的 Python 对象。它不保证是普通函数，也不保证已经编译；`torch.compile` 返回的包装器也是 callable。
+
+**Closure（闭包）**表示函数保存了定义它时所在作用域里的对象引用。这里的 `run_once()` 虽然没有形参，但已经记住当前 bucket 的 `forward_batch`、`forward`、`attn_backend` 和 `num_tokens`。
+
+固定源码的骨架不是抽象伪代码，而是下面这条真实调用关系：
+
+```python
+# DecodeCudaGraphRunner._capture_one_stream()
+with torch_compile_decoration.patch_model(
+    self.model_runner.model,
+    bs in self.compile_bs,                 # 本例为 True
+    num_tokens=bs * self.captured_req_width,
+    tp_group=self.model_runner.tp_group,
+) as forward:
+    self.capture_one_shape(bs, forward, ...)
+
+# DecodeCudaGraphRunner.capture_one_shape()
+forward_batch, attn_backend, pp_proxy_tensors = self.capture_prepare(bs, ...)
+
+def run_once():
+    attn_backend.init_forward_metadata_in_graph(forward_batch)
+    ...
+    return forward(
+        forward_batch.input_ids,
+        forward_batch.positions,
+        forward_batch,
+    )
+
+self.backend.capture_one(shape_key, run_once, ...)
+```
+
+因此“两次 warmup 加一次 capture”并不是三次凭空调用 `model.forward`，而是 `NPUCudaGraphBackend` **连续三次调用同一个 `run_once` 闭包**：
+
+```text
+run_once 调用 1：普通执行，warmup #1
+run_once 调用 2：普通执行，warmup #2
+run_once 调用 3：位于 torch.npu.graph(...) 内，capture forward
+```
+
+三次调用看到的是同一个 `ForwardBatch` 对象和同一组静态 storage 地址；区别只在于第三次调用时 NPU runtime 已进入 capture 状态。后文所有 Dynamo、FX 和 TorchAir 细节都挂在这条主干上。
+
 #### 6.3.1 先给出严格定义
 
 **Warmup（预热）** 是在正式计时、正式 capture 或正式服务前，使用与目标路径相同或足够相似的输入，实际执行若干次 forward，让“第一次才会发生”的工作提前发生。
@@ -413,7 +466,7 @@ for _ in range(2):
 
 **第三种：`torch.compile` 的编译 warmup。**
 
-先不要把它理解成“把 Python 文件编译成一个二进制”。这里真正发生的是：PyTorch 先从这一次 `forward` 中提取一张**算子语义图**，再把图交给 Ascend 的 TorchAir backend 转换成 NPU 可执行路径。
+先不要把它理解成“把 Python 文件编译成一个二进制”。这里真正发生的是：PyTorch 从第一次 `forward` 中提取**算子语义图**并建立 guard，再把 FX 图交给 Ascend 的 TorchAir backend 处理。backend 最终返回什么，取决于 TorchAir 配置：本章固定版本的 `npugraph_ex` 设置了 `run_eagerly=True`，所以它完成 AOT/decomposition/FX 准备后返回 eager FX runner，**不会在这条路径中生成 TorchAir GE/ACL 可执行图**；真正被复用的 Device task 序列随后由外层 NPUGraph capture。
 
 完整入口要从 `compile_bs` 开始看。
 
@@ -520,62 +573,377 @@ npu_backend = torchair.get_npu_backend(compiler_config=compiler_config)
 return npu_backend
 ```
 
-**TorchAir** 是连接 PyTorch compiler graph 与昇腾图/算子执行栈的编译适配层。`torchair.get_npu_backend(...)` 返回一个符合 `torch.compile` backend 协议的函数。按照 TorchAir 的接口，这个 backend 会接收：
+**TorchAir** 是连接 PyTorch compiler graph 与昇腾图/算子执行栈的适配层。`torchair.get_npu_backend(...)` 返回一个符合 `torch.compile` backend 协议的函数。backend 的输入不是最外层那三个实参原样组成的 tuple，而是 Dynamo/AOT 处理后交出的：
 
 ```text
 gm: torch.fx.GraphModule
-example_inputs: 当前这次调用的示例输入
+example_inputs: 为 FX placeholder 提供规格和示例值的扁平化输入列表
 ```
 
-**FX GraphModule** 是“图节点 + 模块属性”的 Python 对象：节点描述 `linear`、attention、reshape 等算子及其数据依赖，不是 NPU Stream 上的任务队列。TorchAir backend 再执行 decomposition/AOT 处理，将 FX 图转换成 NPU concrete graph/可执行 callable。官方 TorchAir 的 [`npu_fx_compiler.py`](https://gitee.com/ascend/torchair/blob/2640db9816afa31fa933cd32e8e51ba94cdeaf87/python/torchair/npu_fx_compiler.py#L831-L928) 可以看到 `GraphModule + example_inputs -> NpuGraphConverter -> inference callable` 这条主线。
+**FX GraphModule** 是“FX 节点图 + 被引用的模块属性”的 Python 对象。PyTorch 官方通常直接使用名称 `torch.fx`，这里不强行为 `FX` 扩写一个并不稳定的全称。节点常见的 `op` 包括 `placeholder`、`call_function`、`get_attr` 和 `output`；它表达算子依赖，不是 NPU Stream 上已经排好的 task 队列。
+
+这里尤其不要把 `example_inputs` 误认成：
+
+```python
+[input_ids, positions, forward_batch]
+```
+
+`ForwardBatch` 是复杂 Python 对象，不是一块能直接交给编译器的 Device tensor。Dynamo 会追踪 Python 对它的字段访问：实际参加 tensor 计算的字段可能被提升成 FX placeholder；编译期可确定的 Python 值可能被特化并由 guard 保护；完全不参与图的字段不会成为 backend 输入。因此 TorchAir 收到的 `example_inputs` 数量和次序是 compiler graph 的内部接口，不等于用户函数签名。
 
 配置项的含义：
 
 - `mode="reduce-overhead"`：目标偏向减少重复 Host/launch 开销，适合与图执行路径配合；
-- `debug.run_eagerly=True`：TorchAir 上游将它描述为在 graph compiler 执行前先 eager 执行 FX graph。这里的 eager 指 TorchAir 对 FX 图的预执行/调试路径，**不是** SGLang 的 `EagerRunner` fallback，也不等于关闭 `torch.compile`。
+- `debug.run_eagerly=True`：**跳过 TorchAir 的 NPU graph compiler，返回 FX graph 的 eager runner。**
+
+第二条是理解当前 SGLang 路径的关键。它不是“先 eager 跑一次，然后仍然生成 GE/ACL compiled graph”。官方 TorchAir 固定源码在 [`_NpuFxCompiler._gen_compiled_gm()`](https://gitee.com/ascend/torchair/blob/b9255d87ebcd54c9ea325f700fcb65deddd8b501/python/torchair/npu_fx_compiler.py#L491-L498) 明确执行：
+
+```python
+if self.config.debug.run_eagerly:
+    ...
+    return graph.fx_graph
+
+return concrete_graph
+```
+
+也就是说，当前 `npugraph_ex` 组合仍使用 `torch.compile` 的 Dynamo/fullgraph/guard 以及 TorchAir backend 的 AOT/decomposition/FX 准备流程，但最终让 FX GraphModule 以 eager operator dispatch 方式运行；真正记录重复 Device task 的是外层 SGLang `torch.npu.NPUGraph`。它不会在这里再嵌套一张 TorchAir GE/ACL 执行图。
+
+TorchAir 是随 CANN/PyTorch-NPU 环境配套演进的组件，内部类名会随版本变化；本章使用上述固定源码解释 `run_eagerly` 的稳定语义。部署其他版本时应以安装包中的 `npu_fx_compiler.py` 为准。
 
 ##### 第五步：为什么说“编译发生在第一次 warmup 调用”
 
-`capture_one_shape()` 中的 `run_once()` 最终执行：
+先纠正一句容易产生误解的话：这里的“编译 warmup”不一定生成一个 TorchAir GE/ACL 二进制。对当前 `npugraph_ex + run_eagerly=True` 配置，更准确的说法是：
+
+> 第一次 warmup 触发 Dynamo 抽图、guard 建立、AOT/TorchAir backend 准备和 FX runner 的第一次真实执行；TorchAir NPU compiler 被 `run_eagerly=True` 跳过，最终 Device task 仍来自 FX 图中的 eager NPU operator dispatch。
+
+下面逐层进入这次调用。
+
+###### 5.1 `torch.compile(...)` 这一行只创建包装器
+
+PyTorch 2.10 固定源码中，[`torch.compile()`](https://github.com/pytorch/pytorch/blob/v2.10.0/torch/__init__.py#L2505-L2512) 最后做的是：
 
 ```python
-out = forward(
-    forward_batch.input_ids,
-    forward_batch.positions,
-    forward_batch,
+return torch._dynamo.optimize(
+    backend=backend,
+    nopython=fullgraph,
+    dynamic=dynamic,
+    disable=disable,
+    guard_filter_fn=guard_filter_fn,
+)(model)
+```
+
+这段代码把 callable 交给 Dynamo 的 `OptimizeContext`，返回一个会安装 frame-evaluation hook 的包装器。此时尚未出现下面这些对象：
+
+- 本 bucket 的 `ForwardBatch`；
+- 由本次输入特化出来的 FX `GraphModule`；
+- 与这个 GraphModule 配套的 guards；
+- TorchAir backend 返回的 runner。
+
+所以不要把：
+
+```python
+forward = torch.compile(...)
+```
+
+理解成 C/C++ 的“编译函数执行完毕并返回机器码地址”。它更像是“登记：这个 Python callable 第一次真正被调用时，先让 Dynamo 接管”。
+
+###### 5.2 warmup #1 先从 `capture_one()` 进入 `run_once()`
+
+[`NPUCudaGraphBackend.capture_one()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L78-L127) 第一次循环实际执行：
+
+```python
+self._device_module.synchronize()
+self._tp_group.barrier()
+forward_fn()                         # forward_fn 就是 run_once
+if post_warmup_hook is not None:
+    post_warmup_hook()
+```
+
+这里有两个不同范围的同步：
+
+- `synchronize()` 是 Device 同步：当前 Host 线程等待这个 NPU device 上此前异步提交的工作完成；
+- `barrier()` 是进程/rank 同步：每个 TP rank 都到达此处才一起继续。
+
+随后进入 `capture_one_shape()` 中定义的真实 `run_once()`。固定源码比“调用 forward”多做了几件事：
+
+```python
+def run_once():
+    attn_backend.init_forward_metadata_in_graph(forward_batch)
+
+    forward_batch.dp_local_start_pos = None
+    forward_batch.dp_local_num_tokens = None
+    set_dp_buffer_len(
+        forward_batch.global_dp_buffer_len,
+        num_tokens,
+        forward_batch.dp_padding_mode.is_max_len(),
+        forward_batch.global_num_tokens_cpu,
+    )
+    set_is_extend_in_batch(False)
+
+    out = forward(
+        forward_batch.input_ids,
+        forward_batch.positions,
+        forward_batch,
+        **kwargs,
+    )
+    for capture_hook in self.model_runner.capture_tail_hooks:
+        capture_hook(self, out, forward_batch, num_tokens)
+    return out
+```
+
+逐项看：
+
+- `init_forward_metadata_in_graph()` 准备必须作为 Device task 出现在图内的 attention metadata 操作；虽然函数名含 `in_graph`，warmup 时 runtime 尚未 capture，它仍作为普通操作执行；
+- `dp_local_start_pos` 等字段赋值是 Host 上的 Python 对象状态修改；
+- `set_dp_buffer_len()` 更新 data-parallel 相关长度状态；
+- `set_is_extend_in_batch(False)` 把这次路径固定为普通 decode，而不是 extend；
+- `forward(...)` 才进入模型；
+- `capture_tail_hooks` 是模型 forward 后仍需纳入相同执行合同的尾部 hook。
+
+因此 warmup 的目标路径不只是 `model.forward`，而是完整的 `run_once`：attention 图内 metadata 准备、DP 状态、模型 forward 和 tail hook 都必须与第三次 capture 一致。
+
+###### 5.3 第一次进入 compiled `forward` 时，Dynamo 做什么
+
+Python 调用：
+
+```python
+forward(
+    forward_batch.input_ids,     # torch.Tensor，NPU 上的静态 input-id view
+    forward_batch.positions,     # torch.Tensor，NPU 上的静态 position view
+    forward_batch,               # ForwardBatch Python 对象
 )
 ```
 
-当 `forward` 是 compiled callable 时，时间线是：
+进入的 `forward` 是 5.1 中尚未为本输入生成图的 Dynamo 包装器。Dynamo 使用 Python frame evaluation 机制接管 `model.forward` 的 bytecode（字节码）。
+
+**Bytecode（字节码）** 是 CPython 执行 `LOAD_ATTR`、`CALL`、条件跳转等操作的中间指令，不是 NPU 指令。Dynamo 的 symbolic interpreter（符号解释器）沿 bytecode 解释：
+
+- 遇到 `forward_batch.forward_mode` 之类的 Python 属性读取时，记录这条 Python 路径及其特化条件；
+- 遇到 tensor 算子时，不立即把每个数学操作都作为本轮模型结果发到 NPU，而是建立 FX proxy/node；
+- 使用 FakeTensor/示例元数据传播 shape、dtype、device 等信息；
+- 把模型 parameter、buffer 和真正需要运行时变化的 tensor 值变成 graph 输入或属性。
+
+**FakeTensor（伪张量）**保存 shape、stride、dtype、device 等元数据，但不保存真实大块数据。它让编译器能推导 `matmul` 输出 shape，而不必在抽图阶段真的完成整次矩阵乘。
+
+`fullgraph=True` 在 `torch.compile` 内映射为 `nopython=True`。若 Dynamo 无法把这次调用形成允许的完整图，通常会报 graph break 错误，而不是悄悄把中间一段退回普通 Python。
+
+**Graph break（断图）**表示 Dynamo 无法继续把某段 Python 行为表示成当前 FX graph，只能结束当前图并回到 Python；本路径要求 full graph，所以它是需要修复的兼容性问题。
+
+###### 5.4 FX GraphModule 和 guards 分别保存什么
+
+完成符号追踪后会得到两类不同产物：
+
+```text
+FX GraphModule
+  保存：placeholder、get_attr、call_function、output 等节点及数据依赖
+
+guards
+  保存：这份 GraphModule 在什么条件下仍然有效
+```
+
+例如某个简化的 guard 可能约束：
+
+```text
+input_ids 是 NPU Tensor
+input_ids.dtype == torch.int64
+input_ids.shape == [4]
+positions.shape == [4]
+模型处于 eval/no_grad 路径
+ForwardBatch 中决定分支的某个 Python 枚举仍是 DECODE
+```
+
+这里的示例只用于理解，实际 guard 由 Dynamo 根据访问到的对象生成，数量和形式会更多。`dynamic=False` 让 shape 更倾向于按当前 bucket 特化；因此 size-4 与 size-8 往往对应不同 compiler variant。
+
+guard 不参与矩阵乘，它运行在 Host 上，用来回答：“这次调用能不能安全地跳进之前生成的 callable？”若 guard 失败，Dynamo 可能为同一 Python code object 新建另一个 variant，或者达到重编译限制后 fallback。
+
+###### 5.5 Dynamo 怎样真正调用 TorchAir backend
+
+Dynamo 在 `OutputGraph` 中构造 `gm` 和 `example_inputs` 后，会调用用户 backend。PyTorch 固定源码的关键语义是：
+
+```python
+compiled_fn = compiler_fn(gm, example_inputs)
+assert callable(compiled_fn)
+```
+
+这里：
+
+- `compiler_fn` 是 SGLang 传入的 TorchAir backend；
+- `gm` 的类型是 `torch.fx.GraphModule`；
+- `example_inputs` 是与 FX placeholders 对应的示例值；
+- backend 的返回值必须仍然是 callable，Dynamo 才能把它装进生成后的 Python bytecode。
+
+TorchAir 的 [`_npu_backend()`](https://gitee.com/ascend/torchair/blob/b9255d87ebcd54c9ea325f700fcb65deddd8b501/python/torchair/npu_fx_compiler.py#L595-L629) 不是直接对每个 FX node 调一次 CANN API，它先进入 AOTAutograd/functionalization/decomposition 管线：
+
+- **AOTAutograd** 是 PyTorch 用于在 ahead-of-time 图处理中建立前向/反向或推理图的基础设施；本章是 `no_grad` 推理，关注 inference/forward graph；
+- **Functionalization（函数化）**把部分原地修改语义转换成更适合图分析的函数式表达，同时保留必要的输入 mutation 合同；
+- **Decomposition（分解）**把某些高层复合算子改写为 backend 更容易支持的一组基础算子。
+
+这些词描述的是 compiler graph 的变换，不表示此时已经有 `NPUGraph`。
+
+随后 `_NpuFxCompiler` 会准备目标 concrete-graph 对象和 FX runner。但当前配置命中：
+
+```python
+if self.config.debug.run_eagerly:
+    return graph.fx_graph
+```
+
+所以本路径返回给 Dynamo 的 `compiled_fn` 本质上是经过 AOT/TorchAir 准备的 FX GraphModule runner，而不是完成 GE/ACL 编译的 executable。
+
+###### 5.6 warmup #1 的“真实执行”发生在哪里
+
+backend 返回 callable 后，Dynamo 会把对原始 `model.forward` 的调用改写为对该 callable 的调用，并在**同一次 warmup #1** 中继续执行它。
+
+因为当前返回的是 FX GraphModule runner，FX 节点中的 ATen/torch_npu/custom op 会走正常 dispatcher：
+
+```text
+FX call_function node
+  -> PyTorch dispatcher
+  -> NPU implementation / torch_npu / custom op wrapper
+  -> CANN runtime 提交 Device task 到当前 NPU stream
+```
+
+这些提交仍是异步的：Host 得到输出 tensor handle，不代表所有 NPU 算术已经结束。`capture_one()` 第二次循环开头的下一次 `self._device_module.synchronize()` 会等待 warmup #1 提交的 Device 工作完成。
+
+warmup #1 返回的 `out` 没有被 `capture_one()` 保存。它只完成了：
+
+- 首次 Dynamo tracing 与 guard/variant 建立；
+- 首次 TorchAir backend/AOT/FX runner 准备；
+- 首次沿该 FX runner 提交整条模型 Device 工作；
+- 可能触发的算子注册、kernel load、workspace/allocator 等惰性工作。
+
+###### 5.7 warmup #2 为什么仍然执行完整模型
+
+第二次循环不是“检查一下缓存就返回”。源码仍完整调用：
+
+```python
+self._device_module.synchronize()  # 明确等待 warmup #1 的 Device 工作
+self._tp_group.barrier()
+forward_fn()                       # 再次进入同一个 run_once
+post_warmup_hook()
+```
+
+compiled `forward` 首先运行 guards。若 size、dtype、Python 分支状态等都匹配：
+
+```text
+guard hit
+  -> 直接选择 warmup #1 建立的 compiled callable
+  -> 不再重新解释整份 model.forward bytecode
+  -> 不再重新调用 TorchAir backend
+  -> 仍然完整执行 FX graph，重新提交本轮所有 NPU Device task
+```
+
+因此“复用 artifact”只表示省掉抽图和 backend 准备，不表示省掉模型计算。warmup #2 仍会重新计算 47 层、MLA、MoE 和 logits，只是 Host compiler 路径更接近稳态。
+
+第二次循环结束后，源码片段里没有额外写一行独立的 `synchronize()`；不能凭空声称该 `for` 循环末尾显式等待了 warmup #2。之后进入 graph context 时的 stream/capture runtime 会建立合法顺序。阅读源码时应区分“此处明确同步”与“后续 context/runtime 保证有序”。
+
+###### 5.8 第三次调用才是 capture forward
+
+两次普通执行结束后，backend 创建：
+
+```python
+graph = torch.npu.NPUGraph()
+```
+
+若开启 `torch.compile`，它还建立：
+
+```python
+skip_guard_context = torch.compiler.set_stance(
+    skip_guard_eval_unsafe=True
+)
+```
+
+`skip_guard_eval_unsafe` 不是“把 guard 永久删除”。[PyTorch 2.10 文档](https://docs.pytorch.org/docs/2.10/generated/torch.compiler.set_stance.html)将其定义为只运行区分已存在 variant 所需的 guards、减少完整 guard evaluation 开销；它之所以标记 `unsafe`，是因为调用者必须保证 warmup 已覆盖需要的 variant，后面不再需要重编译。SGLang 已按 bucket 固定 shape、地址和分支，正是在用这一合同换取 capture/稳态开销下降。
+
+然后才进入：
+
+```python
+with (
+    skip_guard_context,
+    torch.npu.graph(
+        graph,
+        pool=self._pool,
+        stream=self._capture_stream,
+        auto_dispatch_capture=True,
+    ),
+):
+    out = forward_fn()     # 第三次完整 run_once
+```
+
+第三次 `forward_fn()` 仍会走 `run_once -> compiled forward -> FX runner -> NPU dispatcher`，但这一次 runtime 正处于 capture context，所以 FX runner 发出的 Device task、task 间依赖和地址绑定被记录进 `graph`。
+
+NPUGraph **不会记录**：
+
+- Dynamo 正在解释哪条 Python bytecode；
+- FX GraphModule 的 Python 对象结构；
+- `ForwardBatch` 这个 Python 对象本身；
+- 原始模型源码中 `for layer in layers` 这样的 Python 循环对象。
+
+需要更精确地区分 compiled 与 raw 两条路径：raw `model.forward` 会在第三次调用中重新执行原始 Python 控制流；compiled 路径则通常已在第一次 Dynamo tracing 时把固定层循环展开为 FX 节点，第三次调用执行的是 Dynamo 包装器和生成后的 FX runner，不必重新逐层解释原始循环。两条路径都会在 Host 上完成各自的 dispatcher 调用；NPUGraph 只保存这些调用最终产生的 Device task 提交结果。
+
+###### 5.9 三次调用结束后，各自留下什么
+
+| 调用 | 是否在 graph context | 是否执行模型 Device 工作 | 持久留下的东西 |
+|---|---|---|---|
+| warmup #1 | 否 | 是 | Dynamo variant、guards、backend/FX runner cache，以及各种首次运行状态 |
+| warmup #2 | 否 | 是 | 进一步稳定 kernel/runtime/allocator 状态；返回值仍丢弃 |
+| capture forward | 是 | 是 | `NPUGraph` 和与 capture storage 绑定的输出 handle |
+
+所以本路径准确的时间线是：
 
 ```text
 创建 compiled callable
   torch.compile(model.forward, ...)
-  # 此时还没有调用真实的静态 ForwardBatch
+  -> 返回 Dynamo 包装器
+  -> 尚无本 bucket 的 FX graph/guards
 
 warmup #1 第一次调用 forward(...)
-  -> TorchDynamo 观察 Python bytecode 和 tensor 操作
-  -> 为当前输入建立 FX GraphModule
-  -> 建立 guard
-  -> 调用 TorchAir backend(gm, example_inputs)
-  -> TorchAir 转换/准备 NPU callable
-  -> 执行并得到本次 warmup 输出
+  -> Dynamo 解释 bytecode，用 FakeTensor/Proxy 建 FX GraphModule
+  -> 建立 guards
+  -> TorchAir backend 经过 AOT/decomposition/FX 准备
+  -> run_eagerly=True 返回 FX GraphModule runner，跳过 NPU graph compiler
+  -> FX runner 通过 dispatcher 提交真实 NPU task
+  -> warmup 输出 handle 被丢弃
 
 warmup #2 再次调用同一个 forward(...)
-  -> 输入满足 guard
-  -> 通常复用已生成的 compiler artifact
-  -> 支付仍残留的 kernel load、allocator/workspace 等首次开销
+  -> guard 命中同一 variant，不重新抽图
+  -> 再次完整执行 FX runner 和模型 Device 工作
+  -> warmup 输出 handle 再次被丢弃
 
 capture forward 第三次调用
-  -> 在 torch.npu.graph(...) 内执行趋于稳态的 compiled callable
-  -> NPUGraph 记录它产生的 Device 任务提交
+  -> 进入 torch.npu.graph(...)
+  -> 第三次完整执行同一个 run_once
+  -> NPUGraph 记录 FX eager dispatch 最终产生的 Device task
+  -> 保存 graph 与 capture output handle
 ```
 
-**Guard（守卫条件）** 是 compiled artifact 的适用条件，例如 tensor 类型、维度/shape、某些模块状态是否与编译时一致。若条件不满足，`torch.compile` 可能重编译或失效；SGLang 用固定 bucket、静态 view 和 `dynamic=False`，就是尽量让 capture 时命中同一份 artifact。
+因此“编译 warmup”的本质不是预热一个已经存在的 NPUGraph，而是：**在 NPUGraph 尚未开始记录时，先把 Dynamo/TorchAir/dispatcher/runtime 的首次路径跑通。**
 
-因此“编译 warmup”的本质不是预热 NPUGraph，而是：**在进入 NPUGraph capture 前，先调用 compiled callable，让 Dynamo/TorchAir 的抽图、转换、编译和首次执行成本发生在 graph context 外。**
+##### 第六步：如果 `run_eagerly=False`，时间线哪里不同
 
-三者可以画成：
+不要把当前 SGLang 特例推广成“所有 TorchAir 都不编译”。官方 TorchAir `_NpuFxCompiler._gen_compiled_gm()` 在 `run_eagerly=False` 时返回 `concrete_graph`：
+
+- `mode="max-autotune"` 通常构造 `GeConcreteGraph`；其 [`__call__()`](https://gitee.com/ascend/torchair/blob/b9255d87ebcd54c9ea325f700fcb65deddd8b501/python/torchair/_ge_concrete_graph/fx2ge_converter.py#L643-L706) 第一次执行会处理 runtime 输入、load/compile GE graph，再运行 graph；
+- `mode="reduce-overhead"` 构造 `AclConcreteGraph`；其 callable 管理自己的 ACL graph compile/capture/replay。
+
+此时时间线才可以写成：
+
+```text
+Dynamo FX graph
+  -> TorchAir concrete graph
+  -> 首次 concrete_graph(...) 完成内部 load/compile/capture
+  -> 后续调用复用 TorchAir graph runner
+```
+
+而本章固定 SGLang 设置 `run_eagerly=True`，就是下面这条不同的组合：
+
+```text
+Dynamo/TorchAir 准备后的 FX runner
+  -> 以 eager op dispatch 产生 NPU task
+  -> 外层 SGLang NPUGraph 捕获这些 task
+```
+
+两条路径不能混写成“先由 TorchAir 生成一张 GE/ACL 图，再由 SGLang 必然捕获同一张图”。
+
+把三层 warmup/capture 入口重新汇总为：
 
 ```text
 DecodeCudaGraphRunner.capture()
@@ -624,16 +992,68 @@ self.backend.capture_one(
 
 ### 6.4 真正 capture
 
-固定源码的核心是：
+#### 6.4.1 capture Stream 和 graph pool 从哪里来
+
+进入单个 bucket 之前，`DecodeCudaGraphRunner.capture()` 已经建立 capture session：
+
+```python
+with graph_capture() as graph_capture_context, profile_context as prof:
+    self.stream = graph_capture_context.stream
+    with self.backend.capture_session(self.stream):
+        self._capture_one_stream()
+```
+
+NPU backend 的 `capture_session()` 再保存 pool 与 stream：
+
+```python
+if self._pool is None:
+    self._pool = self._device_module.graph_pool_handle()
+set_graph_pool_id(self._pool)
+self._capture_stream = stream
+try:
+    yield
+finally:
+    self._capture_stream = None
+```
+
+- `graph_pool_handle()` 返回 runtime graph memory pool 的 handle。它不是装着若干 Python tensor 的 `list`，而是 runtime 用来协调图内稳定分配、让多个 bucket 图复用内存规划的标识；
+- `set_graph_pool_id()` 把 graph-pool 标识通知给相关 allocator/通信分配路径；
+- `_capture_stream` 是第三次 forward 提交 Device task 时使用的 NPU Stream；
+- `yield` 把控制权交还给 `_capture_one_stream()`，后者会按从大到小的顺序捕获多个 bucket；
+- `finally` 只清掉 backend 对当前 capture stream 的临时引用，不会删除已经捕获的图。
+
+因此每个 bucket 有自己的 `NPUGraph`，但同一 capture session 中的 bucket 可以共享 graph-pool 规划和 capture stream。
+
+#### 6.4.2 `capture_one()` 的完整 capture 分支
+
+两次 warmup 之后的固定源码是：
 
 ```python
 graph = torch.npu.NPUGraph()
 
-with torch.npu.graph(
-    graph,
-    pool=self._pool,
-    stream=self._capture_stream,
-    auto_dispatch_capture=True,
+if self._enable_torch_compile:
+    skip_guard_context = torch.compiler.set_stance(
+        skip_guard_eval_unsafe=True
+    )
+else:
+    skip_guard_context = empty_context()
+
+if self._memory_saver_adapter is not None and self._memory_saver_adapter.enabled:
+    graph_ctx = partial(
+        self._memory_saver_adapter.cuda_graph,
+        tag=GPU_MEMORY_TYPE_CUDA_GRAPH,
+    )
+else:
+    graph_ctx = torch.npu.graph
+
+with (
+    skip_guard_context,
+    graph_ctx(
+        graph,
+        pool=self._pool,
+        stream=self._capture_stream,
+        auto_dispatch_capture=True,
+    ),
 ):
     out = forward_fn()
 
@@ -641,18 +1061,66 @@ self._graphs[shape_key] = graph
 self._outputs[shape_key] = out
 ```
 
-对象含义：
+`empty_context()` 是不做任何事的 context manager，让 compile 开关的两个分支保持同一种 `with` 结构。`graph_ctx` 默认是 `torch.npu.graph`；开启 memory saver 后会换成 adapter，但仍负责建立 NPU graph capture context。
 
-| 变量 | 类型/含义 |
-|---|---|
-| `graph` | `torch.npu.NPUGraph`，保存捕获后的 runtime 图 |
-| `self._pool` | graph memory pool handle，使多张图可管理/复用稳定内存 |
-| `self._capture_stream` | capture 期间任务被记录的 NPU Stream |
-| `forward_fn` | 使用静态 buffer view 执行一次模型 forward 的闭包 |
-| `out` | capture 时建立的静态输出 tensor handle |
-| `shape_key` | 查找这张图的捕获规格 |
+#### 6.4.3 `with torch.npu.graph(...)` 前、中、后分别发生什么
 
-Capture context 并不把 Python 源码字符串存起来。Python 的 `forward_fn()` 真正执行一次；它产生的 NPU launch 被 runtime 捕获。
+Python context manager 有进入和退出两个边界。这里可以读成：
+
+```text
+进入 with 之前
+  graph 只是新建的 NPUGraph 容器
+  第三次 forward 还没有被记录
+
+进入 graph_ctx
+  runtime 把指定 stream 切入 capture 状态
+  绑定 graph、pool 和 auto-dispatch capture 选项
+
+执行 with 主体
+  Host 执行完整 run_once()
+  model/FX 节点经 dispatcher 提交 NPU task
+  runtime 记录可捕获 task、依赖和地址合同
+
+退出 graph_ctx
+  runtime 结束并固化本次 capture
+  graph 变成可 replay 的 runtime 图
+```
+
+`with` 捕获的是动态执行期间真正发生的提交，不是扫描 `forward_fn` 的 Python 源码：
+
+- 第三次 forward 没有执行到的分支不会凭空进入图；
+- Python `if` 的判断过程通常不是 NPUGraph 节点，被选分支发出的 Device task 才是捕获对象；
+- `fullgraph=True` 约束 Dynamo compiler graph，`torch.npu.graph` 约束 Device launch capture，两者仍是不同层次。
+
+#### 6.4.4 capture 后每个对象保存了什么
+
+| 对象 | 类型/内容 | capture 后的作用 |
+|---|---|---|
+| `graph` | `torch.npu.NPUGraph` | 保存该 `ShapeKey` 的 Device task、依赖和地址绑定，可 `replay()` |
+| `self._pool` | graph memory-pool handle | 管理捕获图需要的稳定内存规划 |
+| `self._capture_stream` | NPU Stream | 决定 capture 时观察哪条任务提交序列 |
+| `forward_fn` | `run_once` Python closure | 只在 warmup/capture 阶段由 Host 执行；线上 replay 不重新调用 |
+| `out` | Tensor 或 `LogitsProcessorOutput` 等输出树 | 引用 capture-time 输出 storage；replay 后相同 storage 被新结果覆盖 |
+| `shape_key` | `ShapeKey` | 区分 batch size、stream/variant 等图规格 |
+| `_graphs` | `dict[ShapeKey, NPUGraph]` | 线上按规格查找图 |
+| `_outputs` | `dict[ShapeKey, Any]` | 返回与图输出 storage 绑定的已有 handle |
+
+`out` 不是“以后永远返回 capture 时那批数值”的快照。它是输出 storage 的 Python 引用；未来 `graph.replay()` 重跑 Device task 后，相同 storage 的内容会更新。
+
+#### 6.4.5 一行源码分别对应什么 Host/Device 行为
+
+| 源码 | Host 做什么 | Device/runtime 做什么 |
+|---|---|---|
+| `graph = torch.npu.NPUGraph()` | 创建 Python/runtime handle | 尚未执行模型 |
+| 进入 `graph_ctx(...)` | 调用 context manager 入口 | 指定 stream 开始 capture，绑定 pool |
+| `out = forward_fn()` | 执行 metadata 准备、Python 模型路径和 dispatcher 调用 | 算子 task 被提交并被 runtime 记录 |
+| 退出 `graph_ctx` | 调用 context manager 退出逻辑 | 结束 capture，形成可 replay 图 |
+| `_graphs[key] = graph` | 把 handle 放进 Python 字典 | 不重新执行 Device 计算 |
+| `_outputs[key] = out` | 保存输出 storage 的 Python handle | 不复制一份输出数值快照 |
+
+这也解释了 warmup #2 为什么不能“顺便成为图”：它调用 `forward_fn()` 时位于 `graph_ctx` 外，runtime 没有处在 capture 状态，第三次必须重新执行完整 forward。
+
+最后，默认路径把 `graph` 保存在当前进程的 `_graphs` 字典，不会把整张 NPUGraph 自动序列化到模型目录。“从磁盘加载 kernel/编译 cache”和“加载这张 runtime NPUGraph”仍然是两回事。
 
 ---
 
@@ -1072,23 +1540,25 @@ yield torch.compile(
 逐项解释：
 
 - `torch.no_grad()`：推理时不建立 autograd backward graph；
-- `torch.compile`：让 Dynamo/编译后端提取并优化 forward；
+- `torch.compile`：返回一个 Dynamo 包装 callable；第一次收到真实 bucket 输入时才抽取 FX 图、建立 guard 并调用 backend；
 - `fullgraph=True`：希望整个区域形成单一 compiler graph，遇到 graph break 通常报错而不是静默拆分；
-- `dynamic=False`：按静态规格优化；
-- `backend="npugraph_ex"`：选择 NPU 编译 backend；
-- 外层 NPUGraph capture：执行编译后的 callable，并记录它产生的 launch。
+- `dynamic=False`：按静态规格建立专用 variant；不同 bucket 通常各有与自身规格匹配的 variant；
+- `backend="npugraph_ex"`：取得 TorchAir backend callable，不是把字符串直接交给 NPU；
+- 当前固定源码还设置 `compiler_config.debug.run_eagerly=True`：TorchAir 做 AOT/decomposition/FX 准备，但跳过自己的 NPU graph compiler，返回 eager FX runner；
+- 外层 NPUGraph capture：第三次执行相同 `run_once`，记录 FX runner 通过 NPU dispatcher 产生的 Device task。
 
-所以可能的栈是：
+所以本章固定版本的准确调用栈是：
 
 ```text
 SGLang Python control flow
-  -> compiled model forward
-  -> optimized NPU operators/kernels
-  -> NPUGraph records their launch sequence
+  -> Dynamo 包装 callable（guard 选择已准备好的 FX variant）
+  -> TorchAir 返回的 eager FX runner
+  -> PyTorch dispatcher / torch_npu / 自定义算子提交 NPU task
+  -> 外层 NPUGraph 记录 task 与依赖
   -> replay submits the sequence
 ```
 
-Compiler graph 与 runtime graph 优化的开销层级不同，不能互换名称。
+因此，这里的“compiled callable”不等于“已经生成 TorchAir GE/ACL 二进制”。`torch.compile` 这一层仍负责 Python 图抽取、guard 和 FX/AOT 处理；`NPUGraph` 负责记录运行时提交。只有改为 `run_eagerly=False` 时，TorchAir 才会沿本章 6.3.2 第六步所述的 `GeConcreteGraph`/`AclConcreteGraph` 分支建立自己的 concrete graph。Compiler graph 与 runtime graph 优化的开销层级不同，不能互换名称。
 
 ---
 
@@ -1259,7 +1729,7 @@ size/bucket
 | `size`/`bs` | Python `int`，普通 decode 中表示当前图的 captured batch size，并作为 bucket key |
 | `DecodeInputBuffers` | 一组最大尺寸 `torch.Tensor`，提供稳定 Device storage |
 | `forward_batch` | `ForwardBatch`，字段指向上述静态 tensor view |
-| `forward` | `model.forward` 或 `torch.compile` 后的 callable |
+| `forward` | `model.forward` 或 `torch.compile` 返回的 Dynamo callable；后者在当前 `run_eagerly=True` 配置中命中并执行 eager FX runner |
 | `run_once` | 零参数 Python closure，把前三者封装成一次完整模型调用 |
 | `ShapeKey` | 可哈希规格键，至少包含 size，还可包含 stream/LoRA variant |
 | `post_warmup_hook` | 可选 callable，用于复位 attention warmup 状态 |
@@ -1454,7 +1924,7 @@ Event 表达 Stream 进度依赖。Graph capture/replay 仍通过 Stream 执行�
 
 ### 5. `torch.compile` 与 `NPUGraph` 是一回事吗？
 
-不是。`torch.compile` 提取并优化程序/IR 图；NPUGraph 捕获优化后 callable 实际产生的 runtime launch。二者可以叠加。
+不是。`torch.compile` 负责 Dynamo 抽图、guard 选择以及 backend/AOT/FX 准备；NPUGraph 捕获 callable 实际产生的 runtime Device task。在本章固定的 `run_eagerly=True` 路径里，TorchAir 自己的 NPU graph compiler 被跳过，但上述 `torch.compile` 工作仍然发生，随后外层 NPUGraph 捕获 eager FX runner 的 Device 提交。二者可以叠加，却不是同一张图。
 
 ### 6. 为什么 graph 更常用于 decode？
 

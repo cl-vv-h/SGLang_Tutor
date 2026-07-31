@@ -189,6 +189,59 @@ More buckets reduce fallback but increase capture time and graph/static-memory u
 
 ### 6.2 Warmup
 
+Use one concrete case throughout this section: SGLang is capturing an ordinary decode bucket with `bs=4`, and `4 in self.compile_bs`, so this bucket enables `torch.compile`. Before learning Dynamo, FX, or TorchAir, identify the five real objects in the call chain:
+
+| Name | Runtime type | Creator | Is it a graph? |
+|---|---|---|---|
+| `model.forward` | Python bound method tied to the loaded model instance | Model class | No |
+| `forward` | Python callable: raw `model.forward` or a Dynamo wrapper | `patch_model_npu()` | No; the wrapper may later select compiled code |
+| `forward_batch` | `ForwardBatch` Python object whose fields reference static NPU tensor views and Host metadata | `capture_prepare(4)` | No |
+| `run_once` | Zero-argument Python closure | `capture_one_shape()` | No |
+| `graph` | `torch.npu.NPUGraph` runtime object | `NPUCudaGraphBackend.capture_one()` | Yes: this is the replayable Device-task graph |
+
+A **bound method** remembers its `self` object. Calling `model.forward(a, b, c)` implicitly passes `model` to the class definition `forward(self, a, b, c)`.
+
+A **callable** is any Python object that can be invoked as `forward(...)`. It need not be an ordinary function or an already-compiled binary; the wrapper returned by `torch.compile` is also a callable.
+
+A **closure** retains references from the scope in which it was defined. `run_once()` accepts no arguments, but remembers this bucket's `forward_batch`, `forward`, `attn_backend`, and `num_tokens`.
+
+The fixed source has this concrete call structure:
+
+```python
+# DecodeCudaGraphRunner._capture_one_stream()
+with torch_compile_decoration.patch_model(
+    self.model_runner.model,
+    bs in self.compile_bs,                 # True in this example
+    num_tokens=bs * self.captured_req_width,
+    tp_group=self.model_runner.tp_group,
+) as forward:
+    self.capture_one_shape(bs, forward, ...)
+
+# DecodeCudaGraphRunner.capture_one_shape()
+forward_batch, attn_backend, pp_proxy_tensors = self.capture_prepare(bs, ...)
+
+def run_once():
+    attn_backend.init_forward_metadata_in_graph(forward_batch)
+    ...
+    return forward(
+        forward_batch.input_ids,
+        forward_batch.positions,
+        forward_batch,
+    )
+
+self.backend.capture_one(shape_key, run_once, ...)
+```
+
+“Two warmups plus one capture” therefore means that `NPUCudaGraphBackend` invokes the **same `run_once` closure three times**:
+
+```text
+run_once call 1: ordinary execution, warmup #1
+run_once call 2: ordinary execution, warmup #2
+run_once call 3: inside torch.npu.graph(...), the capture forward
+```
+
+All three calls see the same `ForwardBatch` object and the same static storage addresses. The distinguishing condition is that the NPU runtime is in capture state only for the third call. Every Dynamo, FX, and TorchAir detail below hangs from this concrete spine.
+
 #### 6.2.1 Precise Definitions
 
 **Warmup** means executing a real forward pass before measurement, capture, or serving so that first-use work happens early. Such work can include:
@@ -260,7 +313,7 @@ for _ in range(2):
 
 The warmup return value is discarded. The first pass usually triggers lazy setup; the second more closely resembles steady-state repetition and exposes paths that differ between first and subsequent invocations.
 
-Third, some captured buckets use a `torch.compile` callable. This does not mean “compile the Python file into one binary.” PyTorch first extracts an **operator-semantic graph** from a concrete `forward` invocation, then sends that graph to the Ascend TorchAir backend to prepare an NPU execution path.
+Third, some captured buckets use a `torch.compile` callable. This does not mean “compile the Python file into one binary.” PyTorch extracts an **operator-semantic graph** and creates guards from the first `forward`, then gives the FX graph to the Ascend TorchAir backend. What that backend returns depends on its configuration: the fixed `npugraph_ex` path in this chapter sets `run_eagerly=True`, so TorchAir performs AOT/decomposition/FX preparation and returns an eager FX runner; it **does not build a TorchAir GE/ACL executable graph on this path**. The outer NPUGraph later captures the reusable Device-task sequence.
 
 Start with `compile_bs`.
 
@@ -363,60 +416,374 @@ npu_backend = torchair.get_npu_backend(compiler_config=compiler_config)
 return npu_backend
 ```
 
-**TorchAir** is the compiler-adaptation layer between PyTorch compiler graphs and the Ascend graph/operator stack. `torchair.get_npu_backend(...)` returns a function conforming to the `torch.compile` backend protocol. It receives:
+**TorchAir** adapts PyTorch compiler graphs to the Ascend graph/operator stack. `torchair.get_npu_backend(...)` returns a function conforming to the `torch.compile` backend protocol. Its inputs are not simply the outer function's three arguments; Dynamo/AOT supplies:
 
 ```text
 gm: torch.fx.GraphModule
-example_inputs: example values from this invocation
+example_inputs: a flattened list providing specifications/example values for FX placeholders
 ```
 
-An **FX GraphModule** combines graph nodes with module attributes. Its nodes describe operators such as linear, attention, and reshape plus their data dependencies; it is not an NPU Stream task queue. TorchAir applies decomposition/AOT processing and converts the FX graph into an NPU concrete graph/executable callable. The upstream [`npu_fx_compiler.py`](https://gitee.com/ascend/torchair/blob/2640db9816afa31fa933cd32e8e51ba94cdeaf87/python/torchair/npu_fx_compiler.py#L831-L928) shows the `GraphModule + example_inputs -> NpuGraphConverter -> inference callable` path.
+An **FX GraphModule** combines an FX node graph with referenced module attributes. PyTorch documentation normally uses the name `torch.fx` directly; this lesson does not invent an unstable long-form expansion for “FX.” Common node kinds are `placeholder`, `call_function`, `get_attr`, and `output`. It expresses operator dependencies; it is not an NPU Stream task queue.
+
+In particular, do not assume that `example_inputs` is:
+
+```python
+[input_ids, positions, forward_batch]
+```
+
+`ForwardBatch` is a complex Python object, not one Device tensor accepted directly by a graph compiler. Dynamo traces Python attribute reads from it. Tensor fields used by computation may be lifted into FX placeholders; compile-time Python values may be specialized and protected by guards; unused fields do not become backend inputs. The number and order of `example_inputs` therefore belong to the compiler graph's internal ABI, not the user's original function signature.
 
 Configuration meanings:
 
 - `mode="reduce-overhead"` favors reduced repeated Host/launch overhead for graph-style execution.
-- `debug.run_eagerly=True` is described upstream as executing the FX graph eagerly before graph-compiler execution. This is a TorchAir FX pre-execution/debug path, **not** SGLang's `EagerRunner` fallback and not a switch that disables `torch.compile`.
+- `debug.run_eagerly=True` **skips TorchAir's NPU graph compiler and returns the eager FX graph runner**.
+
+The second point is essential for the fixed SGLang path. It does not mean “run eager once and still produce a GE/ACL compiled graph.” The official TorchAir implementation in [`_NpuFxCompiler._gen_compiled_gm()`](https://gitee.com/ascend/torchair/blob/b9255d87ebcd54c9ea325f700fcb65deddd8b501/python/torchair/npu_fx_compiler.py#L491-L498) explicitly selects:
+
+```python
+if self.config.debug.run_eagerly:
+    ...
+    return graph.fx_graph
+
+return concrete_graph
+```
+
+The `npugraph_ex` combination still uses `torch.compile`'s Dynamo/fullgraph/guard machinery and TorchAir's AOT/decomposition/FX preparation, but the resulting FX GraphModule runs through eager operator dispatch. The outer SGLang `torch.npu.NPUGraph` is what records reusable Device tasks; this path does not nest a TorchAir GE/ACL execution graph inside it.
+
+TorchAir evolves with the CANN/PyTorch-NPU release. Internal class names may change, so another deployment should verify the installed `npu_fx_compiler.py`; the fixed source above establishes the `run_eagerly` semantic used here.
 
 ##### Step 5: Why Compilation Happens During the First Warmup Call
 
-`capture_one_shape()` eventually invokes:
+A crucial correction comes first: “compiler warmup” does not necessarily produce a TorchAir GE/ACL binary. Under the fixed `npugraph_ex + run_eagerly=True` configuration, the precise statement is:
+
+> Warmup #1 triggers Dynamo graph extraction, guard creation, AOT/TorchAir backend preparation, and the first real execution of an FX runner. `run_eagerly=True` skips TorchAir's NPU graph compiler, so the Device tasks still come from eager NPU operator dispatch while executing that FX graph.
+
+The following subsections enter that call one layer at a time.
+
+###### 5.1 The `torch.compile(...)` Line Only Creates a Wrapper
+
+In the PyTorch 2.10 source, [`torch.compile()`](https://github.com/pytorch/pytorch/blob/v2.10.0/torch/__init__.py#L2505-L2512) ends with:
 
 ```python
-out = forward(
-    forward_batch.input_ids,
-    forward_batch.positions,
-    forward_batch,
+return torch._dynamo.optimize(
+    backend=backend,
+    nopython=fullgraph,
+    dynamic=dynamic,
+    disable=disable,
+    guard_filter_fn=guard_filter_fn,
+)(model)
+```
+
+This registers the callable with Dynamo's optimization context and returns a wrapper that installs a frame-evaluation hook. At this point, none of the following bucket-specific objects exists yet:
+
+- this bucket's `ForwardBatch`;
+- an FX `GraphModule` specialized from these inputs;
+- guards associated with that graph;
+- the runner returned by the TorchAir backend.
+
+Do not read:
+
+```python
+forward = torch.compile(...)
+```
+
+as a C/C++-style function that has already returned a machine-code address. It means, approximately, “when this Python callable is first invoked, let Dynamo take control first.”
+
+###### 5.2 Warmup #1 Enters `run_once()` From `capture_one()`
+
+The first loop iteration in [`NPUCudaGraphBackend.capture_one()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_cudagraph_backend.py#L78-L127) executes:
+
+```python
+self._device_module.synchronize()
+self._tp_group.barrier()
+forward_fn()                         # forward_fn is run_once
+if post_warmup_hook is not None:
+    post_warmup_hook()
+```
+
+The two synchronization scopes differ:
+
+- `synchronize()` is Device synchronization: this Host thread waits for previously submitted work on the NPU device;
+- `barrier()` is process/rank synchronization: every TP rank must arrive before all continue.
+
+`forward_fn` then enters the real closure defined by `capture_one_shape()`:
+
+```python
+def run_once():
+    attn_backend.init_forward_metadata_in_graph(forward_batch)
+
+    forward_batch.dp_local_start_pos = None
+    forward_batch.dp_local_num_tokens = None
+    set_dp_buffer_len(
+        forward_batch.global_dp_buffer_len,
+        num_tokens,
+        forward_batch.dp_padding_mode.is_max_len(),
+        forward_batch.global_num_tokens_cpu,
+    )
+    set_is_extend_in_batch(False)
+
+    out = forward(
+        forward_batch.input_ids,
+        forward_batch.positions,
+        forward_batch,
+        **kwargs,
+    )
+    for capture_hook in self.model_runner.capture_tail_hooks:
+        capture_hook(self, out, forward_batch, num_tokens)
+    return out
+```
+
+`init_forward_metadata_in_graph()` prepares attention-metadata operations that must eventually appear as Device tasks in the captured path. During warmup the runtime is not capturing yet, so those operations execute normally. The following assignments update Host-side `ForwardBatch` state; `set_dp_buffer_len()` establishes DP length state; `set_is_extend_in_batch(False)` selects ordinary decode; the model runs; and tail hooks finish the same execution contract.
+
+The target being warmed is therefore the whole `run_once` path, not only `model.forward`.
+
+###### 5.3 What Dynamo Does on the First Compiled `forward` Call
+
+Python invokes:
+
+```python
+forward(
+    forward_batch.input_ids,     # NPU Tensor, static input-ID view
+    forward_batch.positions,     # NPU Tensor, static position view
+    forward_batch,               # ForwardBatch Python object
 )
 ```
 
-When `forward` is compiled:
+The `forward` callable is the Dynamo wrapper from 5.1, which has not produced a graph for these inputs. Dynamo uses Python's frame-evaluation machinery to take over the `model.forward` bytecode.
+
+**Bytecode** is CPython's intermediate instruction stream—operations such as attribute loads, calls, and conditional jumps—not NPU machine code. Dynamo's symbolic interpreter walks it:
+
+- a Python read such as `forward_batch.forward_mode` records the accessed path and a specialization condition;
+- tensor operations create FX proxies/nodes instead of immediately completing every mathematical operation as the final model result;
+- FakeTensors/example metadata propagate shape, dtype, stride, and device;
+- parameters, buffers, and runtime-varying tensor values become graph attributes or inputs.
+
+A **FakeTensor** carries tensor metadata without the real large data allocation. It lets compilation infer a `matmul` output shape without performing the full matrix multiplication during symbolic graph extraction.
+
+`fullgraph=True` maps to `nopython=True` inside `torch.compile`. If Dynamo cannot represent the invocation as an allowed full graph, a graph-break error is expected instead of silently resuming arbitrary Python in the middle.
+
+A **graph break** is the boundary at which Dynamo cannot keep representing Python behavior in the current FX graph. In this full-graph path it is a compatibility problem to diagnose, not a normal segmentation strategy.
+
+###### 5.4 FX GraphModule Versus Guards
+
+Symbolic tracing produces two distinct categories of artifact:
+
+```text
+FX GraphModule
+  placeholder/get_attr/call_function/output nodes and their dependencies
+
+guards
+  conditions under which that GraphModule remains valid
+```
+
+A simplified guard set might require:
+
+```text
+input_ids is an NPU Tensor
+input_ids.dtype == torch.int64
+input_ids.shape == [4]
+positions.shape == [4]
+the model remains on the eval/no_grad path
+a branch-selecting ForwardBatch enum remains DECODE
+```
+
+Actual guards are generated from every relevant object access and can be more numerous. `dynamic=False` favors shape specialization for the current bucket, so size-4 and size-8 calls commonly select different compiler variants.
+
+Guards execute on the Host; they do no matrix multiplication. They answer, “Can this call safely enter a previously generated callable?” A guard miss may create another variant or eventually fall back after the recompile limit.
+
+###### 5.5 How Dynamo Calls the TorchAir Backend
+
+After constructing `gm` and `example_inputs`, Dynamo's `OutputGraph` calls the user backend with the essential protocol:
+
+```python
+compiled_fn = compiler_fn(gm, example_inputs)
+assert callable(compiled_fn)
+```
+
+Here `compiler_fn` is the TorchAir backend, `gm` is a `torch.fx.GraphModule`, and `example_inputs` correspond to FX placeholders. The backend must return another callable so Dynamo can install it into generated Python bytecode.
+
+TorchAir's [`_npu_backend()`](https://gitee.com/ascend/torchair/blob/b9255d87ebcd54c9ea325f700fcb65deddd8b501/python/torchair/npu_fx_compiler.py#L595-L629) first enters an AOTAutograd/functionalization/decomposition pipeline:
+
+- **AOTAutograd** is PyTorch infrastructure for ahead-of-time forward/backward or inference graph processing; this `no_grad` lesson focuses on the inference/forward graph;
+- **functionalization** rewrites selected in-place semantics into forms better suited for graph analysis while preserving required mutation contracts;
+- **decomposition** rewrites some composite operators into a supported set of lower-level operations.
+
+None of these objects is an `NPUGraph`.
+
+`_NpuFxCompiler` then prepares a target concrete-graph object and FX runner, but the fixed configuration takes:
+
+```python
+if self.config.debug.run_eagerly:
+    return graph.fx_graph
+```
+
+The callable returned to Dynamo is therefore an AOT/TorchAir-prepared FX GraphModule runner, not a completed GE/ACL executable.
+
+###### 5.6 Where Warmup #1 Performs Real Execution
+
+After the backend returns, Dynamo rewrites the original call to invoke that callable and continues within the **same warmup #1**.
+
+Because this configuration returns an FX GraphModule runner, its ATen/torch_npu/custom-op nodes use ordinary dispatch:
+
+```text
+FX call_function node
+  -> PyTorch dispatcher
+  -> NPU implementation / torch_npu / custom-op wrapper
+  -> CANN runtime submits a Device task to the current NPU stream
+```
+
+Submission remains asynchronous. Receiving an output tensor handle on the Host does not mean all NPU arithmetic is complete. The `self._device_module.synchronize()` at the start of the second loop iteration waits for warmup #1's Device work.
+
+The first warmup output is discarded. What remains is:
+
+- the first Dynamo trace, guards, and compiler variant;
+- the first TorchAir backend/AOT/FX-runner preparation;
+- one complete Device execution through that runner;
+- any lazy operator registration, kernel load, allocator, or workspace state triggered along the way.
+
+###### 5.7 Why Warmup #2 Still Executes the Entire Model
+
+The second iteration still runs:
+
+```python
+self._device_module.synchronize()  # explicitly waits for warmup #1
+self._tp_group.barrier()
+forward_fn()                       # full run_once again
+post_warmup_hook()
+```
+
+The compiled `forward` evaluates guards first. On a hit:
+
+```text
+guard hit
+  -> select warmup #1's callable
+  -> do not symbolically reinterpret all model.forward bytecode
+  -> do not call the TorchAir backend again
+  -> still execute the complete FX graph and resubmit every model Device task
+```
+
+Reusing an artifact removes graph extraction/backend preparation; it does not remove model computation. Warmup #2 still calculates all decoder layers, attention, MoE, and logits.
+
+The loop contains no separate `synchronize()` after the second forward. Do not claim that the loop tail explicitly waits for warmup #2. Subsequent capture-context/stream runtime establishes legal ordering; source reading must distinguish an explicit synchronization line from ordering supplied by the following runtime context.
+
+###### 5.8 Only the Third Call Is the Capture Forward
+
+After the two ordinary executions:
+
+```python
+graph = torch.npu.NPUGraph()
+```
+
+When compilation is enabled, the backend also constructs:
+
+```python
+skip_guard_context = torch.compiler.set_stance(
+    skip_guard_eval_unsafe=True
+)
+```
+
+`skip_guard_eval_unsafe` does not permanently delete all guards. The [PyTorch 2.10 documentation](https://docs.pytorch.org/docs/2.10/generated/torch.compiler.set_stance.html) defines it as reducing guard evaluation to the differentiating guards needed among existing variants. It is unsafe because the caller promises that warmup has covered every required variant and no new recompilation is necessary. Fixed buckets, branches, and static storage make that the intended SGLang contract.
+
+The third call runs inside:
+
+```python
+with (
+    skip_guard_context,
+    torch.npu.graph(
+        graph,
+        pool=self._pool,
+        stream=self._capture_stream,
+        auto_dispatch_capture=True,
+    ),
+):
+    out = forward_fn()     # third complete run_once
+```
+
+The path is still `run_once -> compiled forward -> FX runner -> NPU dispatcher`, but the runtime is now in capture state. Device tasks, dependencies, and address bindings produced by eager FX dispatch are recorded into `graph`.
+
+NPUGraph does **not** record Dynamo bytecode interpretation, the Python FX object structure, the `ForwardBatch` object itself, or a Python loop object such as `for layer in layers` from the original model source.
+
+The raw and compiled paths differ here. Raw `model.forward` executes its original Python control flow again during the third call. In the compiled path, the fixed layer loop was normally unrolled into FX nodes during the first Dynamo trace, so the third call runs the Dynamo wrapper and generated FX runner instead of interpreting that original loop layer by layer. Both paths make their respective dispatcher calls on the Host; NPUGraph retains only the Device-task submissions those calls produce.
+
+###### 5.9 What Persists After the Three Calls
+
+| Invocation | In graph context? | Executes model Device work? | Persistent result |
+|---|---|---|---|
+| warmup #1 | No | Yes | Dynamo variant, guards, backend/FX-runner cache, and first-use runtime state |
+| warmup #2 | No | Yes | More stable kernel/runtime/allocator state; output discarded |
+| capture forward | Yes | Yes | `NPUGraph` and an output handle bound to capture storage |
+
+The accurate fixed-path timeline is:
 
 ```text
 Create the compiled callable
   torch.compile(model.forward, ...)
-  # no invocation with the real static ForwardBatch yet
+  -> returns a Dynamo wrapper
+  -> no bucket-specific FX graph or guards yet
 
 warmup #1: first forward(...) call
-  -> TorchDynamo observes Python bytecode and tensor operations
-  -> builds an FX GraphModule for these inputs
+  -> Dynamo interprets bytecode and builds FX using FakeTensor/Proxy values
   -> creates guards
-  -> calls TorchAir backend(gm, example_inputs)
-  -> TorchAir converts/prepares the NPU callable
-  -> executes and returns this warmup output
+  -> TorchAir backend performs AOT/decomposition/FX preparation
+  -> run_eagerly=True returns an FX runner and skips the NPU graph compiler
+  -> FX runner dispatches real NPU tasks
+  -> warmup output handle is discarded
 
 warmup #2: call the same forward(...) again
-  -> inputs satisfy the guards
-  -> normally reuse the compiler artifact
-  -> pay residual kernel-load, allocator, or workspace first-use cost
+  -> guard hit selects the same variant without retracing
+  -> the complete FX runner and model Device computation execute again
+  -> output handle is discarded again
 
 capture forward: third call
-  -> execute the near-steady-state compiled callable inside torch.npu.graph(...)
-  -> NPUGraph records its Device submissions
+  -> enter torch.npu.graph(...)
+  -> execute the same complete run_once a third time
+  -> NPUGraph records Device tasks produced by eager FX dispatch
+  -> save the graph and capture output handle
 ```
 
-A **guard** is a validity condition for a compiler artifact, such as tensor type, dimensions/shape, or relevant module state. A failed guard can invalidate the artifact or trigger recompilation. Fixed buckets, static views, and `dynamic=False` help capture reuse the same artifact.
+Compiler warmup therefore does not warm an already-existing NPUGraph. It runs the first Dynamo/TorchAir/dispatcher/runtime path before NPUGraph begins recording.
 
-Therefore, compiler warmup does not warm NPUGraph itself. It invokes the compiled callable before NPUGraph capture so Dynamo/TorchAir graph extraction, conversion, compilation, and first execution occur outside the graph context.
+##### Step 6: What Changes When `run_eagerly=False`?
+
+Do not generalize the SGLang special case into “TorchAir never compiles.” With `run_eagerly=False`, `_NpuFxCompiler._gen_compiled_gm()` returns a concrete graph:
+
+- `mode="max-autotune"` generally creates `GeConcreteGraph`; its [`__call__()`](https://gitee.com/ascend/torchair/blob/b9255d87ebcd54c9ea325f700fcb65deddd8b501/python/torchair/_ge_concrete_graph/fx2ge_converter.py#L643-L706) processes runtime inputs and loads/compiles/runs a GE graph on the first call;
+- `mode="reduce-overhead"` creates `AclConcreteGraph`, whose callable manages its own ACL graph compilation/capture/replay.
+
+That alternative timeline is:
+
+```text
+Dynamo FX graph
+  -> TorchAir concrete graph
+  -> first concrete_graph(...) performs internal load/compile/capture
+  -> later calls reuse the TorchAir graph runner
+```
+
+The fixed SGLang configuration instead composes:
+
+```text
+Dynamo/TorchAir-prepared FX runner
+  -> eager operator dispatch produces NPU tasks
+  -> outer SGLang NPUGraph captures those tasks
+```
+
+The three warmup/capture entry points can now be summarized as:
+
+```text
+DecodeCudaGraphRunner.capture()
+  |
+  +-- BaseRunner.warmup()
+  |     `-- NPU: returns in this version; CUDA-only autotuning is skipped
+  |
+  `-- for each ShapeKey
+        `-- NPUCudaGraphBackend.capture_one()
+              +-- forward_fn()        # warmup 1; may trigger torch.compile
+              +-- forward_fn()        # warmup 2; closer to steady state
+              `-- torch.npu.graph(...)
+                    `-- forward_fn()  # capture run
+```
+
+These paths must not be collapsed into “TorchAir always builds a GE/ACL graph and SGLang then captures that same graph.”
 
 ```text
 DecodeCudaGraphRunner.capture()
@@ -459,14 +826,64 @@ This `forward_batch` is not a live serving request. `capture_prepare()` builds i
 
 ### 6.3 Real Capture
 
+#### 6.3.1 Where the Capture Stream and Graph Pool Come From
+
+Before entering one bucket, `DecodeCudaGraphRunner.capture()` creates a capture session:
+
+```python
+with graph_capture() as graph_capture_context, profile_context as prof:
+    self.stream = graph_capture_context.stream
+    with self.backend.capture_session(self.stream):
+        self._capture_one_stream()
+```
+
+The NPU backend's `capture_session()` retains the pool and stream:
+
+```python
+if self._pool is None:
+    self._pool = self._device_module.graph_pool_handle()
+set_graph_pool_id(self._pool)
+self._capture_stream = stream
+try:
+    yield
+finally:
+    self._capture_stream = None
+```
+
+`graph_pool_handle()` returns a runtime graph-memory-pool handle, not a Python `list` of tensors. It coordinates stable graph allocations and lets bucket graphs share memory planning. `set_graph_pool_id()` communicates the pool identity to related allocator/communication paths. `_capture_stream` is the NPU Stream used by the third forward. The `finally` block clears only the session's temporary stream reference; it does not delete captured graphs.
+
+Each bucket has its own `NPUGraph`, while buckets in one capture session may share graph-pool planning and a capture stream.
+
+#### 6.3.2 The Complete Capture Branch in `capture_one()`
+
+The fixed source after two warmups is:
+
 ```python
 graph = torch.npu.NPUGraph()
 
-with torch.npu.graph(
-    graph,
-    pool=self._pool,
-    stream=self._capture_stream,
-    auto_dispatch_capture=True,
+if self._enable_torch_compile:
+    skip_guard_context = torch.compiler.set_stance(
+        skip_guard_eval_unsafe=True
+    )
+else:
+    skip_guard_context = empty_context()
+
+if self._memory_saver_adapter is not None and self._memory_saver_adapter.enabled:
+    graph_ctx = partial(
+        self._memory_saver_adapter.cuda_graph,
+        tag=GPU_MEMORY_TYPE_CUDA_GRAPH,
+    )
+else:
+    graph_ctx = torch.npu.graph
+
+with (
+    skip_guard_context,
+    graph_ctx(
+        graph,
+        pool=self._pool,
+        stream=self._capture_stream,
+        auto_dispatch_capture=True,
+    ),
 ):
     out = forward_fn()
 
@@ -474,16 +891,62 @@ self._graphs[shape_key] = graph
 self._outputs[shape_key] = out
 ```
 
-| Variable | Meaning |
-|---|---|
-| `graph` | Captured runtime `NPUGraph` |
-| `_pool` | Graph memory-pool handle |
-| `_capture_stream` | NPU Stream whose submissions are captured |
-| `forward_fn` | Closure that runs model forward on static views |
-| `out` | Static output tensor handle |
-| `shape_key` | Capture variant key |
+`empty_context()` is a no-op context manager that keeps the compiled and non-compiled branches structurally identical. `graph_ctx` is normally `torch.npu.graph`; with memory saving enabled an adapter supplies the NPU graph capture context.
 
-Python executes `forward_fn()` during capture; NPUGraph records the resulting NPU submissions rather than storing the Python source string.
+#### 6.3.3 Before, During, and After `with torch.npu.graph(...)`
+
+Read the context-manager boundaries as:
+
+```text
+before entering
+  graph is only a new NPUGraph container
+  the third forward has not been recorded
+
+enter graph_ctx
+  runtime puts the selected stream into capture state
+  binds graph, pool, and the auto-dispatch capture option
+
+execute the body
+  Host executes the complete run_once()
+  model/FX nodes dispatch NPU tasks
+  runtime records capturable tasks, dependencies, and address contracts
+
+exit graph_ctx
+  runtime ends and finalizes capture
+  graph becomes replayable
+```
+
+Capture observes submissions produced by dynamic execution; it does not scan the `forward_fn` source string. A branch not taken by the third forward does not magically enter the graph. The Python `if` decision is generally not an NPUGraph node; Device tasks emitted by the selected branch are. `fullgraph=True` constrains the Dynamo compiler graph, while `torch.npu.graph` constrains Device launch capture.
+
+#### 6.3.4 What Each Object Retains
+
+| Object | Type/content | Role after capture |
+|---|---|---|
+| `graph` | `torch.npu.NPUGraph` | Device tasks, dependencies, and address bindings for this `ShapeKey` |
+| `_pool` | Graph memory-pool handle | Stable memory planning for captured graphs |
+| `_capture_stream` | NPU Stream | Selects the submission sequence observed during capture |
+| `forward_fn` | Python `run_once` closure | Used for warmup/capture; replay does not call it again |
+| `out` | Tensor or output tree such as `LogitsProcessorOutput` | Handle to capture-time output storage that replay overwrites |
+| `shape_key` | `ShapeKey` | Distinguishes batch-size and stream/variant specifications |
+| `_graphs` | `dict[ShapeKey, NPUGraph]` | Runtime graph lookup |
+| `_outputs` | `dict[ShapeKey, Any]` | Existing handles bound to graph output storage |
+
+`out` is not a permanently frozen snapshot of capture-time numbers. It refers to storage; later replay updates that same storage.
+
+#### 6.3.5 Source Line to Host/Device Behavior
+
+| Source | Host behavior | Device/runtime behavior |
+|---|---|---|
+| `graph = torch.npu.NPUGraph()` | Creates a Python/runtime handle | No model execution yet |
+| enter `graph_ctx(...)` | Calls context-manager entry | Selected stream begins capture and binds the pool |
+| `out = forward_fn()` | Runs metadata preparation, Python model path, and dispatcher calls | Operator tasks are submitted and recorded |
+| exit `graph_ctx` | Calls context-manager exit | Capture finalizes into a replayable graph |
+| `_graphs[key] = graph` | Stores a handle in a Python dictionary | No Device recomputation |
+| `_outputs[key] = out` | Stores the output-storage handle | Does not copy an output-value snapshot |
+
+Warmup #2 cannot “also become the graph” because its `forward_fn()` call occurs outside `graph_ctx`; the runtime was not capturing. The complete third forward must execute again.
+
+The default path keeps `graph` in the process-local `_graphs` dictionary. It does not automatically serialize the whole NPUGraph into the model directory. Loading kernel/compiler caches from disk and loading this runtime NPUGraph are separate ideas.
 
 ---
 
@@ -854,20 +1317,25 @@ torch.compile(
 ```
 
 - `no_grad`: no autograd backward graph;
-- `torch.compile`: extract/optimize a compiler graph;
-- `fullgraph=True`: require one compiler region;
-- `dynamic=False`: specialize statically;
-- outer NPUGraph capture: record launches produced by the compiled callable.
+- `torch.compile`: return a Dynamo wrapper; FX extraction, guard creation, and the backend call begin only when real bucket inputs arrive;
+- `fullgraph=True`: require one compiler region and normally fail on a graph break instead of silently splitting it;
+- `dynamic=False`: create statically specialized variants, typically matching individual bucket specifications;
+- `backend="npugraph_ex"`: obtain a TorchAir backend callable rather than passing a literal string to the NPU;
+- the fixed source also sets `compiler_config.debug.run_eagerly=True`: TorchAir performs AOT/decomposition/FX preparation but skips its NPU graph compiler and returns an eager FX runner;
+- outer NPUGraph capture: execute the same `run_once` for the third time and record the Device tasks produced through the NPU dispatcher.
 
-The stack may be:
+The accurate stack for the fixed version is:
 
 ```text
 SGLang control flow
-  -> compiled model callable
-  -> optimized NPU operators
-  -> NPUGraph launch capture
+  -> Dynamo wrapper (guards select a prepared FX variant)
+  -> eager FX runner returned by TorchAir
+  -> PyTorch dispatcher / torch_npu / custom operators submit NPU tasks
+  -> outer NPUGraph records tasks and dependencies
   -> Stream replay
 ```
+
+Thus “compiled callable” does not mean that a TorchAir GE/ACL binary already exists. This `torch.compile` layer still performs Python graph extraction, guarding, and FX/AOT preparation; NPUGraph records runtime submissions. TorchAir creates its own `GeConcreteGraph`/`AclConcreteGraph` only on the `run_eagerly=False` alternative described in Step 6 of Section 6.2. Compiler graphs and runtime graphs optimize different cost layers.
 
 ---
 
@@ -1021,7 +1489,7 @@ captured batch size (the bucket key)
 | `size`/`bs` | Python `int`; for ordinary decode, the graph's captured batch size and bucket key |
 | `DecodeInputBuffers` | Maximum-size `torch.Tensor` collection with stable Device storage |
 | `forward_batch` | `ForwardBatch` whose fields point to static tensor views |
-| `forward` | `model.forward` or a `torch.compile`-produced callable |
+| `forward` | `model.forward` or a Dynamo callable returned by `torch.compile`; under current `run_eagerly=True`, the latter selects and executes an eager FX runner |
 | `run_once` | Zero-argument closure assembling one complete model call |
 | `ShapeKey` | Hashable size/stream/variant lookup key |
 | `post_warmup_hook` | Optional attention-state reset callable |
@@ -1187,7 +1655,7 @@ No. Events express Stream progress dependencies. Graph work still executes throu
 
 ### 5. Are torch.compile and NPUGraph the same?
 
-No. `torch.compile` builds/optimizes compiler IR; NPUGraph captures runtime launches. They may be composed.
+No. `torch.compile` performs Dynamo extraction, guard selection, and backend/AOT/FX preparation; NPUGraph captures the runtime Device tasks actually produced by the callable. On this chapter's fixed `run_eagerly=True` path, TorchAir's own NPU graph compiler is skipped, but the preceding `torch.compile` work still happens and the outer NPUGraph then captures eager FX-runner submissions. They compose, but they are not the same graph.
 
 ### 6. Why is decode the common target?
 
