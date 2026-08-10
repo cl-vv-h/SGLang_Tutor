@@ -18,7 +18,7 @@
 | 8 | [Parallel_Strategy](./Parallel_Strategy/) | DP、TP、PP、SP/CP、EP 推理并行策略 | [README.md](./Parallel_Strategy/README.md) |
 | 9 | [KV_Transfer](./KV_Transfer/) | PD 分离、KV sender/receiver、远程 KV cache | [README.md](./KV_Transfer/README.md) |
 | 10 | [Speculative_Decoding](./Speculative_Decoding/) | 投机采样数学、target verify、KV 提交、EAGLE/MTP/NGRAM/Medusa/REST 等算法谱系 | [README.md](./Speculative_Decoding/README.md) |
-| 11 | [Quantization](./Quantization/) | Weight-only、W8A8/FP8、KV quant、校准与误差 | [README.md](./Quantization/README.md) |
+| 11 | [Quantization](./Quantization/) | 量化数学、W/A/C 位宽命名、packed W4、FP8/MXFP8、GPTQ/AWQ、KV quant 与 serving kernel | [README.md](./Quantization/README.md) |
 | 12 | [LoRA](./LoRA/) | LoRA、QLoRA、DoRA、AdaLoRA 和多 LoRA serving | [README.md](./LoRA/README.md) |
 | 13 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS、压测、profiling、瓶颈定位 | [README.md](./Benchmark_Profiling/README.md) |
 

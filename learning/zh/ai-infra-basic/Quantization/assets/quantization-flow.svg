@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="430" viewBox="0 0 1180 430" role="img" aria-labelledby="title desc">
+  <title id="title">量化端到端流程</title>
+  <desc id="desc">从浮点 checkpoint 到校准、低 bit 权重、运行时动态量化和 fused kernel 的流程图。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#3a5a40"/>
+    </marker>
+    <style>
+      .box { fill: #ffffff; stroke: #6b7280; stroke-width: 1.3; rx: 8; }
+      .soft { fill: #eef6ff; stroke: #4078a8; }
+      .accent { fill: #f3f7ed; stroke: #6b8f3a; }
+      .warn { fill: #fff5e8; stroke: #b7791f; }
+      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #172033; font-size: 18px; }
+      .small { font-size: 14px; fill: #374151; }
+      .arrow { stroke: #3a5a40; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .label { font-size: 13px; fill: #4b5563; }
+    </style>
+  </defs>
+  <rect x="30" y="40" width="170" height="100" class="box soft"/>
+  <text x="115" y="78" text-anchor="middle" class="text">浮点模型</text>
+  <text x="115" y="108" text-anchor="middle" class="small">BF16 / FP16</text>
+  <text x="115" y="130" text-anchor="middle" class="small">weights</text>
+  <rect x="250" y="40" width="180" height="100" class="box warn"/>
+  <text x="340" y="74" text-anchor="middle" class="text">校准数据</text>
+  <text x="340" y="104" text-anchor="middle" class="small">activation / amax</text>
+  <text x="340" y="126" text-anchor="middle" class="small">channel importance</text>
+  <rect x="480" y="40" width="190" height="100" class="box accent"/>
+  <text x="575" y="72" text-anchor="middle" class="text">量化算法</text>
+  <text x="575" y="102" text-anchor="middle" class="small">RTN / GPTQ / AWQ</text>
+  <text x="575" y="124" text-anchor="middle" class="small">SmoothQuant / AutoRound</text>
+  <rect x="720" y="40" width="190" height="100" class="box soft"/>
+  <text x="815" y="72" text-anchor="middle" class="text">低 bit 权重</text>
+  <text x="815" y="102" text-anchor="middle" class="small">qweight + scale</text>
+  <text x="815" y="124" text-anchor="middle" class="small">zero point / metadata</text>
+  <rect x="960" y="40" width="180" height="100" class="box accent"/>
+  <text x="1050" y="74" text-anchor="middle" class="text">打包与重排</text>
+  <text x="1050" y="104" text-anchor="middle" class="small">packed W4</text>
+  <text x="1050" y="126" text-anchor="middle" class="small">swizzle / interleave</text>
+  <rect x="220" y="250" width="210" height="110" class="box soft"/>
+  <text x="325" y="287" text-anchor="middle" class="text">运行时 activation</text>
+  <text x="325" y="318" text-anchor="middle" class="small">BF16 hidden states</text>
+  <text x="325" y="340" text-anchor="middle" class="small">per-token / per-block scale</text>
+  <rect x="500" y="250" width="220" height="110" class="box warn"/>
+  <text x="610" y="287" text-anchor="middle" class="text">fused quant kernel</text>
+  <text x="610" y="318" text-anchor="middle" class="small">unpack / dequant tile</text>
+  <text x="610" y="340" text-anchor="middle" class="small">INT8 / FP8 / MXFP8 GEMM</text>
+  <rect x="790" y="250" width="210" height="110" class="box accent"/>
+  <text x="895" y="287" text-anchor="middle" class="text">输出与状态</text>
+  <text x="895" y="318" text-anchor="middle" class="small">BF16 output</text>
+  <text x="895" y="340" text-anchor="middle" class="small">KV Cache / all-reduce</text>
+  <path d="M200 90 H250" class="arrow"/>
+  <path d="M430 90 H480" class="arrow"/>
+  <path d="M670 90 H720" class="arrow"/>
+  <path d="M910 90 H960" class="arrow"/>
+  <path d="M1050 140 C1050 205 735 210 640 250" class="arrow"/>
+  <path d="M430 305 H500" class="arrow"/>
+  <path d="M720 305 H790" class="arrow"/>
+  <path d="M325 250 C345 190 520 175 575 140" class="arrow"/>
+  <text x="226" y="78" class="label">收集样本</text>
+  <text x="447" y="78" class="label">计算 qparams</text>
+  <text x="687" y="78" class="label">导出</text>
+  <text x="925" y="78" class="label">适配 kernel</text>
+  <text x="455" y="294" class="label">动态量化</text>
+  <text x="740" y="294" class="label">写回</text>
+</svg>

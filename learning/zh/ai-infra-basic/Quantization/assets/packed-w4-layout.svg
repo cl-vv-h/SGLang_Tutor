@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="500" viewBox="0 0 1180 500" role="img" aria-labelledby="title desc">
+  <title id="title">packed W4 布局</title>
+  <desc id="desc">展示 4-bit 权重如何两个一组打包进 uint8，并和 group scale 对齐。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+    <style>
+      .text { font-family: "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #111827; font-size: 18px; }
+      .small { font-size: 14px; fill: #374151; }
+      .tiny { font-size: 12px; fill: #475569; }
+      .cell { fill: #f8fafc; stroke: #64748b; stroke-width: 1.2; }
+      .nibbleA { fill: #dbeafe; stroke: #2563eb; }
+      .nibbleB { fill: #dcfce7; stroke: #16a34a; }
+      .byte { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.4; }
+      .scale { fill: #fef9c3; stroke: #a16207; stroke-width: 1.3; }
+      .arrow { stroke: #334155; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <text x="40" y="45" class="text">逻辑 W4 权重: 每个元素只有 4 bit</text>
+  <g transform="translate(40,70)">
+    <rect x="0" y="0" width="90" height="54" class="cell"/>
+    <rect x="90" y="0" width="90" height="54" class="cell"/>
+    <rect x="180" y="0" width="90" height="54" class="cell"/>
+    <rect x="270" y="0" width="90" height="54" class="cell"/>
+    <rect x="360" y="0" width="90" height="54" class="cell"/>
+    <rect x="450" y="0" width="90" height="54" class="cell"/>
+    <rect x="540" y="0" width="90" height="54" class="cell"/>
+    <rect x="630" y="0" width="90" height="54" class="cell"/>
+    <text x="45" y="33" text-anchor="middle" class="small">w0</text>
+    <text x="135" y="33" text-anchor="middle" class="small">w1</text>
+    <text x="225" y="33" text-anchor="middle" class="small">w2</text>
+    <text x="315" y="33" text-anchor="middle" class="small">w3</text>
+    <text x="405" y="33" text-anchor="middle" class="small">w4</text>
+    <text x="495" y="33" text-anchor="middle" class="small">w5</text>
+    <text x="585" y="33" text-anchor="middle" class="small">w6</text>
+    <text x="675" y="33" text-anchor="middle" class="small">w7</text>
+    <text x="360" y="82" text-anchor="middle" class="tiny">逻辑 shape: [O, I]</text>
+  </g>
+  <path d="M400 160 C400 210 400 220 400 250" class="arrow"/>
+  <text x="430" y="210" class="small">两个 4-bit nibble 打包成一个 uint8</text>
+  <text x="40" y="270" class="text">物理 packed 存储: 每个 byte 容纳两个 W4</text>
+  <g transform="translate(40,300)">
+    <rect x="0" y="0" width="150" height="72" class="byte"/>
+    <rect x="12" y="16" width="58" height="38" class="nibbleA"/>
+    <rect x="80" y="16" width="58" height="38" class="nibbleB"/>
+    <text x="41" y="40" text-anchor="middle" class="small">low w0</text>
+    <text x="109" y="40" text-anchor="middle" class="small">high w1</text>
+    <text x="75" y="92" text-anchor="middle" class="tiny">byte0</text>
+    <rect x="180" y="0" width="150" height="72" class="byte"/>
+    <rect x="192" y="16" width="58" height="38" class="nibbleA"/>
+    <rect x="260" y="16" width="58" height="38" class="nibbleB"/>
+    <text x="221" y="40" text-anchor="middle" class="small">low w2</text>
+    <text x="289" y="40" text-anchor="middle" class="small">high w3</text>
+    <text x="255" y="92" text-anchor="middle" class="tiny">byte1</text>
+    <rect x="360" y="0" width="150" height="72" class="byte"/>
+    <rect x="372" y="16" width="58" height="38" class="nibbleA"/>
+    <rect x="440" y="16" width="58" height="38" class="nibbleB"/>
+    <text x="401" y="40" text-anchor="middle" class="small">low w4</text>
+    <text x="469" y="40" text-anchor="middle" class="small">high w5</text>
+    <text x="435" y="92" text-anchor="middle" class="tiny">byte2</text>
+    <rect x="540" y="0" width="150" height="72" class="byte"/>
+    <rect x="552" y="16" width="58" height="38" class="nibbleA"/>
+    <rect x="620" y="16" width="58" height="38" class="nibbleB"/>
+    <text x="581" y="40" text-anchor="middle" class="small">low w6</text>
+    <text x="649" y="40" text-anchor="middle" class="small">high w7</text>
+    <text x="615" y="92" text-anchor="middle" class="tiny">byte3</text>
+  </g>
+  <g transform="translate(830,75)">
+    <rect x="0" y="0" width="290" height="110" class="scale"/>
+    <text x="145" y="34" text-anchor="middle" class="text">group scale</text>
+    <text x="145" y="66" text-anchor="middle" class="small">例如 group_size = 8</text>
+    <text x="145" y="90" text-anchor="middle" class="small">w0...w7 共用一组 scale</text>
+  </g>
+  <path d="M760 105 H830" class="arrow"/>
+  <path d="M760 336 C840 336 875 210 940 185" class="arrow"/>
+  <text x="785" y="392" class="small">恢复时:</text>
+  <text x="785" y="420" class="small">1. 取 nibble</text>
+  <text x="785" y="445" class="small">2. signed/zero-point 解码</text>
+  <text x="785" y="470" class="small">3. 乘对应 group scale</text>
+</svg>
