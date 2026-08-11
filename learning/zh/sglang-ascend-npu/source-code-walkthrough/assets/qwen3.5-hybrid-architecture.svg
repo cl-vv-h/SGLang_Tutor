@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      .title { font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 30px; font-weight: 700; fill: #172033; }
+      .label { font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 18px; font-weight: 700; fill: #172033; }
+      .small { font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 15px; fill: #243044; }
+      .tiny { font-family: Arial, "Microsoft YaHei", sans-serif; font-size: 13px; fill: #405066; }
+      .box { fill: #ffffff; stroke: #2f5f8f; stroke-width: 2; rx: 8; }
+      .box2 { fill: #f5fbff; stroke: #2f5f8f; stroke-width: 2; rx: 8; }
+      .box3 { fill: #fff8ec; stroke: #a35d00; stroke-width: 2; rx: 8; }
+      .box4 { fill: #f7fff4; stroke: #408144; stroke-width: 2; rx: 8; }
+      .box5 { fill: #fbf7ff; stroke: #6d4ea1; stroke-width: 2; rx: 8; }
+      .arrow { stroke: #405066; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #65748a; stroke-width: 2; stroke-dasharray: 8 6; fill: none; marker-end: url(#arrow); }
+      .band { fill: #eef4fa; stroke: #b9c9d9; stroke-width: 1.5; rx: 10; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#405066"/>
+    </marker>
+  </defs>
+
+  <rect x="24" y="18" width="1232" height="724" fill="#fbfdff" stroke="#d7e1ec" stroke-width="2" rx="14"/>
+  <text x="42" y="58" class="title">Qwen3.5 Hybrid Text Path on SGLang Ascend NPU</text>
+  <text x="44" y="86" class="small">Full attention layers and GatedDeltaNet linear attention layers share one ForwardBatch, one hybrid backend, and separate KV / recurrent state caches.</text>
+
+  <rect x="48" y="128" width="178" height="88" class="box"/>
+  <text x="68" y="162" class="label">Request</text>
+  <text x="68" y="188" class="small">input_ids / positions</text>
+  <text x="68" y="208" class="tiny">prefill or decode</text>
+
+  <rect x="270" y="128" width="205" height="88" class="box2"/>
+  <text x="290" y="160" class="label">ForwardBatch</text>
+  <text x="290" y="186" class="small">seq_lens / cache loc</text>
+  <text x="290" y="206" class="tiny">mm, DP, graph, mamba metadata</text>
+
+  <rect x="520" y="128" width="240" height="88" class="box2"/>
+  <text x="540" y="160" class="label">Qwen3_5 Wrapper</text>
+  <text x="540" y="186" class="small">general_mm_embed_routine</text>
+  <text x="540" y="206" class="tiny">text-only path enters language model</text>
+
+  <rect x="810" y="128" width="230" height="88" class="box2"/>
+  <text x="830" y="160" class="label">Qwen3_5ForCausalLM</text>
+  <text x="830" y="186" class="small">embedding + layers loop</text>
+  <text x="830" y="206" class="tiny">returns final hidden states</text>
+
+  <path d="M226 172 H270" class="arrow"/>
+  <path d="M475 172 H520" class="arrow"/>
+  <path d="M760 172 H810" class="arrow"/>
+
+  <rect x="66" y="264" width="1148" height="298" class="band"/>
+  <text x="88" y="298" class="label">Decoder layer selected by config.layers_block_type[layer_id]</text>
+
+  <rect x="96" y="330" width="215" height="84" class="box5"/>
+  <text x="116" y="362" class="label">LayerCommunicator</text>
+  <text x="116" y="388" class="small">GemmaRMSNorm + residual</text>
+  <text x="116" y="407" class="tiny">all-gather / all-reduce / reduce-scatter</text>
+
+  <rect x="360" y="300" width="248" height="118" class="box3"/>
+  <text x="382" y="332" class="label">Full Attention Layer</text>
+  <text x="382" y="358" class="small">QKVParallelLinear</text>
+  <text x="382" y="380" class="small">Q/K GemmaRMSNorm + RoPE</text>
+  <text x="382" y="402" class="tiny">RadixAttention -> AscendAttnBackend</text>
+
+  <rect x="360" y="434" width="248" height="106" class="box4"/>
+  <text x="382" y="466" class="label">Linear Attention Layer</text>
+  <text x="382" y="492" class="small">Qwen3_5GatedDeltaNet</text>
+  <text x="382" y="514" class="tiny">in_proj_qkvz / in_proj_ba / GDN state</text>
+
+  <rect x="660" y="300" width="248" height="118" class="box3"/>
+  <text x="682" y="332" class="label">Full Attention Backend</text>
+  <text x="682" y="358" class="small">AscendAttnBackend</text>
+  <text x="682" y="380" class="tiny">block_tables, seq_lens, out_cache_loc</text>
+  <text x="682" y="402" class="tiny">FIA / paged attention / native fallback</text>
+
+  <rect x="660" y="434" width="248" height="106" class="box4"/>
+  <text x="682" y="466" class="label">Linear Attention Backend</text>
+  <text x="682" y="492" class="small">AscendGDNAttnBackend</text>
+  <text x="682" y="514" class="tiny">causal conv + recurrent gated delta rule</text>
+
+  <rect x="958" y="316" width="216" height="88" class="box3"/>
+  <text x="980" y="348" class="label">Paged KV Cache</text>
+  <text x="980" y="374" class="small">full attention layers</text>
+  <text x="980" y="394" class="tiny">K/V per full-attn layer</text>
+
+  <rect x="958" y="442" width="216" height="88" class="box4"/>
+  <text x="980" y="474" class="label">Mamba / GDN Cache</text>
+  <text x="980" y="500" class="small">linear layers</text>
+  <text x="980" y="520" class="tiny">conv state + temporal SSM state</text>
+
+  <path d="M311 372 H360" class="arrow"/>
+  <path d="M311 372 C330 455,330 487,360 487" class="arrow"/>
+  <path d="M608 359 H660" class="arrow"/>
+  <path d="M608 487 H660" class="arrow"/>
+  <path d="M908 359 H958" class="arrow"/>
+  <path d="M908 487 H958" class="arrow"/>
+
+  <rect x="360" y="590" width="248" height="94" class="box5"/>
+  <text x="382" y="624" class="label">MLP / MoE</text>
+  <text x="382" y="650" class="small">Qwen2MoeMLP or SparseMoeBlock</text>
+  <text x="382" y="670" class="tiny">NPU grouped matmul for routed experts</text>
+
+  <rect x="690" y="590" width="250" height="94" class="box2"/>
+  <text x="712" y="624" class="label">Final Norm + LM Head</text>
+  <text x="712" y="650" class="small">GemmaRMSNorm + ParallelLMHead</text>
+  <text x="712" y="670" class="tiny">LogitsMetadata selects hidden rows</text>
+
+  <rect x="990" y="590" width="184" height="94" class="box2"/>
+  <text x="1012" y="624" class="label">Sampler</text>
+  <text x="1012" y="650" class="small">top-k / top-p / greedy</text>
+  <text x="1012" y="670" class="tiny">next token</text>
+
+  <path d="M206 216 C220 585,290 637,360 637" class="dash"/>
+  <path d="M608 637 H690" class="arrow"/>
+  <path d="M940 637 H990" class="arrow"/>
+  <path d="M484 540 V590" class="arrow"/>
+
+  <text x="72" y="716" class="tiny">Main source files: models/qwen3_5.py, layers/attention/attention_registry.py, hardware_backend/npu/attention/ascend_backend.py, ascend_gdn_backend.py, layers/communicator.py, models/qwen2_moe.py</text>
+</svg>
