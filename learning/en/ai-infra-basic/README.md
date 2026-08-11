@@ -2,7 +2,7 @@
 
 [简体中文](../../zh/ai-infra-basic/README.md) | **English**
 
-This directory supplements the foundational knowledge needed before and during SGLang source code reading. It doesn't replicate production-grade implementations directly, but instead breaks down the most common mechanisms in LLM serving through lecture notes and small Python demos: model architecture, inference flow, scheduling, KV Cache, attention kernels, execution graphs, Mamba/SSM, parallelism, KV transfer, speculative decoding, quantization, LoRA, and benchmark/profiling.
+This directory supplements the foundational knowledge needed before and during SGLang source code reading. It doesn't replicate production-grade implementations directly, but instead breaks down the most common mechanisms in LLM serving through lecture notes and small Python demos: model architecture, inference flow, scheduling, KV Cache, attention kernels, execution graphs, Mamba/SSM, GDN/linear attention, parallelism, KV transfer, speculative decoding, quantization, LoRA, and benchmark/profiling.
 
 ## Directory Structure
 
@@ -15,18 +15,19 @@ This directory supplements the foundational knowledge needed before and during S
 | 5 | [Attention_Kernel](./Attention_Kernel/) | Educational implementations of FlashAttention and FlashDecoding | [README.md](./Attention_Kernel/README.md) |
 | 6 | [Execution_Graph](./Execution_Graph/) | From computation graph concepts to CUDA/NPU Graph, torch.compile, static shape reuse, and replay dataflow | [01-what-is-graph.md](./Execution_Graph/01-what-is-graph.md), [02-graph-execution-dataflow.md](./Execution_Graph/02-graph-execution-dataflow.md) |
 | 7 | [Mamba_State_Space](./Mamba_State_Space/) | Mamba/SSM principles, Mamba state, MambaPool, scheduler strategy, and radix cache states | [01-mamba-and-sglang-state.md](./Mamba_State_Space/01-mamba-and-sglang-state.md) |
-| 8 | [Parallel_Strategy](./Parallel_Strategy/) | DP, TP, PP, SP/CP, EP inference parallelism strategies | [README.md](./Parallel_Strategy/README.md) |
-| 9 | [KV_Transfer](./KV_Transfer/) | PD disaggregation, KV sender/receiver, remote KV cache | [README.md](./KV_Transfer/README.md) |
-| 10 | [Speculative_Decoding](./Speculative_Decoding/) | Speculative sampling math, target verify, KV commit, EAGLE/MTP/NGRAM/Medusa/REST algorithm landscape | [README.md](./Speculative_Decoding/README.md) |
-| 11 | [Quantization](./Quantization/) | Weight-only, W8A8/FP8, KV quant, calibration and error | [README.md](./Quantization/README.md) |
-| 12 | [LoRA](./LoRA/) | LoRA, QLoRA, DoRA, AdaLoRA and multi-LoRA serving | [README.md](./LoRA/README.md) |
-| 13 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS, load testing, profiling, bottleneck identification | [README.md](./Benchmark_Profiling/README.md) |
+| 8 | [Gated_Delta_Network](./Gated_Delta_Network/) | Gated DeltaNet/GDN math, trainable parameters, recurrent state, prefill/decode shapes, and serving state management | [README.md](./Gated_Delta_Network/README.md) |
+| 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP, TP, PP, SP/CP, EP inference parallelism strategies | [README.md](./Parallel_Strategy/README.md) |
+| 10 | [KV_Transfer](./KV_Transfer/) | PD disaggregation, KV sender/receiver, remote KV cache | [README.md](./KV_Transfer/README.md) |
+| 11 | [Speculative_Decoding](./Speculative_Decoding/) | Speculative sampling math, target verify, KV commit, EAGLE/MTP/NGRAM/Medusa/REST algorithm landscape | [README.md](./Speculative_Decoding/README.md) |
+| 12 | [Quantization](./Quantization/) | Weight-only, W8A8/FP8, KV quant, calibration and error | [README.md](./Quantization/README.md) |
+| 13 | [LoRA](./LoRA/) | LoRA, QLoRA, DoRA, AdaLoRA and multi-LoRA serving | [README.md](./LoRA/README.md) |
+| 14 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS, load testing, profiling, bottleneck identification | [README.md](./Benchmark_Profiling/README.md) |
 
 ## Suggested Learning Path
 
 1. Start with [Model_Architecture](./Model_Architecture/) and [Inference_Basics](./Inference_Basics/) to establish the basic model of architecture, tensor shapes, and prefill/decode.
 2. Then read [Schedule_Optimization](./Schedule_Optimization/), [KV_Cache_Memory](./KV_Cache_Memory/), and [Attention_Kernel](./Attention_Kernel/) to understand batching, memory, KV access, and attention backend constraints.
-3. Next, read [Execution_Graph](./Execution_Graph/), [Mamba_State_Space](./Mamba_State_Space/), and [Parallel_Strategy](./Parallel_Strategy/) to understand how production inference reduces CPU overhead, manages non-Transformer states, and scales to multiple GPUs.
+3. Next, read [Execution_Graph](./Execution_Graph/), [Mamba_State_Space](./Mamba_State_Space/), [Gated_Delta_Network](./Gated_Delta_Network/), and [Parallel_Strategy](./Parallel_Strategy/) to understand how production inference reduces CPU overhead, manages non-Transformer states, handles linear-attention recurrent states, and scales to multiple GPUs.
 4. Then read [KV_Transfer](./KV_Transfer/) and [Speculative_Decoding](./Speculative_Decoding/) to understand how advanced serving optimizations revolve around "getting tokens faster" and "better utilizing different resources."
 5. Finally, read [Quantization](./Quantization/), [LoRA](./LoRA/), and [Benchmark_Profiling](./Benchmark_Profiling/) to close the loop on model compression, adapter serving, and performance validation.
 
@@ -38,6 +39,7 @@ This directory supplements the foundational knowledge needed before and during S
 - `Attention_Kernel` maps to attention backend, prefill attention, decode attention, KV block read/write.
 - `Execution_Graph` maps to CUDA graph, static batch, graph capture/replay, and shape padding.
 - `Mamba_State_Space` maps to Mamba/SSM layers, Mamba state pool, mamba scheduler strategy, Mamba radix cache, and state transfer.
+- `Gated_Delta_Network` maps to Qwen3-Next GDN/linear attention layers, `q/k/v/z/a/b` projections, GDN recurrent state, chunk prefill, packed decode, and temporary target-verify state.
 - `Parallel_Strategy` maps to TP/PP/DP/EP rank organization, communication patterns, and multi-process execution.
 - `KV_Transfer` maps to PD disaggregation, bootstrap, prealloc, KV sender/receiver, and transfer backend.
 - `Speculative_Decoding` maps to draft worker, target verify, `spec_info`, accept token, and grammar/sampling post-processing.
