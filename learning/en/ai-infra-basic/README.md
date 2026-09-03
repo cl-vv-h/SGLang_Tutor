@@ -8,7 +8,7 @@ This directory supplements the foundational knowledge needed before and during S
 
 | Order | Directory | Content | Read First |
 |---|---|---|---|
-| 1 | [Model_Architecture](./Model_Architecture/) | Decoder-only Transformer, MHA/GQA/MLA, Sparse MoE, SSM Hybrid and mainstream model architecture families | [README.md](./Model_Architecture/README.md) |
+| 1 | [Model_Architecture](./Model_Architecture/) | Decoder-only Transformer, MHA/GQA/MLA, DSA, CSA/HCA, GDN/KDA, Sparse MoE, and mainstream architecture families | [README.md](./Model_Architecture/README.md) |
 | 2 | [Inference_Basics](./Inference_Basics/) | Transformer inference, Prefill/Decode, throughput and latency fundamentals | [README.md](./Inference_Basics/README.md) |
 | 3 | [Schedule_Optimization](./Schedule_Optimization/) | Continuous batching, Chunked Prefill, scheduling trade-offs | [README.md](./Schedule_Optimization/README.md) |
 | 4 | [KV_Cache_Memory](./KV_Cache_Memory/) | KV Cache layout, paging, prefix cache, memory estimation | [README.md](./KV_Cache_Memory/README.md) |
@@ -25,7 +25,7 @@ This directory supplements the foundational knowledge needed before and during S
 
 ## Suggested Learning Path
 
-1. Start with [Model_Architecture](./Model_Architecture/) and [Inference_Basics](./Inference_Basics/) to establish the basic model of architecture, tensor shapes, and prefill/decode.
+1. Start with [Model_Architecture](./Model_Architecture/) and [Inference_Basics](./Inference_Basics/) to establish architecture, tensor shapes, cache/state forms, and prefill/decode. Use the [efficient-attention landscape](./Model_Architecture/06-efficient-attention-landscape.md) as the map for MLA, DSA, CSA/HCA, GDN, and KDA.
 2. Then read [Schedule_Optimization](./Schedule_Optimization/), [KV_Cache_Memory](./KV_Cache_Memory/), and [Attention_Kernel](./Attention_Kernel/) to understand batching, memory, KV access, and attention backend constraints.
 3. Next, read [Execution_Graph](./Execution_Graph/), [Mamba_State_Space](./Mamba_State_Space/), [Gated_Delta_Network](./Gated_Delta_Network/), and [Parallel_Strategy](./Parallel_Strategy/) to understand how production inference reduces CPU overhead, manages non-Transformer states, handles linear-attention recurrent states, and scales to multiple GPUs.
 4. Then read [KV_Transfer](./KV_Transfer/) and [Speculative_Decoding](./Speculative_Decoding/) to understand how advanced serving optimizations revolve around "getting tokens faster" and "better utilizing different resources."
@@ -33,6 +33,7 @@ This directory supplements the foundational knowledge needed before and during S
 
 ## Relationship to SGLang Source Code Reading
 
+- `Model_Architecture` maps to model wiring and the MLA, DSA, DeepSeek-V4 CSA/HCA, and KDA attention implementations.
 - `Inference_Basics` maps to request lifecycle, forward mode, sampling, and token generation loop.
 - `Schedule_Optimization` maps to Scheduler, waiting/running queue, continuous batching, chunked prefill.
 - `KV_Cache_Memory` maps to KV cache manager, memory pool, RadixAttention, prefix cache, HiCache.

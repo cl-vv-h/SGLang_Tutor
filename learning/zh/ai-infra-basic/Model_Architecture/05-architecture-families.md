@@ -372,3 +372,22 @@ RMSNorm: scale only
 - 增加视觉 encoder：输入表示和模态融合路径发生变化。
 
 架构分析的核心不是模型名称，而是确定每层如何混合 token、如何变换通道，以及跨 token 或跨生成步保存什么状态。
+
+## 17. 现代高效注意力架构家族
+
+更新的架构还会改变序列混合器及其状态契约：
+
+| 家族 | Token mixer | 历史状态 | 主要 serving 影响 |
+|---|---|---|---|
+| MLA 稠密/稀疏混合 | MLA 或 DSA | token 级 latent KV + position/indexer key | 缓存更紧凑；DSA 层还需处理不规则 top-k gather |
+| 压缩层次架构 | SWA + CSA 或 HCA | 局部 KV + 压缩条目 + 压缩器尾部 | 多种缓存粒度以不同速度推进 |
+| Delta 递归混合 | GDN/KDA 与 softmax attention 交错 | 递归矩阵 + 卷积尾部 + 少量 KV cache | 递归层使用固定状态，并需要可变状态回滚与路由 |
+
+比模型家族名称更重要的是四个配置问题：
+
+1. 哪些 layer ID 使用稠密、稀疏、压缩、局部或递归混合？
+2. 每个 layer 处理一个 token 后持久化什么？
+3. 哪些状态可以按 token 寻址，哪些只是压缩摘要？
+4. 哪个 backend 负责 prefill、decode、图重放与推测验证？
+
+继续阅读[高效注意力技术地图](./06-efficient-attention-landscape.md)、[DSA](./07-deepseek-sparse-attention.md)、[CSA/HCA](./08-compressed-sparse-attention.md)与 [KDA](./09-kimi-delta-attention.md)章节。

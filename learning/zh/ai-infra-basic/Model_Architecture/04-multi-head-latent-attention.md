@@ -382,3 +382,58 @@ GQA 通过减少 KV head 数量压缩缓存；MLA 通过低秩 latent 表示压�
 3. 因果 mask 仍作用在 token 位置维，latent 压缩不会改变自回归可见性。
 4. 缓存必须同时保存内容 latent 和无法被固定矩阵吸收的位置 key。
 5. 吸收式与展开式实现应在数值误差范围内产生等价结果。
+
+## 17. MLA 解决了什么，又没有解决什么？
+
+MLA 主要压缩每个历史 KV 条目的**特征维度**，但没有消除序列维：
+
+```text
+缓存条目数：O(L)
+稠密 prefill attention：O(L^2)
+每 token 的稠密 decode attention：O(L)
+```
+
+理解这一区别，才能继续阅读更新的架构。DSA 稀疏选择进入主核的 MLA 条目；CSA 先压缩序列维，再选择压缩条目；KDA 则用固定递归状态替代可按 token 寻址的历史。
+
+## 18. 展开式与吸收式执行模式
+
+生产 backend 可以用不同 kernel shape 执行同一个 MLA checkpoint：
+
+- **展开式模式**恢复逐 head K/V，并使用类似 MHA 的 kernel；
+- **吸收式模式**把 up-projection 矩阵吸收到 query/output 路径，并用类似 MQA 的 kernel 消费 latent cache；
+- **混合调度**根据 prefill/decode 阶段、序列长度、硬件与 dtype 支持选择路径。
+
+这些模式在数学上相关，但中间内存、带宽与 kernel 要求不同。DeepSeek Sparse Attention 会以吸收式/MQA 形式消费选中的 latent 条目。实现必须显式说明缓存布局与 backend 模式，不能只根据模型名称猜测。
+
+## 19. SGLang 源码地图
+
+在本教程对应的源码快照中：
+
+- MLA 模型编排与吸收权重：[`deepseek_v2.py`](../../../../python/sglang/srt/models/deepseek_v2.py)；
+- 通用 KV/latent 内存池：[`memory_pool.py`](../../../../python/sglang/srt/mem_cache/memory_pool.py)；
+- NPU 专用 MLA 模块：[`deepseek_v2_attention_mla_npu.py`](../../../../python/sglang/srt/hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py)；
+- FlashMLA Python 入口：[`flash_mla.py`](../../../../sgl-kernel/python/sgl_kernel/flash_mla.py)；
+- HIP 路径：[`hip_flash_mla.py`](../../../../python/sglang/srt/layers/attention/hip_flash_mla.py)。
+
+排查 shape 或性能问题时，建议沿 `模型投影 -> 缓存写入 -> backend 调度 -> kernel 布局` 追踪，并分别检查 prefill 与 decode。
+
+## 20. Serving 与 Ascend 检查清单
+
+1. 记录每个阶段使用展开式还是吸收式执行。
+2. 计算缓存字节数时，同时包含内容 latent 与解耦 RoPE key。
+3. 核对分页缓存 stride、block table、dtype、量化 scale 与对齐。
+4. 在 Ascend 上，根据固定版本的 SGLang、`torch_npu`、CANN 与自定义 kernel 验证实际选中路径。
+5. 融合之前，分别 profile 投影、RoPE、缓存写入、注意力主核与输出投影。
+6. MLA 与 DSA 组合时使用一致的 latent 布局，避免意外 gather 展开后的逐 head K/V。
+
+## 21. 继续阅读
+
+- [高效注意力技术地图](./06-efficient-attention-landscape.md)
+- [DeepSeek Sparse Attention](./07-deepseek-sparse-attention.md)
+- [Compressed Sparse Attention 与 HCA](./08-compressed-sparse-attention.md)
+- [Kimi Delta Attention](./09-kimi-delta-attention.md)
+
+## 22. 参考资料
+
+- [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)
+- [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)

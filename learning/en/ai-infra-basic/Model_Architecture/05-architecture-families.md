@@ -180,3 +180,22 @@ Hybrids attempt to combine:
 3. **MoE routing and dispatch** require dedicated communication (all-to-all) and load-balancing logic.
 4. **SSM state** is not KV Cache — it requires different pool, cache, and transfer design.
 5. **Cross Attention** adds extra memory traffic from encoder to decoder in Encoder-Decoder models.
+
+## 11. Modern Efficient-Attention Families
+
+Newer architectures also change the sequence mixer and its state contract:
+
+| Family | Token mixer | Historical state | Main serving implication |
+|---|---|---|---|
+| MLA dense/sparse hybrid | MLA or DSA | token-level latent KV + position/indexer keys | compact cache, with irregular top-k gathers in DSA layers |
+| Compressed hierarchy | SWA + CSA or HCA | local KV + compressed entries + compressor tail | multiple cache granularities advance at different rates |
+| Delta-recurrent hybrid | GDN/KDA interleaved with softmax attention | recurrent matrix + convolution tail + occasional KV cache | fixed state in recurrent layers, mutable-state rollback and routing |
+
+The model family name is less important than four configuration questions:
+
+1. Which layer IDs use dense, sparse, compressed, local, or recurrent mixing?
+2. What does each layer persist after one token?
+3. Which state is token-addressable and which is only a compressed summary?
+4. Which backend handles prefill, decode, graph replay, and speculative verification?
+
+Continue with the [efficient-attention landscape](./06-efficient-attention-landscape.md), [DSA](./07-deepseek-sparse-attention.md), [CSA/HCA](./08-compressed-sparse-attention.md), and [KDA](./09-kimi-delta-attention.md) chapters.

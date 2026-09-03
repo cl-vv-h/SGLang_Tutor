@@ -285,3 +285,58 @@ GQA compresses cache by reducing KV head count; MLA compresses cache via low-ran
 3. Causal mask still acts on token position dimension; latent compression doesn't change autoregressive visibility.
 4. Cache must simultaneously store content latent and position key that cannot be absorbed by fixed matrices.
 5. Absorbed and expanded implementations should produce equivalent results within numerical error.
+
+## 17. What MLA Solves—and What It Does Not
+
+MLA primarily compresses the **feature dimension** of each historical KV entry. It does not remove the sequence dimension:
+
+```text
+cache entries: O(L)
+dense prefill attention: O(L^2)
+dense decode attention per token: O(L)
+```
+
+This distinction matters when reading newer architectures. DSA sparsifies which MLA entries enter the main core; CSA first compresses the sequence dimension and then selects compressed entries; KDA replaces token-addressable history with a fixed recurrent state.
+
+## 18. Expanded and Absorbed Execution Modes
+
+Production backends can expose the same MLA checkpoint through different kernel shapes:
+
+- **expanded mode** reconstructs head-wise K/V and uses an MHA-like kernel;
+- **absorbed mode** folds up-projection matrices into query/output paths and consumes the latent cache in an MQA-like kernel;
+- **hybrid dispatch** chooses a path based on prefill/decode phase, sequence length, hardware, and supported dtypes.
+
+The modes are mathematically related but have different intermediate memory, bandwidth, and kernel requirements. DeepSeek Sparse Attention uses the absorbed/MQA-form latent representation for its selected entries. An implementation must make the cache layout and backend mode explicit rather than inferring them from the model name.
+
+## 19. SGLang Source Map
+
+In the source snapshot used by this tutorial:
+
+- MLA model wiring and absorbed weights: [`deepseek_v2.py`](../../../../python/sglang/srt/models/deepseek_v2.py);
+- generic KV/latent memory pools: [`memory_pool.py`](../../../../python/sglang/srt/mem_cache/memory_pool.py);
+- NPU-specific MLA module: [`deepseek_v2_attention_mla_npu.py`](../../../../python/sglang/srt/hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py);
+- FlashMLA Python entry point: [`flash_mla.py`](../../../../sgl-kernel/python/sgl_kernel/flash_mla.py);
+- HIP path: [`hip_flash_mla.py`](../../../../python/sglang/srt/layers/attention/hip_flash_mla.py).
+
+When debugging shape or performance issues, trace `model projection -> cache write -> backend dispatch -> kernel layout` and check prefill and decode independently.
+
+## 20. Serving and Ascend Checklist
+
+1. Record whether each phase uses expanded or absorbed execution.
+2. Include both content latent and decoupled-RoPE key in cache-byte calculations.
+3. Confirm paged-cache stride, block table, dtype, quantization scale, and alignment.
+4. On Ascend, verify the selected path against the pinned SGLang, `torch_npu`, CANN, and custom-kernel versions.
+5. Profile projections, RoPE, cache write, attention core, and output projection separately before fusing.
+6. Use the same latent layout when composing MLA with DSA; do not gather expanded head-wise K/V by accident.
+
+## 21. Continue Reading
+
+- [Efficient-attention landscape](./06-efficient-attention-landscape.md)
+- [DeepSeek Sparse Attention](./07-deepseek-sparse-attention.md)
+- [Compressed Sparse Attention and HCA](./08-compressed-sparse-attention.md)
+- [Kimi Delta Attention](./09-kimi-delta-attention.md)
+
+## 22. References
+
+- [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)
+- [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)

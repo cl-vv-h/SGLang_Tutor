@@ -26,6 +26,9 @@ In this topic, **GDN** means **Gated Delta Network / Gated DeltaNet**, the linea
 | Are `a` and `b` parameters? | No. They are token-level activations produced by linear projections from hidden states; the projection weights that produce them are parameters. |
 | Are `g` and `beta` parameters? | No. `g = -exp(A_log) * softplus(a + dt_bias)` and `beta = sigmoid(b)`. They are control signals computed from parameters and activations. |
 | Why is GDN useful for long context? | Per-layer per-request state is roughly `num_value_heads * value_dim * key_dim`, and does not grow linearly with historical token count. |
+| How does KDA differ? | GDN applies one retention scalar per token/head; Kimi Delta Attention applies a vector over key channels so state columns can decay independently. |
+
+After these three chapters, continue with [Kimi Delta Attention](../Model_Architecture/09-kimi-delta-attention.md) to see how fine-grained gating changes the recurrence, kernels, and serving-state contract.
 
 ## Relationship to SGLang Source Reading
 
@@ -46,3 +49,4 @@ In this topic, **GDN** means **Gated Delta Network / Gated DeltaNet**, the linea
 - [Qwen blog: Qwen3-Next](https://qwenlm.github.io/blog/qwen3-next/)
 - [Qwen blog: Qwen3-Next, NVIDIA Blackwell, and FlashQLA](https://qwenlm.github.io/blog/qwen3-next-flashqla/)
 - [Flash Linear Attention project](https://github.com/fla-org/flash-linear-attention)
+- [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)
