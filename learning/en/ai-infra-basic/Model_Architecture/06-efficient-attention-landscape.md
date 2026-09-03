@@ -11,6 +11,8 @@ Names such as GQA, MLA, DSA, CSA, KDA, and FlashAttention are often placed in on
 
 If these axes are mixed together, it is easy to make incorrect claims such as “MLA makes prefill linear” or “FlashAttention is sparse attention.”
 
+![Efficient attention design axes](./assets/attention-landscape.svg)
+
 ## 2. Start from Dense Causal Attention
 
 For sequence length `L`, query/key head dimension `Dk`, and value dimension `Dv`:
@@ -193,7 +195,154 @@ Always validate with a profiler. Lower algorithmic FLOPs do not guarantee lower 
 5. Read [KDA](./09-kimi-delta-attention.md) and the [GDN topic](../Gated_Delta_Network/) for recurrent linear attention.
 6. Read [Attention Kernel](../Attention_Kernel/) for exact-attention execution optimizations.
 
-## 12. References
+## 12. A Single Shape Example Across All Families
+
+Use one hypothetical decoder layer so the symbols become concrete:
+
+```text
+B = 2                 # active requests
+L = 4096              # cached tokens per request
+Hmodel = 4096
+Nq = 32               # query heads
+Nkv = 8               # GQA KV heads
+Dk = Dv = 128
+Dc = 512, Dr = 64     # MLA latent and RoPE cache widths
+k = 256               # sparse selection budget
+m = 4                 # CSA compression stride
+w = 128               # local window
+```
+
+### 12.1 MHA and GQA
+
+For MHA, each token stores:
+
+```text
+K: [Nq,Dk] = [32,128]
+V: [Nq,Dv] = [32,128]
+elements per token = 32 * (128 + 128) = 8192
+```
+
+For GQA:
+
+```text
+K/V cache: [B,L,Nkv,D] = [2,4096,8,128]
+elements per token = 8 * (128 + 128) = 2048
+```
+
+The query remains `[B,Nq,D] = [2,32,128]`. Every group of `Nq/Nkv = 4` query heads shares one KV head. The score tensor is still logically `[B,Nq,1,L]`; GQA shrinks cache width, not score length.
+
+### 12.2 MLA
+
+The cached state becomes:
+
+```text
+Ckv:    [B,L,Dc] = [2,4096,512]
+K_rope: [B,L,Dr] = [2,4096,64]
+elements per token = 512 + 64 = 576
+```
+
+The absorbed content query is logically `[B,Nq,Dc]`, and its product with `Ckv` still produces `[B,Nq,L]`. Compared with MHA's 8192 elements, 576 is much narrower, but there are still 4096 historical entries.
+
+### 12.3 DSA
+
+DSA retains the MLA history and adds a small indexer-key cache:
+
+```text
+QI:       [B,HI,DI]
+KI_cache: [B,L,DI]
+scores:   [B,L]
+topk_ids: [B,k] = [2,256]
+selected latent: [B,k,Dc+Dr] = [2,256,576]
+main logits: [B,Nq,k] = [2,32,256]
+```
+
+The indexer still sees 4096 candidates, but the high-dimensional core sees 256 entries instead of 4096.
+
+### 12.4 CSA and HCA
+
+With stride `m=4`, CSA has approximately:
+
+```text
+Nc = ceil(4096 / 4) = 1024 compressed entries
+compressed index scores: [B,1024]
+selected compressed entries: [B,256,Dcomp]
+local entries: [B,128,Dlocal]
+```
+
+HCA with `m'=128` has only `4096/128 = 32` global compressed entries, so it can attend densely to them while also reading the local window.
+
+### 12.5 KDA/GDN
+
+Suppose `Hstate=32` and `Dk=Dv=128`:
+
+```text
+state: [B,Hstate,Dv,Dk] = [2,32,128,128]
+```
+
+After processing token 4096, the state has exactly the same shape as after token 1. There is no `[L,...]` dimension. The trade-off is that token 137 cannot be gathered explicitly; its effect has been folded into the matrix.
+
+## 13. Follow One Decode Token End to End
+
+Start with one new hidden vector per request:
+
+```text
+X_new: [B,Hmodel]
+```
+
+The architecture determines the next persistent/read shape:
+
+| Architecture | Projection output | Historical read | Core output |
+|---|---|---|---|
+| GQA | `Q [B,Nq,D]`, new `K/V [B,Nkv,D]` | `K/V [B,L,Nkv,D]` | `[B,Nq,Dv]` |
+| MLA | main Q + new `Ckv/Krope [B,Dc+Dr]` | latent `[B,L,Dc+Dr]` | `[B,Nq,Dv]` |
+| DSA | MLA tensors + `QI [B,HI,DI]` | indexer `[B,L,DI]`, then latent `[B,k,Dc+Dr]` | `[B,Nq,Dv]` |
+| CSA | main/indexer Q + compressor tail update | compressed `[B,L/m,Dcomp]`, then top-k + local | `[B,Nq,Dv]` |
+| KDA | `q/k/v/gates [B,H,*]` | state `[B,H,Dv,Dk]` | `[B,H,Dv]` |
+
+All rows eventually return `[B,Hmodel]` after head merge and output projection, so the surrounding decoder block can stay structurally similar even though its state manager is completely different.
+
+## 14. A More Useful Performance Model
+
+Wall-clock latency is better approximated by a sum of stage costs than by one asymptotic label:
+
+```text
+T_layer = T_projection
+        + T_state_read_or_index
+        + T_selection_or_recurrence
+        + T_attention_core
+        + T_output
+        + T_metadata_and_launch
+```
+
+For dense decode, `T_state_read` often dominates. For DSA/CSA, index scan, top-k, address transform, and irregular reads can dominate. For KDA/GDN, recurrent-state read/write traffic can dominate. A kernel benchmark that excludes these stages cannot predict serving throughput.
+
+Use arithmetic intensity as a second lens:
+
+```text
+arithmetic_intensity = operations / bytes moved from HBM
+```
+
+- large prefill matrix products can be compute-bound;
+- single-token dense decode is commonly bandwidth-bound;
+- sparse gathers may have low effective bandwidth because addresses are irregular;
+- recurrent updates may reread a large state for relatively few operations unless fused.
+
+## 15. How to Read a New Model Configuration
+
+When a new checkpoint claims a novel attention mechanism, reconstruct it in this order:
+
+1. **Layer schedule:** which layer IDs use which mixer?
+2. **Projection dimensions:** `num_heads`, `num_kv_heads`, latent rank, indexer heads, compression ratios, recurrent dimensions.
+3. **Persistent state:** list every cache/state tensor with dtype and shape.
+4. **Training semantics:** fixed mask, learned retrieval, learned compression, or recurrence?
+5. **Prefill program:** dense matmul, sparse gather, chunk scan, or a hybrid?
+6. **Decode program:** how many bytes and entries are touched per token?
+7. **Serving semantics:** page tables, partial chunks, rollback, prefix reuse, and graph buffers.
+8. **Backend support:** distinguish a registered name from an optimized kernel on the target hardware.
+
+This procedure prevents model marketing names from replacing a real shape and dataflow analysis.
+
+## 16. References
 
 - [Multi-Query Attention](https://arxiv.org/abs/1911.02150)
 - [GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints](https://arxiv.org/abs/2305.13245)

@@ -11,6 +11,8 @@ GQA、MLA、DSA、CSA、KDA、FlashAttention 经常出现在同一张列表里�
 
 如果混淆这些维度，就容易得出“MLA 让 prefill 变成线性复杂度”或“FlashAttention 是稀疏 Attention”之类的错误结论。
 
+![高效注意力设计维度](./assets/attention-landscape.svg)
+
 ## 2. 从稠密因果 Attention 出发
 
 设序列长度为 `L`，query/key head dimension 为 `Dk`，value dimension 为 `Dv`：
@@ -193,7 +195,154 @@ NSA 与 DSA 是两种不同的研究机制。本仓库 SGLang 快照中的 backe
 5. 读 [KDA](./09-kimi-delta-attention.md)和 [GDN 专题](../Gated_Delta_Network/)，理解递归线性 Attention。
 6. 读 [Attention Kernel](../Attention_Kernel/)，理解 exact attention 的执行优化。
 
-## 12. 参考资料
+## 12. 用同一个 Shape 例子贯穿所有架构
+
+先固定一个假想 decoder layer，让符号变成具体数字：
+
+```text
+B = 2                 # 活跃 request 数
+L = 4096              # 每个 request 已缓存 token 数
+Hmodel = 4096
+Nq = 32               # query head 数
+Nkv = 8               # GQA KV head 数
+Dk = Dv = 128
+Dc = 512, Dr = 64     # MLA latent 与 RoPE 缓存宽度
+k = 256               # 稀疏选择预算
+m = 4                 # CSA 压缩步长
+w = 128               # 局部窗口
+```
+
+### 12.1 MHA 与 GQA
+
+MHA 每个 token 保存：
+
+```text
+K: [Nq,Dk] = [32,128]
+V: [Nq,Dv] = [32,128]
+每 token 元素数 = 32 * (128 + 128) = 8192
+```
+
+GQA 则是：
+
+```text
+K/V cache: [B,L,Nkv,D] = [2,4096,8,128]
+每 token 元素数 = 8 * (128 + 128) = 2048
+```
+
+query 仍是 `[B,Nq,D] = [2,32,128]`。每 `Nq/Nkv = 4` 个 query head 共享一个 KV head。score 张量逻辑上仍是 `[B,Nq,1,L]`；GQA 缩小的是缓存宽度，不是 score 长度。
+
+### 12.2 MLA
+
+缓存状态变成：
+
+```text
+Ckv:    [B,L,Dc] = [2,4096,512]
+K_rope: [B,L,Dr] = [2,4096,64]
+每 token 元素数 = 512 + 64 = 576
+```
+
+吸收后的内容 query 逻辑上是 `[B,Nq,Dc]`，与 `Ckv` 相乘仍会产生 `[B,Nq,L]`。相比 MHA 的 8192 个元素，576 确实窄很多，但历史条目仍有 4096 个。
+
+### 12.3 DSA
+
+DSA 保留 MLA 历史，并增加一个较小的 indexer-key 缓存：
+
+```text
+QI:       [B,HI,DI]
+KI_cache: [B,L,DI]
+scores:   [B,L]
+topk_ids: [B,k] = [2,256]
+selected latent: [B,k,Dc+Dr] = [2,256,576]
+main logits: [B,Nq,k] = [2,32,256]
+```
+
+indexer 仍看到 4096 个候选，但高维主核只看到 256 个条目，而不是 4096 个。
+
+### 12.4 CSA 与 HCA
+
+当步长 `m=4` 时，CSA 约有：
+
+```text
+Nc = ceil(4096 / 4) = 1024 个压缩条目
+压缩 index score: [B,1024]
+选中的压缩条目: [B,256,Dcomp]
+局部条目: [B,128,Dlocal]
+```
+
+若 HCA 使用 `m'=128`，全局压缩条目只有 `4096/128 = 32` 个，因此可以对它们做稠密注意力，同时读取局部窗口。
+
+### 12.5 KDA/GDN
+
+设 `Hstate=32` 且 `Dk=Dv=128`：
+
+```text
+state: [B,Hstate,Dv,Dk] = [2,32,128,128]
+```
+
+处理完第 4096 个 token 后，状态 shape 与处理完第 1 个 token 后完全相同，没有 `[L,...]` 维。代价是无法再显式 gather 第 137 个 token；它的影响已经折叠进矩阵。
+
+## 13. 跟踪一个 Decode Token 的完整旅程
+
+每个 request 从一个新 hidden vector 开始：
+
+```text
+X_new: [B,Hmodel]
+```
+
+架构决定接下来的持久化/读取 shape：
+
+| 架构 | 投影输出 | 历史读取 | 主核输出 |
+|---|---|---|---|
+| GQA | `Q [B,Nq,D]`，新 `K/V [B,Nkv,D]` | `K/V [B,L,Nkv,D]` | `[B,Nq,Dv]` |
+| MLA | 主 Q + 新 `Ckv/Krope [B,Dc+Dr]` | latent `[B,L,Dc+Dr]` | `[B,Nq,Dv]` |
+| DSA | MLA 张量 + `QI [B,HI,DI]` | indexer `[B,L,DI]`，再读 latent `[B,k,Dc+Dr]` | `[B,Nq,Dv]` |
+| CSA | 主/indexer Q + 压缩尾部更新 | 压缩 `[B,L/m,Dcomp]`，再读 top-k + local | `[B,Nq,Dv]` |
+| KDA | `q/k/v/gates [B,H,*]` | state `[B,H,Dv,Dk]` | `[B,H,Dv]` |
+
+所有行在 head 合并与输出投影后都会回到 `[B,Hmodel]`。因此外围 decoder block 可以保持相似结构，但它们需要完全不同的状态管理器。
+
+## 14. 更有用的性能模型
+
+相比一个渐近复杂度标签，wall-clock 延迟更适合写成各阶段成本之和：
+
+```text
+T_layer = T_projection
+        + T_state_read_or_index
+        + T_selection_or_recurrence
+        + T_attention_core
+        + T_output
+        + T_metadata_and_launch
+```
+
+稠密 decode 往往由 `T_state_read` 主导；DSA/CSA 可能由 index 扫描、top-k、地址转换与不规则读取主导；KDA/GDN 可能由递归状态读写流量主导。排除这些阶段的 kernel benchmark 无法预测 serving 吞吐。
+
+还可以用算术强度作为第二视角：
+
+```text
+arithmetic_intensity = operations / bytes moved from HBM
+```
+
+- 大型 prefill 矩阵乘可能受计算能力限制；
+- 单 token 稠密 decode 通常受带宽限制；
+- 稀疏 gather 因地址不规则，有效带宽可能很低；
+- 递归更新若不融合，可能为较少计算反复读取很大的状态。
+
+## 15. 如何阅读一个新模型配置
+
+面对声称使用新注意力机制的 checkpoint，可以按以下顺序还原：
+
+1. **Layer 排列：**哪些 layer ID 使用哪一种 mixer？
+2. **投影维度：**`num_heads`、`num_kv_heads`、latent rank、indexer head、压缩率与递归维度。
+3. **持久状态：**列出每一个 cache/state 张量的 dtype 和 shape。
+4. **训练语义：**固定 mask、学习式检索、学习式压缩，还是递归？
+5. **Prefill 程序：**稠密 matmul、稀疏 gather、chunk scan，还是混合？
+6. **Decode 程序：**每 token 实际触碰多少字节、多少条目？
+7. **Serving 语义：**page table、部分块、回滚、前缀复用与 graph buffer。
+8. **Backend 支持：**区分“注册了名字”和“目标硬件上已有优化 kernel”。
+
+这套流程可以避免用模型宣传名称代替真实的 shape 与数据流分析。
+
+## 16. 参考资料
 
 - [Multi-Query Attention](https://arxiv.org/abs/1911.02150)
 - [GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints](https://arxiv.org/abs/2305.13245)

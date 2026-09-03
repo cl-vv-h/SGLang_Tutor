@@ -97,6 +97,54 @@ o_t = S_t^T q_t
 
 两种形式转置后等价。比较代码与公式之前，必须先确认状态矩阵的方向。
 
+![KDA 递归更新](./assets/kda-recurrent-update.svg)
+
+### 5.1 从论文形式推导实现形式
+
+从技术报告的 `S[d_k,d_v]` 公式开始：
+
+```text
+S_t = (I - beta k k^T) Diag(alpha) S_prev + beta k v^T
+```
+
+对每个因子转置，并反转乘法顺序：
+
+```text
+M_t = S_t^T
+    = M_prev Diag(alpha) (I - beta k k^T) + beta v k^T
+```
+
+定义逐列衰减后的状态：
+
+```text
+M_decay = M_prev Diag(alpha)
+```
+
+展开可得：
+
+```text
+M_t = M_decay - beta (M_decay k) k^T + beta v k^T
+    = M_decay + beta (v - M_decay k) k^T
+```
+
+这正是便于存储的“衰减 → 预测 → 残差 → 外积更新”顺序。改变矩阵方向没有引入近似。
+
+### 5.2 逐元素解释
+
+对 value 行 `r` 与 key 列 `c`：
+
+```text
+M_decay[r,c] = M_prev[r,c] * alpha[c]
+M_t[r,c] = M_decay[r,c] + beta * residual[r] * k[c]
+```
+
+因此 KDA 有两个独立控制轴：
+
+- `alpha[c]` 决定历史 key 特征 `c` 保留多少；
+- `residual[r] * k[c]` 决定当前 token 如何改变矩阵单元 `(r,c)`。
+
+GDN 的标量 `alpha` 无法为不同列选择不同生命周期。
+
 ## 6. 投影、短卷积与输出门
 
 KDA 不只有递归公式。典型 layer 会执行：
@@ -114,6 +162,73 @@ hidden states
 ```
 
 短卷积在递归压缩前提供精确的局部顺序信息。因此，服务状态同时包含 KDA 矩阵与卷积尾部。
+
+### 6.1 SGLang 中的投影 Shape
+
+设 `Hk` 为 KDA head 数，`Dk` 为 q/k head 宽度，`Dv` 为 value 宽度，`C` 为短卷积 kernel size。从 packed hidden states 开始：
+
+```text
+X: [T,Hmodel]
+```
+
+逻辑投影输出为：
+
+```text
+q_flat:       [T,Hk*Dk]  -> q [T,Hk,Dk]
+k_flat:       [T,Hk*Dk]  -> k [T,Hk,Dk]
+v_flat:       [T,Hk*Dv]  -> v [T,Hk,Dv]
+beta_raw:     [T,Hk]     -> beta [T,Hk]
+forget_raw:   [T,Hk*Dk]  -> a [T,Hk,Dk]
+output_gate:  [T,Hk*Dv]  -> z [T,Hk,Dv]
+```
+
+源码中的 forget gate 与 output gate 使用分解投影。以 forget 路径为例：
+
+```text
+f_a = X @ Wfa^T:       [T,Dk]
+a_flat = f_a @ Wfb^T:  [T,Hk*Dk]
+a = reshape(a_flat):   [T,Hk,Dk]
+```
+
+这样可以减少投影成本，同时仍为每个 token、head 与 key 通道产生一个遗忘激活。融合投影可以一次生成 q/k/v、`beta` 与低秩 gate 中间量，但逻辑张量不变。
+
+### 6.2 短卷积 Shape
+
+卷积前拼接投影后的 q/k/v：
+
+```text
+mixed_qkv: [T,Hk*(2*Dk + Dv)]
+```
+
+当 kernel 宽度为 `C` 时，每个 request slot 保留：
+
+```text
+conv_state: [Hk*(2*Dk + Dv), C-1]
+```
+
+Prefill 对每条 packed 序列执行因果卷积。Decode 使用旧的 `C-1` 列与新投影行，返回一个宽度不变的过滤后行，并移动卷积状态。
+
+### 6.3 从主核到输出的 Shape
+
+卷积并 reshape 后：
+
+```text
+q/k:       [1,T,Hk,Dk]
+v:         [1,T,Hk,Dv]
+a:         [1,T,Hk,Dk]
+beta:      [1,T,Hk]
+state pool:[slots,Hk,Dv,Dk]
+core out:  [1,T,Hk,Dv]
+```
+
+输出门与归一化保持 `[T,Hk,Dv]`，随后展平并投影：
+
+```text
+gated: [T,Hk,Dv]
+flat:  [T,Hk*Dv]
+Wout:  [Hmodel,Hk*Dv]
+out:   [T,Hmodel]
+```
 
 ## 7. 内存与计算复杂度
 
@@ -151,6 +266,8 @@ Decode 中，每个 request 一次只有一个或少数新 token。高效路径�
 若拆成多个 kernel，就会反复读写完整状态矩阵。融合 kernel 能减少高带宽内存流量与 launch 开销。
 
 连续批处理还带来状态路由问题：每个 decode 行必须装载并更新正确 request 的状态。request 压缩与槽位复用必须原子地更新这一映射。
+
+![KDA 分块 prefill 与递归 decode](./assets/kda-prefill-decode.svg)
 
 ## 10. Kimi Linear 是混合架构
 
@@ -258,7 +375,169 @@ KDA head 可以在张量并行 rank 间划分。每个 rank 持有本地 Q/K/V �
 7. TP 分片与 checkpoint 的 head、gate 布局一致。
 8. profile 报告状态带宽、融合边界与图重放覆盖率。
 
-## 18. 参考资料
+## 18. 完整 Tensor 账本
+
+| 阶段 | 张量 | 逻辑 shape | 是否持久化 |
+|---|---|---:|---|
+| Layer 输入 | `X` | `[T,Hmodel]` | 否 |
+| Q/K 投影 | `q/k` | `[T,Hk,Dk]` | 否 |
+| V 投影 | `v` | `[T,Hk,Dv]` | 否 |
+| 写入门激活 | `beta_raw` | `[T,Hk]` | 否 |
+| 遗忘激活 | `a` | `[T,Hk,Dk]` | 否 |
+| 输出门激活 | `z` | `[T,Hk,Dv]` | 否 |
+| Packed conv 输入 | `mixed_qkv` | `[T,Hk*(2Dk+Dv)]` | 否 |
+| 卷积缓存 | `conv_state` | `[slots,Hk*(2Dk+Dv),C-1]` | 是 |
+| 保留率 log | `g` | `[1,T,Hk,Dk]` | 否，可被融合 |
+| 保留率 | `alpha=exp(g)` | `[1,T,Hk,Dk]` | 否，可被融合 |
+| Delta gate | `beta` | `[1,T,Hk]` | 否，可被融合 |
+| 递归缓存 | `M` | `[slots,Hk,Dv,Dk]` | 是 |
+| 主核输出 | `Ocore` | `[1,T,Hk,Dv]` | 否 |
+| 门控/归一化输出 | `Onorm` | `[T,Hk,Dv]` | 否 |
+| Layer 输出 | `O` | `[T,Hmodel]` | 否 |
+
+Decode 时 `T=B`，`cache_indices [B]` 把第 `b` 行映射到持久 slot。Packed prefill 时，`query_start_loc [R+1]` 标识 `R` 个 request 各自的 token 区间。
+
+## 19. 为什么 Prefill 需要 Chunk 代数
+
+递归具有因果依赖：
+
+```text
+M_1 = F(M_0, token_1)
+M_2 = F(M_1, token_2)
+...
+M_L = F(M_(L-1), token_L)
+```
+
+直接循环会启动或执行 `L` 个相互依赖的小更新。Chunk 算法保留 chunk 之间的依赖，同时暴露 chunk 内矩阵计算：
+
+```text
+chunk 0: M_0  + tokens [0:C]   -> outputs_0, boundary M_C
+chunk 1: M_C  + tokens [C:2C]  -> outputs_1, boundary M_2C
+...
+```
+
+在 chunk 内，kernel 把衰减乘积、delta 相互作用与三角因果依赖重排成 tile。关键正确性条件不是内部算法名称，而是：
+
+```text
+chunk_output == recurrent_reference_output
+chunk_final_state == recurrent_reference_final_state
+```
+
+两者都必须比较。输出一致但最终状态错误，会让下一个 decode token 立即出错。
+
+## 20. 数值更新实例
+
+设 `Dk=Dv=2`：
+
+```text
+M_prev = [[ 1.0, 0.5],
+          [-0.5, 1.0]]
+alpha  = [0.8, 0.25]
+k      = [0.6, 0.8]
+v      = [1.0,-0.5]
+beta   = 0.5
+q      = [0.8, 0.6]
+```
+
+逐列衰减：
+
+```text
+M_decay = [[ 0.8, 0.125],
+           [-0.4, 0.250]]
+```
+
+预测与残差：
+
+```text
+v_hat = M_decay @ k = [0.58,-0.04]
+r = v - v_hat       = [0.42,-0.46]
+```
+
+Delta 与新状态：
+
+```text
+beta * (r outer k)
+  = [[ 0.126, 0.168],
+     [-0.138,-0.184]]
+
+M = [[ 0.926, 0.293],
+     [-0.538, 0.066]]
+```
+
+在后续输出门/归一化之前读出：
+
+```text
+o = M @ (q / sqrt(2)) ≈ [0.648,-0.276]
+```
+
+这个例子清楚展示了两个动作：旧状态列按不同因子缩小，然后用一个 rank-one 矩阵写入预测误差。
+
+## 21. 内存与带宽实例
+
+当 `Hk=32`、`Dk=Dv=128`：
+
+```text
+每 request/layer 状态元素数 = 32 * 128 * 128 = 524,288
+BF16 状态容量               = 1 MiB/request/layer
+```
+
+当 `B=64` 时，一层拥有 64 MiB 活跃状态容量。朴素 decode 若为衰减、预测、更新与输出分别读写完整矩阵，会把流量放大多次。融合递归 kernel 的目标是读入一个状态 tile，完成全部计算，再只写回一次。
+
+状态大小不随序列长度变化，但不代表状态本身很小。可以和 KV layer 比较交叉长度：
+
+```text
+L_cross * Nkv * (Dk + Dv) = Hk * Dv * Dk
+```
+
+当 `Nkv=Hk` 且 `Dk=Dv=128` 时，按元素数计算的 `L_cross=64` token。长上下文优势来自不再继续线性增长；实际字节数取决于 KV/state dtype 与混合层数量。
+
+## 22. 递归参考伪代码
+
+```python
+def kda_step(M, q, k, v, a, beta_raw, A_log, dt_bias):
+    # M:       [Hk,Dv,Dk]
+    # q/k:     [Hk,Dk]
+    # v:       [Hk,Dv]
+    # a:       [Hk,Dk]
+    # beta_raw:[Hk]
+    g = -exp(A_log) * softplus(a + dt_bias)       # [Hk,Dk]
+    alpha = exp(g)                                # [Hk,Dk]
+    beta = sigmoid(beta_raw)                      # [Hk]
+
+    Mdec = M * alpha[:, None, :]                  # [Hk,Dv,Dk]
+    pred = einsum("hvk,hk->hv", Mdec, k)         # [Hk,Dv]
+    residual = v - pred                           # [Hk,Dv]
+    delta = beta[:, None, None] * einsum(
+        "hv,hk->hvk", residual, k
+    )                                             # [Hk,Dv,Dk]
+    Mnew = Mdec + delta
+    out = einsum("hvk,hk->hv", Mnew, q/sqrt(Dk)) # [Hk,Dv]
+    return out, Mnew
+```
+
+参考实现应使用 FP32 累加。对低精度 kernel 做长随机序列对比时，要在多个检查点同时比较 output 与 state。
+
+## 23. 调试与练习
+
+| 症状 | 首先检查的边界 |
+|---|---|
+| Token 1 正确，之后逐渐漂移 | 状态方向、gate 作用轴、累加精度 |
+| Prefill 输出正确，第一个 decode 错误 | 最终 prefill state 或 convolution tail 未提交 |
+| 单 request 正确，连续批处理错误 | `cache_indices`、slot 复用、压缩映射 |
+| 只在推测拒绝后失败 | 原地 state/conv 回滚 |
+| 复用 GDN kernel 后 KDA 质量崩溃 | 错把逐 key gate 广播成标量 gate |
+| 性能不受 context 长度影响但仍很慢 | 状态带宽、launch 数、融合缺失 |
+| TP 输出缩放错误 | 重复归约或本地 head 所有权不一致 |
+
+练习：
+
+1. 从报告的 `S[d_k,d_v]` 形式开始，逐步转置得到 `M[d_v,d_k]`。
+2. 对 `Hk=16`、`Dk=128`、`Dv=128`，计算 BF16 与 FP32 状态字节数。
+3. 展开两个 KDA step，指出 token 1 在何处影响 token 2 的输出。
+4. 解释为什么保存 `M` 但不保存卷积尾部，无法复现下一个 token。
+5. 为 draft length 4 设计推测状态 checkpoint，并避免复制无关 request 的整个状态池。
+
+## 24. 参考资料
 
 - [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)
 - [MoonshotAI/Kimi-Linear 官方仓库](https://github.com/MoonshotAI/Kimi-Linear)

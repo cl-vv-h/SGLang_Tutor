@@ -1,10 +1,10 @@
-# 压缩稀疏注意力（CSA）与分层压缩注意力（HCA）
+# 压缩稀疏注意力（CSA）与重度压缩注意力（HCA）
 
 压缩稀疏注意力（Compressed Sparse Attention，CSA）是 DeepSeek-V4 引入的长上下文注意力设计。它的核心动作可以概括为：
 
 > 先压缩序列，再从压缩后的条目中检索少量候选，交给昂贵的注意力主核。
 
-分层压缩注意力（Hierarchical Compressed Attention，HCA）提供一条压缩率更高的稠密路径；局部滑动窗口分支则保留最近 token 的细节。在模型的 layer 排列中，这些机制共同覆盖三种时间尺度：
+重度压缩注意力（Heavily Compressed Attention，HCA）提供一条压缩率更高的稠密路径；局部滑动窗口分支则保留最近 token 的细节。在模型的 layer 排列中，这些机制共同覆盖三种时间尺度：
 
 - **SWA**：精确、未压缩的近期上下文；
 - **CSA**：中等压缩、按内容选择的上下文；
@@ -24,7 +24,7 @@ CSA 把候选空间从 `L` 个 token 条目缩小为约 `L / m` 个压缩条目�
 | 每个 query 的主核条目数 | `k` | `k` 个压缩条目 |
 | 长程主缓存粒度 | token | 压缩块 |
 
-压缩并非没有代价：每个压缩条目概括多个源位置，因此模型必须学习哪些信息需要保留。局部分支与分层分支用于补偿不同类型的信息损失。
+压缩并非没有代价：每个压缩条目概括多个源位置，因此模型必须学习哪些信息需要保留。局部分支与重度压缩分支用于补偿不同类型的信息损失。
 
 ## 2. 符号与形状账本
 
@@ -72,6 +72,76 @@ C_i = 对 2m 个源位置 j 求和：softmax(Z_i)[j] * projected_content[j]
 
 重叠能缓解块边界问题：一个块边缘附近的证据可以通过相邻路径参与压缩。
 
+![CSA 重叠式序列压缩](./assets/csa-overlap-compression.svg)
+
+### 3.1 压缩器的精确逻辑 Shape
+
+设 `D` 为压缩 KV 宽度，重叠式 CSA 使用 `coff=2`。一种便于实现的布局为：
+
+```text
+X: [B,S,Hmodel]
+
+U_flat = X @ Wcontent^T: [B,S,coff*D]
+Z_flat = X @ Wgate^T:    [B,S,coff*D]
+
+把 S padding 到 Nc*m，再 reshape：
+U: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
+Z: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
+```
+
+对压缩槽位 `i`，overlap transform 构造：
+
+```text
+Ubar_i = concat(U[i-1,:,path_a,:], U[i,:,path_b,:])  # [B,2m,D]
+Zbar_i = concat(Z[i-1,:,path_a,:], Z[i,:,path_b,:])  # [B,2m,D]
+```
+
+在序列左边界，缺失的前一块会被 padding 并 mask。压缩窗口内部的可学习绝对位置 embedding 为：
+
+```text
+APE: [2m,D]
+```
+
+逐特征的源位置权重与压缩条目为：
+
+```text
+A_i[b,r,d] = exp(Zbar_i[b,r,d] + APE[r,d])
+             / sum_(u valid) exp(Zbar_i[b,u,d] + APE[u,d])
+
+C_i[b,d] = sum_(r valid) A_i[b,r,d] * Ubar_i[b,r,d]
+
+A_i: [B,2m,D]
+C_i: [B,D]
+```
+
+Softmax 沿**源位置轴**执行，并对每个特征 `d` 独立计算。这比每 token 只有一个标量权重更有表达力：不同输出通道可以从不同源位置保留信息。
+
+### 3.2 为什么输出长度是 `ceil(S/m)`，不是 `ceil(S/2m)`
+
+每个输出最多看到 `2m` 个源位置，但相邻输出存在重叠。每生成一个输出，压缩器只向前移动 `m` 个新源位置：
+
+```text
+C_1 查看 chunk 0 和 1
+C_2 查看 chunk 1 和 2
+C_3 查看 chunk 2 和 3
+```
+
+因此 receptive-field width 为 `2m`，stride 为 `m`。混淆 width 与 stride 会把缓存长度低估一倍。
+
+### 3.3 因果性与条目就绪条件
+
+只有当一个压缩条目所需的全部源位置都已经到达，它才能对 query 可见。因果推理绝不能让 query 读取包含未来 token 的摘要。
+
+对 `m=4`，源位置 `0..3` 的完整摘要不能被位置 `0..2` 的 query 使用。Runtime 需要把已完成条目数与原始 token 长度分开维护：
+
+```text
+token_len = t + 1
+complete_entries = floor(token_len / m)
+tail_len = token_len % m
+```
+
+Overlap 会增加前一路径状态，但不会放松这个因果边界。
+
 ## 4. 压缩后的 Indexer
 
 CSA 在压缩条目上执行检索，而非在原始 token 位置上检索。其 indexer 沿用 DSA 的高层模式：
@@ -106,6 +176,47 @@ O_t = GroupedOutput(A_t selected)
 - top-k 返回压缩逻辑 ID；
 - **主核**在这些条目上重新计算注意力 logit 与 softmax。
 
+### 5.1 局部与压缩条目共享 Attention 支撑集
+
+对一个 query token，定义：
+
+```text
+Klocal = Vlocal: [w_valid,1,D]
+Kcomp  = Vcomp:  [k_valid,1,D]       # CSA
+                 [Nh_valid,1,D]      # HCA
+
+Kvisible = concat(Klocal, Kcomp, dim=sequence)
+Vvisible = Kvisible                  # 共享 K=V 的 MQA
+```
+
+当 `Q [Nq,D]` 时，逻辑张量为：
+
+```text
+logits: [Nq,Nvisible]
+Nvisible = w_valid + k_valid         # CSA layer
+Nvisible = w_valid + Nh_valid        # HCA layer
+prob:   [Nq,Nvisible]
+Ohead:  [Nq,D]
+```
+
+逐 head attention sink 会为归一化增加一个稳定的额外 logit。融合 kernel 可以把局部与压缩缓存放在不同物理 buffer，但在数学上，它们构成本 layer 的同一个因果支撑集。
+
+### 5.2 分组低秩输出投影
+
+宽 head 输出通常会展平为 `[Tq,Nq*D]`。DeepSeek-V4 在低秩输出投影前对 head 分组。设输出组数为 `G`，rank 为 `Ro`：
+
+```text
+Ohead:    [Tq,Nq,D]
+Ogroup:   [Tq,G,(Nq/G)*D]
+Woa:      [G,Ro,(Nq/G)*D]
+Olowrank: [Tq,G,Ro]
+merge:    [Tq,G*Ro]
+Wob:      [Hmodel,G*Ro]
+Omodel:   [Tq,Hmodel]
+```
+
+在投影前，架构会对指定的 partial-RoPE 输出通道执行逆旋转。交换 inverse RoPE 与可学习投影的顺序会改变模型函数。
+
 ## 6. HCA：稠密的全局安全网
 
 HCA 以更大的步长 `m'` 压缩序列，并对得到的短序列执行稠密注意力：
@@ -128,6 +239,8 @@ context(t) = [t-w+1, ..., t]
 该分支负责精确的局部语法、近期工具输出与近场依赖，无须要求压缩器保留每个微小差异。
 
 每个压缩注意力 layer 都将局部路径与该层配置的长程分支配对：CSA 或 HCA。模型会交错排列不同 layer 类型，并不意味着每个 block 都同时执行 CSA 与 HCA。它们是互补且经过训练的路径，不是推理时可随意互换的选项。
+
+![DeepSeek-V4 压缩注意力 layer 数据流](./assets/dsv4-attention-dataflow.svg)
 
 ## 8. 位置信息与 Attention Sink
 
@@ -268,8 +381,137 @@ page 与 block 大小应考虑压缩步长。如果物理分配单元无法自�
 7. 内存核算包含所有缓存池、scale、元数据与碎片。
 8. profile 分开统计压缩、检索、稀疏主核、HCA、SWA 与图开销。
 
-## 18. 参考资料
+## 18. Layer 排列与 Attention Mask Shape
 
-- [DeepSeek-V4: Advancing Open-Source Intelligence](https://arxiv.org/abs/2606.19348)
+DeepSeek-V4 是 **layer schedule** 层面的混合架构。每一层只配置一个压缩率：
+
+```text
+compress_ratio = 0    -> 只有局部/滑动路径
+compress_ratio = 4    -> CSA 压缩器 + indexer + 局部路径
+compress_ratio = 128  -> HCA 压缩器 + 稠密压缩路径 + 局部路径
+```
+
+对一个包含 `S` 个 query token 的教学版 prefill：
+
+```text
+局部因果 mask: [S,S]
+CSA 选中槽位:  逻辑上 [S,k]
+HCA 条目:      逻辑上 [S,ceil(S/m')]
+```
+
+只有同时满足 request 边界与条目就绪条件的位置才有效。Backend 可能把 query 专属 CSA 槽位展平成 `[S,S*k]` 的 workspace 列，但这是执行布局，并不表示持久缓存中真的有 `S*k` 个条目。
+
+## 19. 完整 Tensor 账本
+
+设一次 packed forward 含 `Tq` 个 query，主压缩宽度为 `D`，index 宽度为 `DI`，query head 数为 `Nq`，输出组数为 `G`。
+
+| 阶段 | 张量 | 逻辑 shape | 说明 |
+|---|---|---:|---|
+| 输入 | hidden states | `[Tq,Hmodel]` | 共享 layer 输入 |
+| 原始局部投影 | 新 `K=V` | `[Tq,1,D]` | 追加到 SWA pool |
+| 主压缩器内容 | `U` | `[Tq,coff*D]` | CSA 的 `coff=2`，HCA 为 `1` |
+| 主压缩器 gate | `Z` | `[Tq,coff*D]` | 与内容使用相同拆分 |
+| 压缩器 workspace | `Ubar/Zbar` | `[Nc,coff*m,D]` | 概念 shape，通常被融合 |
+| 新主压缩条目 | `Cnew` | `[Nnew,D]` | 只在边界发射 |
+| CSA index 压缩输出 | `KInew` | `[Nnew,DI]` | 仅 CSA |
+| Index query | `QI` | `[Tq,HI,DI]` | 仅 CSA |
+| Index score | `I` | `[Tq,Nc_visible]` | 仅 CSA，可流式计算 |
+| 选中 ID | `ids` | `[Tq,k]` | 仅 CSA |
+| 局部 ID | `local_ids` | `[Tq,w]` 有界 | 无效槽位被 mask |
+| 可见 K/V | 概念并集 | `[Tq,Nvisible,1,D]` | 物理 pool 仍分离 |
+| 主 logits | `A` | `[Tq,Nq,Nvisible]` | 优化路径中分块/online |
+| Head 输出 | `Ohead` | `[Tq,Nq,D]` | 随后做 inverse partial RoPE |
+| 分组投影 | `Olowrank` | `[Tq,G,Ro]` | 最终投影之前 |
+| Layer 输出 | `Omodel` | `[Tq,Hmodel]` | 回到残差路径 |
+
+## 20. 把增量压缩器看成状态机
+
+对每个 request、每个压缩 layer，decode 会在 `m` 个原始位置之间循环：
+
+```text
+state = {
+    complete_count,
+    tail_position,
+    partial_content,
+    partial_gate,
+    overlap_carry,       # 仅 CSA
+}
+```
+
+每个 token 执行：
+
+```text
+1. 把 x_t 投影成局部 K=V，并追加到 SWA ring；
+2. 把 x_t 投影到压缩器 content/gate 槽位；
+3. 写入部分状态的当前 slot；
+4. 若 chunk 未完成，不发射压缩条目；
+5. 若 chunk 闭合，执行 pool + norm + RoPE，追加一个条目；
+6. 对 CSA，同步追加 indexer 条目并更新 overlap carry；
+7. 增加 complete_count，重置新的 tail。
+```
+
+这解释了为什么只保存 `token_length` 无法恢复迁移或 prefix-cached request。已完成条目数相同、tail 激活不同的两个 request，会生成不同的下一个压缩条目。
+
+## 21. 压缩器参考伪代码
+
+```python
+def overlap_compress(U, Z, ape, valid):
+    # U/Z:   [B,Nc,m,2,D]
+    # ape:   [2*m,D]
+    # valid: [B,Nc,2*m]
+    B, Nc, m, _, D = U.shape
+
+    prev_u = shift_right(U[:, :, :, 0, :], fill=0)     # [B,Nc,m,D]
+    curr_u = U[:, :, :, 1, :]                          # [B,Nc,m,D]
+    prev_z = shift_right(Z[:, :, :, 0, :], fill=-inf)
+    curr_z = Z[:, :, :, 1, :]
+
+    ubar = cat([prev_u, curr_u], dim=2)                 # [B,Nc,2m,D]
+    zbar = cat([prev_z, curr_z], dim=2)                 # [B,Nc,2m,D]
+    logits = where(valid[..., None], zbar + ape, -inf)
+    weight = softmax(logits, dim=2)                     # 源位置轴
+    compressed = (weight * ubar).sum(dim=2)             # [B,Nc,D]
+    return compressed
+```
+
+测试应覆盖 `S<m`、`S=m`、`S=m+1`、多个完整块、混合 request 长度，以及边界落在压缩块内部的 split prefill。
+
+## 22. 内存计算实例
+
+取 `L=1,048,576`、`D=512`，并用 FP8 非 RoPE 存储做一个粗略下界比较：
+
+```text
+未压缩条目: 1,048,576 * 512 bytes ≈ 512 MiB/layer
+CSA m=4:      262,144 * 512 bytes ≈ 128 MiB/CSA layer
+HCA m'=128:     8,192 * 512 bytes ≈   4 MiB/HCA layer
+```
+
+实际内存还要加入局部 SWA pool、BF16 RoPE 通道、CSA indexer cache、scale、对齐、压缩器状态与分配器碎片。这个例子说明“4 倍压缩”和“128 倍压缩”只描述序列条目项，而不是总 serving 内存。
+
+对一个 `k=512` 的 CSA decode query，主压缩读取约为 `512*D` 个元素，与 `L` 无关；indexer 仍需扫描最多 `L/4` 个压缩 index key。HCA 则读取全部 `L/128` 个条目，但没有 top-k。
+
+## 23. 调试与练习
+
+| 症状 | 可能需要检查的边界 |
+|---|---|
+| 每四个 token 出现一次错误 | CSA 发射边界、tail reset、overlap carry |
+| Split prefill 与一次性 prefill 不一致 | 部分压缩器状态丢失或顺序错误 |
+| 局部事实消失 | SWA 映射/窗口 mask 或组合支撑集归一化 |
+| 长程输出读取未来内容 | 压缩条目就绪 mask |
+| CSA 正确、HCA 错误 | 稠密压缩长度/page 元数据或非重叠路径 |
+| HCA 正确、CSA 错误 | index 压缩同步、top-k、压缩 ID 转换 |
+| BF16 正确、FP8/FP4 错误 | scale 布局、RoPE slice dtype、ranking recall |
+
+练习：
+
+1. 对 `S=19`、`m=4`，逐 token 计算 `Nc`、已完成条目数与 tail length。
+2. 画出 overlap 模式下哪些源 chunk 会贡献给 `C_1`、`C_2` 与 `C_3`。
+3. 当 `w=128`、`k=512`、`Nq=64` 时，写出 `Tq=16` 的主 logit 逻辑 shape。
+4. 解释为什么 HCA layer 不需要 top-k 元数据，但仍需要 compressor-tail state。
+5. 设计一个 prefix-cache key，证明 local、compressed、indexer 与 tail state 指向同一 token 边界。
+
+## 24. 参考资料
+
+- [DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence](https://arxiv.org/abs/2606.19348)
 - [本仓库的 DSA 教程](./07-deepseek-sparse-attention.md)
 - [高效注意力技术地图](./06-efficient-attention-landscape.md)

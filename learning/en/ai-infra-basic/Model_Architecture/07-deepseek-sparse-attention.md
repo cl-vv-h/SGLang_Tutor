@@ -34,6 +34,8 @@ query token t
 
 The indexer and main attention serve different purposes and use different projections. Indexer scores are only used to choose positions; the main MLA logits and softmax still determine the output over those positions.
 
+![DSA tensor dataflow](./assets/dsa-dataflow.svg)
+
 ## 3. Unified Notation
 
 | Symbol | Meaning |
@@ -68,6 +70,95 @@ dot:      [Tq, Lkv, HI]
 ReLU + weighted sum over HI
 scores:   [Tq, Lkv]
 ```
+
+### 4.1 Projection-by-Projection Shape Changes
+
+The indexer receives the model hidden state and the low-rank MLA query activation. A representative projection path in the SGLang source is:
+
+```text
+hidden x:   [Tq,Hmodel]
+q_lora:     [Tq,Dq]
+
+QI_flat = q_lora @ WqI^T
+WqI:        [HI*DI,Dq]
+QI_flat:    [Tq,HI*DI]
+QI:         [Tq,HI,DI]
+
+KI = LayerNorm(x @ WkI^T)
+WkI:        [DI,Hmodel]
+KI:         [Tq,DI]             # one shared key per token
+
+head_w = x @ WwI^T
+WwI:        [HI,Hmodel]
+head_w:     [Tq,HI]
+```
+
+The indexer query has `HI` heads, but its key is shared. Broadcasting the key across query heads gives:
+
+```text
+QI[:,None,:,:]:        [Tq,1,HI,DI]
+KI_cache[None,:,:, :]: [1,Lkv,1,DI]
+dot result:            [Tq,Lkv,HI]
+```
+
+After `ReLU`, multiply by `head_w[:,None,:] [Tq,1,HI]` and reduce over `HI`:
+
+```text
+weighted: [Tq,Lkv,HI]
+scores:   [Tq,Lkv]
+```
+
+This head reduction is why top-k returns one position set per query token rather than a different set per main attention head.
+
+### 4.2 Indexer RoPE Split
+
+The indexer head can contain positional and non-positional subspaces:
+
+```text
+QI: [Tq,HI,DI]
+  -> QI_rope [Tq,HI,Dr]
+  -> QI_nope [Tq,HI,DI-Dr]
+
+KI: [Tq,DI]
+  -> KI_rope [Tq,Dr]
+  -> KI_nope [Tq,DI-Dr]
+```
+
+Apply RoPE only to the designated `Dr` channels and concatenate back to `DI`. In the NPU path visible in this repository, a representative shape is `HI=64`, `DI=128`, `Dr=64`: the projection produces `[Tq,64,128]`, splits into two 64-channel parts, rotates the positional part, and restores `[Tq,64,128]`.
+
+### 4.3 A Small Numerical Ranking Example
+
+Let `HI=2`, `DI=2`, and four candidate keys:
+
+```text
+qI_0 = [1, 0]       head weight w_0 = 0.75
+qI_1 = [0, 1]       head weight w_1 = 0.25
+
+kI_0 = [ 2, 1]
+kI_1 = [-1, 4]
+kI_2 = [ 1,-2]
+kI_3 = [ 0, 3]
+```
+
+Per-head dot products are:
+
+```text
+candidate 0: [2, 1]  -> ReLU -> [2,1]
+candidate 1: [-1,4]  -> ReLU -> [0,4]
+candidate 2: [1,-2]  -> ReLU -> [1,0]
+candidate 3: [0, 3]  -> ReLU -> [0,3]
+```
+
+Weighted scalar scores become:
+
+```text
+I_0 = 0.75*2 + 0.25*1 = 1.75
+I_1 = 0.75*0 + 0.25*4 = 1.00
+I_2 = 0.75*1 + 0.25*0 = 0.75
+I_3 = 0.75*0 + 0.25*3 = 0.75
+```
+
+For `k=2`, candidates 0 and 1 are selected. Notice that negative evidence is removed by ReLU before the head-weighted reduction; moving ReLU after the reduction would define a different function.
 
 ReLU is part of the trained scoring function, not an interchangeable implementation detail. The indexer uses fewer/smaller heads and can use low precision, making a full scan much cheaper than running the main attention on all entries.
 
@@ -139,6 +230,8 @@ Arbitrary post-hoc top-k selection can remove information the model expects. Dee
 - Detach the indexer's input from the main computational graph so the language-model loss and indexer loss have separated optimization paths.
 
 DSA is therefore a natively trained architecture, not merely a serving-time KV eviction heuristic.
+
+![DSA prefill and decode programs](./assets/dsa-prefill-decode.svg)
 
 ## 9. Prefill Dataflow
 
@@ -249,7 +342,128 @@ Both are natively trainable sparse attention designs, but their dataflows and ca
 7. Sparse outputs are validated against the model's trained reference path, not assumed equal to dense MLA.
 8. Profile indexer, top-k, transform, sparse core, and graph metadata separately.
 
-## 17. References
+## 17. Full Tensor Ledger for One Forward
+
+Let packed prefill contain `R` requests, `Tq` new query tokens in total, and `Tkv` visible cached/new KV entries across requests. `Lmax` is the largest per-request history.
+
+| Stage | Tensor | Logical shape | Persistent? |
+|---|---|---:|---|
+| Input | hidden states | `[Tq,Hmodel]` | no |
+| MLA query down projection | `q_lora` | `[Tq,Dq]` | no |
+| Main query heads | `Qmain` | `[Tq,Nq,Dmain]` | no |
+| New MLA latent | `Cnew` | `[Tq,Dc+Dr]` | yes, append |
+| Indexer query | `QI` | `[Tq,HI,DI]` | no |
+| Indexer head weights | `head_w` | `[Tq,HI]` | no |
+| New index key | `KInew` | `[Tq,DI]` | yes, append |
+| Indexer history | `KIcache` | `[Tkv,DI]` plus request metadata | yes |
+| Conceptual scores | `scores` | `[Tq,Lmax]` | workspace or fused away |
+| Selected logical IDs | `topk_ids` | `[Tq,k]` | forward metadata |
+| Selected physical IDs | `page_ids` | `[Tq,k]` | forward metadata |
+| Selected latent entries | `Csel` | `[Tq,k,Dc+Dr]` | often read directly, not materialized |
+| Main logits | `Alogit` | `[Tq,Nq,k]` | workspace or tiled |
+| Main probabilities | `P` | `[Tq,Nq,k]` | preferably online/tiled |
+| Head output | `Ohead` | `[Tq,Nq,Dv]` | no |
+| Layer output | `O` | `[Tq,Hmodel]` | no |
+
+“Logical shape” does not imply that a dense tensor is allocated. A fused indexer can stream key tiles and keep only running top-k candidates; a sparse attention kernel can load latent entries from physical page IDs without constructing `Csel`.
+
+## 18. Reference Pseudocode with Shape Assertions
+
+The following pseudocode prioritizes semantics over performance:
+
+```python
+def dsa_reference(x, q_lora, latent_cache, index_cache, valid_mask, k):
+    # x:             [Tq, Hmodel]
+    # q_lora:        [Tq, Dq]
+    # latent_cache:  [Tq, Lkv, Dlatent]  # conceptual per-query view
+    # index_cache:   [Tq, Lkv, DI]       # conceptual per-query view
+    # valid_mask:    [Tq, Lkv]
+
+    Tq, Lkv, DI = index_cache.shape
+    q_i = linear_q_index(q_lora).view(Tq, HI, DI)       # [Tq,HI,DI]
+    w_i = linear_head_weight(x)                         # [Tq,HI]
+
+    dots = einsum("thd,tld->tlh", q_i, index_cache)    # [Tq,Lkv,HI]
+    score = (relu(dots) * w_i[:, None, :]).sum(-1)     # [Tq,Lkv]
+    score = where(valid_mask, score, -inf)
+
+    actual_k = min(k, Lkv)
+    ids = topk(score, actual_k, dim=-1).indices         # [Tq,actual_k]
+    chosen_is_valid = gather(valid_mask, dim=-1, index=ids)
+    ids = where(chosen_is_valid, ids, -1)               # invalidate short rows
+    ids = pad_to_k_with_minus_one(ids, k)               # [Tq,k]
+
+    selected = batched_gather(latent_cache, ids)        # [Tq,k,Dlatent]
+    out = sparse_mla(q_lora, selected, ids >= 0)        # [Tq,Nq,Dv]
+    return out, ids
+```
+
+Production code replaces the conceptual per-query cache views with packed/paged pools, but its result must obey these request and causal boundaries.
+
+## 19. Why Top-k Changes the Softmax Mathematics
+
+Dense attention normalizes over all valid positions `V_t`:
+
+```text
+p_dense(s) = exp(a_s) / sum_(u in V_t) exp(a_u)
+```
+
+DSA first obtains a selected support `S_t` from a different score function, then the main core normalizes only over that support:
+
+```text
+p_dsa(s) = exp(a_s) / sum_(u in S_t) exp(a_u),  s in S_t
+p_dsa(s) = 0,                                  s not in S_t
+```
+
+Even if the main logits `a_s` are unchanged, removing candidates changes the denominator. This explains both why sparse continued training is needed and why comparing a sparse result to dense MLA with an extremely tight elementwise tolerance is not a valid correctness target. Kernel correctness should match the trained sparse reference; model quality should be evaluated at the task level.
+
+## 20. Cache Bytes and Decode Traffic Example
+
+Suppose one layer uses:
+
+```text
+Dc + Dr = 576 latent elements per token, BF16
+DI = 128 index elements per token, INT8 plus block scales
+L = 128K tokens
+k = 2048
+```
+
+Ignoring alignment and scales:
+
+```text
+latent capacity = 131072 * 576 * 2 bytes ≈ 144 MiB
+index capacity  = 131072 * 128 * 1 byte  ≈ 16 MiB
+```
+
+The full capacity still grows with `L`. But the main core's per-query latent read is bounded near:
+
+```text
+2048 * 576 * 2 bytes ≈ 2.25 MiB
+```
+
+The indexer scans roughly 16 MiB of quantized keys for that query unless its implementation reuses cache/on-chip locality or distributes the scan. This example makes the optimization target explicit: DSA trades a cheap, narrow sequential scan for a much smaller expensive latent-attention read.
+
+## 21. Debugging from Symptoms
+
+| Symptom | First tensors/invariants to inspect |
+|---|---|
+| Works for one request, fails for mixed lengths | `query_start_loc`, sequence lengths, causal/request mask |
+| Works below `k`, fails above `k` | all-valid shortcut versus real top-k path |
+| Correct eager mode, wrong graph replay | refreshed lengths/page tables/top-k buffers and stable addresses |
+| Large quality loss after index quantization | top-k recall, tie handling, scale layout, RoPE ordering |
+| Indexer is fast but end-to-end is slow | index transform, gather locality, sparse core, stream synchronization |
+| Prefix cache gives nondeterministic output | main latent and indexer caches committed at different boundaries |
+| NPU result differs only at long context | sentinel handling, page translation width, top-k ordering, accumulator precision |
+
+## 22. Exercises
+
+1. With `Tq=32`, `HI=64`, `DI=128`, `Lkv=8192`, write every intermediate shape in the unfused indexer.
+2. Compute the ratio of main-core logits for dense MLA versus DSA when `L=128K` and `k=2048`.
+3. Explain why evicting every non-selected token after one query is incorrect.
+4. Design a streaming top-k implementation that never materializes `[Tq,Lkv]` scores.
+5. For a paged cache with page size 64, derive the physical address of logical token 130 from its request block table.
+
+## 23. References
 
 - [DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models](https://arxiv.org/abs/2512.02556)
 - [Official DeepSeek-V3.2-Exp repository](https://github.com/deepseek-ai/DeepSeek-V3.2-Exp)

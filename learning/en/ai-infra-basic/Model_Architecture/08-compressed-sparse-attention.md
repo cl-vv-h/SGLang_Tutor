@@ -1,10 +1,10 @@
-# Compressed Sparse Attention (CSA) and Hierarchical Compressed Attention (HCA)
+# Compressed Sparse Attention (CSA) and Heavily Compressed Attention (HCA)
 
 Compressed Sparse Attention (CSA) is the long-context attention design introduced with DeepSeek-V4. Its key move is easy to state:
 
 > Compress the sequence first, then retrieve a small number of compressed entries for the expensive attention core.
 
-Hierarchical Compressed Attention (HCA) provides a much more aggressively compressed dense path. A local sliding-window branch preserves recent token detail. Across the model's layer schedule, these mechanisms cover three time scales:
+Heavily Compressed Attention (HCA) provides a much more aggressively compressed dense path. A local sliding-window branch preserves recent token detail. Across the model's layer schedule, these mechanisms cover three time scales:
 
 - **SWA**: exact, uncompressed recent context;
 - **CSA**: moderately compressed, content-selected context;
@@ -24,7 +24,7 @@ CSA changes the candidate space from `L` token entries to roughly `L / m` compre
 | Main-core entries per query | `k` | `k` compressed entries |
 | Main long-range cache granularity | token | compressed chunk |
 
-Compression is not free: each compressed entry summarizes multiple source positions, so the model must learn what information survives. The local and hierarchical paths compensate for different losses.
+Compression is not free: each compressed entry summarizes multiple source positions, so the model must learn what information survives. The local and heavily compressed paths compensate for different losses.
 
 ## 2. Notation and Shape Ledger
 
@@ -72,6 +72,76 @@ The exact implementation batches and reshapes these operations, but three proper
 
 The overlap softens chunk boundaries: evidence near the edge of one chunk can contribute through the neighboring path.
 
+![CSA overlapping sequence compression](./assets/csa-overlap-compression.svg)
+
+### 3.1 Exact Logical Shapes of the Compressor
+
+Let `D` be the compressed KV width and `coff=2` for overlapping CSA. One implementation-friendly layout is:
+
+```text
+X: [B,S,Hmodel]
+
+U_flat = X @ Wcontent^T: [B,S,coff*D]
+Z_flat = X @ Wgate^T:    [B,S,coff*D]
+
+pad S to Nc*m, then reshape:
+U: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
+Z: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
+```
+
+For compressed slot `i`, the overlap transform constructs:
+
+```text
+Ubar_i = concat(U[i-1,:,path_a,:], U[i,:,path_b,:])  # [B,2m,D]
+Zbar_i = concat(Z[i-1,:,path_a,:], Z[i,:,path_b,:])  # [B,2m,D]
+```
+
+At the left boundary, the missing previous chunk is padded and masked. The learned absolute position embedding inside the compression window is:
+
+```text
+APE: [2m,D]
+```
+
+The feature-wise source weights and compressed entry are:
+
+```text
+A_i[b,r,d] = exp(Zbar_i[b,r,d] + APE[r,d])
+             / sum_(u valid) exp(Zbar_i[b,u,d] + APE[u,d])
+
+C_i[b,d] = sum_(r valid) A_i[b,r,d] * Ubar_i[b,r,d]
+
+A_i: [B,2m,D]
+C_i: [B,D]
+```
+
+Softmax runs over the **source-position axis** independently for each feature `d`. This is more expressive than one scalar weight per token: different output channels can preserve evidence from different source positions.
+
+### 3.2 Why Output Length Is `ceil(S/m)`, Not `ceil(S/2m)`
+
+Each output sees up to `2m` sources, but adjacent outputs overlap. The compressor advances only `m` new source positions per output:
+
+```text
+C_1 sees chunks 0 and 1
+C_2 sees chunks 1 and 2
+C_3 sees chunks 2 and 3
+```
+
+Therefore receptive-field width is `2m`, while stride is `m`. Confusing width with stride underestimates cache length by two.
+
+### 3.3 Causality and Entry Readiness
+
+A compressed entry becomes visible only after all source positions needed for that entry are available. For causal inference, a query must never attend to a summary that contains a future token.
+
+For `m=4`, a completed summary of source positions `0..3` cannot be used by queries at positions `0..2`. The runtime tracks the number of completed entries separately from raw token length:
+
+```text
+token_len = t + 1
+complete_entries = floor(token_len / m)
+tail_len = token_len % m
+```
+
+Overlap adds previous-path state but does not relax this causal boundary.
+
 ## 4. Compressed Indexer
 
 CSA runs retrieval over compressed entries, not raw token positions. Its indexer follows the same high-level pattern as DSA:
@@ -106,6 +176,47 @@ The real implementation includes normalization, positional handling, head groupi
 - top-k returns compressed logical IDs;
 - the **main core** recomputes attention logits and softmax on those entries.
 
+### 5.1 Local and Compressed Entries Share the Attention Support
+
+For one query token, define:
+
+```text
+Klocal = Vlocal: [w_valid,1,D]
+Kcomp  = Vcomp:  [k_valid,1,D]       # CSA
+                 [Nh_valid,1,D]      # HCA
+
+Kvisible = concat(Klocal, Kcomp, dim=sequence)
+Vvisible = Kvisible                  # shared K=V MQA
+```
+
+With `Q [Nq,D]`, the logical tensors are:
+
+```text
+logits: [Nq,Nvisible]
+Nvisible = w_valid + k_valid         # CSA layer
+Nvisible = w_valid + Nh_valid        # HCA layer
+prob:   [Nq,Nvisible]
+Ohead:  [Nq,D]
+```
+
+The per-head attention sink adds a stable extra logit to the normalization. A fused kernel may keep local and compressed caches in separate physical buffers, but mathematically they form one causal support set for that layer.
+
+### 5.2 Grouped Low-Rank Output Projection
+
+The wide head output would normally flatten to `[Tq,Nq*D]`. DeepSeek-V4 groups heads before a low-rank output projection. With `G` output groups and rank `Ro`:
+
+```text
+Ohead:    [Tq,Nq,D]
+Ogroup:   [Tq,G,(Nq/G)*D]
+Woa:      [G,Ro,(Nq/G)*D]
+Olowrank: [Tq,G,Ro]
+merge:    [Tq,G*Ro]
+Wob:      [Hmodel,G*Ro]
+Omodel:   [Tq,Hmodel]
+```
+
+Before this projection, the architecture applies inverse rotation to the designated partial-RoPE output channels. Reordering inverse RoPE and the learned projection changes the function.
+
 ## 6. HCA: A Dense Global Safety Net
 
 HCA compresses the sequence with a larger stride `m'` and performs dense attention over the resulting short sequence:
@@ -128,6 +239,8 @@ context(t) = [t-w+1, ..., t]
 This branch handles exact local syntax, recent tool output, and near-field dependencies without asking a compressor to preserve every small distinction.
 
 Each compressed-attention layer pairs its local path with the long-range branch configured for that layer: CSA or HCA. The model interleaves layer types; it does not necessarily run both CSA and HCA in every block. These are complementary trained paths, not interchangeable inference options.
+
+![DeepSeek-V4 compressed-attention layer dataflow](./assets/dsv4-attention-dataflow.svg)
 
 ## 8. Positional Information and Attention Sinks
 
@@ -268,8 +381,137 @@ Good fusion candidates include projection+norm, compressor gate+softmax+reduce, 
 7. Memory accounting includes all cache pools, scales, metadata, and fragmentation.
 8. Profiling separates compression, retrieval, sparse core, HCA, SWA, and graph overhead.
 
-## 18. References
+## 18. Layer Schedule and Attention-Mask Shapes
 
-- [DeepSeek-V4: Advancing Open-Source Intelligence](https://arxiv.org/abs/2606.19348)
+DeepSeek-V4 is a hybrid at the **layer schedule** level. Each layer has one configured compression ratio:
+
+```text
+compress_ratio = 0    -> local/sliding path only
+compress_ratio = 4    -> CSA compressor + indexer + local path
+compress_ratio = 128  -> HCA compressor + dense compressed path + local path
+```
+
+For a pedagogical prefill with `S` query tokens:
+
+```text
+local causal mask: [S,S]
+CSA selected slots: logically [S,k]
+HCA entries:        logically [S,ceil(S/m')]
+```
+
+Only positions satisfying both request boundaries and readiness are valid. A backend may flatten query-specific CSA slots into `[S,S*k]` workspace columns, but that is an execution layout—not `S*k` persistent cache entries.
+
+## 19. Full Tensor Ledger
+
+Let a packed forward contain `Tq` queries, main compression width `D`, index width `DI`, `Nq` query heads, and output-group count `G`.
+
+| Stage | Tensor | Logical shape | Notes |
+|---|---|---:|---|
+| Input | hidden states | `[Tq,Hmodel]` | shared layer input |
+| Raw local projection | new `K=V` | `[Tq,1,D]` | appended to SWA pool |
+| Main compressor content | `U` | `[Tq,coff*D]` | `coff=2` CSA, `1` HCA |
+| Main compressor gate | `Z` | `[Tq,coff*D]` | same split as content |
+| Compressor workspace | `Ubar/Zbar` | `[Nc,coff*m,D]` | conceptual; often fused |
+| New compressed main entries | `Cnew` | `[Nnew,D]` | emitted only at boundaries |
+| CSA index-compressor output | `KInew` | `[Nnew,DI]` | CSA only |
+| Index query | `QI` | `[Tq,HI,DI]` | CSA only |
+| Index score | `I` | `[Tq,Nc_visible]` | CSA only, may be streamed |
+| Selected IDs | `ids` | `[Tq,k]` | CSA only |
+| Local IDs | `local_ids` | `[Tq,w]` bounded | invalid slots masked |
+| Visible K/V | conceptual union | `[Tq,Nvisible,1,D]` | physical pools remain separate |
+| Main logits | `A` | `[Tq,Nq,Nvisible]` | tiled/online in optimized path |
+| Head output | `Ohead` | `[Tq,Nq,D]` | inverse partial RoPE follows |
+| Grouped projection | `Olowrank` | `[Tq,G,Ro]` | before final projection |
+| Layer output | `Omodel` | `[Tq,Hmodel]` | rejoins residual path |
+
+## 20. Incremental Compressor as a State Machine
+
+For each request and compressed layer, decoding cycles through `m` raw positions:
+
+```text
+state = {
+    complete_count,
+    tail_position,
+    partial_content,
+    partial_gate,
+    overlap_carry,       # CSA only
+}
+```
+
+At every token:
+
+```text
+1. project x_t into local K=V and append to the SWA ring;
+2. project x_t into compressor content/gate slots;
+3. write the current slot in partial state;
+4. if the chunk is incomplete, emit no compressed entry;
+5. if the chunk closes, pool + norm + RoPE, append one entry;
+6. for CSA, append the synchronized indexer entry and update overlap carry;
+7. advance complete_count and reset the new tail.
+```
+
+This explains why `token_length` alone cannot reconstruct a migrated or prefix-cached request. Two requests with the same number of completed entries but different tail activations will produce different next compressed entries.
+
+## 21. Reference Compressor Pseudocode
+
+```python
+def overlap_compress(U, Z, ape, valid):
+    # U/Z:   [B,Nc,m,2,D]
+    # ape:   [2*m,D]
+    # valid: [B,Nc,2*m]
+    B, Nc, m, _, D = U.shape
+
+    prev_u = shift_right(U[:, :, :, 0, :], fill=0)     # [B,Nc,m,D]
+    curr_u = U[:, :, :, 1, :]                          # [B,Nc,m,D]
+    prev_z = shift_right(Z[:, :, :, 0, :], fill=-inf)
+    curr_z = Z[:, :, :, 1, :]
+
+    ubar = cat([prev_u, curr_u], dim=2)                 # [B,Nc,2m,D]
+    zbar = cat([prev_z, curr_z], dim=2)                 # [B,Nc,2m,D]
+    logits = where(valid[..., None], zbar + ape, -inf)
+    weight = softmax(logits, dim=2)                     # source axis
+    compressed = (weight * ubar).sum(dim=2)             # [B,Nc,D]
+    return compressed
+```
+
+Tests should include `S<m`, `S=m`, `S=m+1`, several full chunks, mixed request lengths, and a split prefill whose boundary lands inside a compression chunk.
+
+## 22. Worked Memory Example
+
+Take `L=1,048,576`, `D=512`, FP8 non-RoPE storage for a rough lower-bound comparison:
+
+```text
+uncompressed entries: 1,048,576 * 512 bytes ≈ 512 MiB per layer
+CSA m=4:                262,144 * 512 bytes ≈ 128 MiB per CSA layer
+HCA m'=128:               8,192 * 512 bytes ≈   4 MiB per HCA layer
+```
+
+Add the local SWA pool, BF16 RoPE channels, indexer cache for CSA, scales, alignment, compressor state, and allocator fragmentation to obtain actual memory. The example shows why “4x compression” and “128x compression” describe only the sequence-entry term, not total serving memory.
+
+For one CSA decode query with `k=512`, the main compressed read is roughly `512*D` elements regardless of `L`, while the indexer still scans up to `L/4` compressed index keys. HCA reads all `L/128` entries and avoids top-k.
+
+## 23. Debugging and Exercises
+
+| Symptom | Likely boundary to inspect |
+|---|---|
+| Error appears every fourth token | CSA emit boundary, tail reset, overlap carry |
+| Split prefill differs from one-shot prefill | partial compressor state was dropped or reordered |
+| Local facts disappear | SWA mapping/window mask or combined-support normalization |
+| Long-range output reads future content | compressed-entry readiness mask |
+| CSA works, HCA fails | dense compressed length/page metadata or non-overlap path |
+| HCA works, CSA fails | index compressor synchronization, top-k, compressed ID transform |
+| Correct BF16, wrong FP8/FP4 | scale layout, RoPE slice dtype, ranking recall |
+
+Exercises:
+
+1. For `S=19` and `m=4`, compute `Nc`, completed entries, and tail length after every token.
+2. Draw which source chunks contribute to `C_1`, `C_2`, and `C_3` in overlap mode.
+3. With `w=128`, `k=512`, `Nq=64`, write the logical main-logit shape for `Tq=16`.
+4. Explain why an HCA layer needs no top-k metadata but still needs compressor-tail state.
+5. Design a prefix-cache key that proves local, compressed, indexer, and tail states refer to the same token boundary.
+
+## 24. References
+
+- [DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence](https://arxiv.org/abs/2606.19348)
 - [DSA tutorial in this repository](./07-deepseek-sparse-attention.md)
 - [Efficient-attention landscape](./06-efficient-attention-landscape.md)

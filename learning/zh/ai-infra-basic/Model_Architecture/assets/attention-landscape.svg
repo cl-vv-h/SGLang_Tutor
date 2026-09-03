@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="720" viewBox="0 0 1320 720" role="img" aria-labelledby="title desc">
+  <title id="title">高效注意力设计维度</title>
+  <desc id="desc">区分缓存表示、位置选择、递归状态和执行 kernel 的技术地图。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#334155"/></marker>
+    <style>
+      .title{font:700 25px "Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;fill:#0f172a}.head{font:700 19px "Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;fill:#0f172a}.text{font:16px "Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;fill:#1f2937}.small{font:14px "Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;fill:#475569}.box{stroke-width:1.5;rx:12}.arrow{stroke:#334155;stroke-width:2;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1320" height="720" fill="#f8fafc"/>
+  <text x="660" y="42" text-anchor="middle" class="title">高效注意力：先问“究竟改变了什么？”</text>
+  <rect x="45" y="75" width="285" height="555" fill="#e0f2fe" stroke="#0284c7" class="box"/>
+  <text x="188" y="112" text-anchor="middle" class="head">1. 缓存表示</text>
+  <rect x="75" y="145" width="225" height="82" fill="#fff" stroke="#0284c7" class="box"/><text x="188" y="177" text-anchor="middle" class="text">MHA / GQA / MQA</text><text x="188" y="203" text-anchor="middle" class="small">[L, Nkv, Dk + Dv]</text>
+  <rect x="75" y="260" width="225" height="82" fill="#fff" stroke="#0284c7" class="box"/><text x="188" y="292" text-anchor="middle" class="text">MLA latent cache</text><text x="188" y="318" text-anchor="middle" class="small">[L, Dc + Dr]</text>
+  <rect x="75" y="375" width="225" height="82" fill="#fff" stroke="#0284c7" class="box"/><text x="188" y="407" text-anchor="middle" class="text">CSA / HCA 序列压缩</text><text x="188" y="433" text-anchor="middle" class="small">[L / m, Dcomp]</text>
+  <rect x="75" y="490" width="225" height="82" fill="#fff" stroke="#0284c7" class="box"/><text x="188" y="522" text-anchor="middle" class="text">GDN / KDA 状态</text><text x="188" y="548" text-anchor="middle" class="small">[H, Dv, Dk]，固定大小</text>
+  <rect x="370" y="75" width="285" height="555" fill="#f3e8ff" stroke="#9333ea" class="box"/>
+  <text x="513" y="112" text-anchor="middle" class="head">2. 读取哪些位置</text>
+  <rect x="400" y="145" width="225" height="82" fill="#fff" stroke="#9333ea" class="box"/><text x="513" y="177" text-anchor="middle" class="text">稠密注意力</text><text x="513" y="203" text-anchor="middle" class="small">全部 L 个条目</text>
+  <rect x="400" y="260" width="225" height="82" fill="#fff" stroke="#9333ea" class="box"/><text x="513" y="292" text-anchor="middle" class="text">SWA</text><text x="513" y="318" text-anchor="middle" class="small">最近 w 个条目</text>
+  <rect x="400" y="375" width="225" height="82" fill="#fff" stroke="#9333ea" class="box"/><text x="513" y="407" text-anchor="middle" class="text">DSA</text><text x="513" y="433" text-anchor="middle" class="small">在 L 个 latent 中 TopK</text>
+  <rect x="400" y="490" width="225" height="82" fill="#fff" stroke="#9333ea" class="box"/><text x="513" y="522" text-anchor="middle" class="text">CSA</text><text x="513" y="548" text-anchor="middle" class="small">在 L / m 个条目中 TopK</text>
+  <rect x="695" y="75" width="285" height="555" fill="#dcfce7" stroke="#16a34a" class="box"/>
+  <text x="838" y="112" text-anchor="middle" class="head">3. 分阶段程序</text>
+  <rect x="725" y="145" width="225" height="115" fill="#fff" stroke="#16a34a" class="box"/><text x="838" y="178" text-anchor="middle" class="text">Prefill</text><text x="838" y="205" text-anchor="middle" class="small">多 query，矩阵/分块计算</text><text x="838" y="229" text-anchor="middle" class="small">因果 mask + 变长边界</text>
+  <rect x="725" y="300" width="225" height="115" fill="#fff" stroke="#16a34a" class="box"/><text x="838" y="333" text-anchor="middle" class="text">Decode</text><text x="838" y="360" text-anchor="middle" class="small">每个 request 一个 query</text><text x="838" y="384" text-anchor="middle" class="small">缓存/状态带宽主导</text>
+  <rect x="725" y="455" width="225" height="115" fill="#fff" stroke="#16a34a" class="box"/><text x="838" y="488" text-anchor="middle" class="text">Serving 元数据</text><text x="838" y="515" text-anchor="middle" class="small">page table / top-k ID</text><text x="838" y="539" text-anchor="middle" class="small">state slot / graph buffer</text>
+  <rect x="1020" y="75" width="255" height="555" fill="#fff7ed" stroke="#ea580c" class="box"/>
+  <text x="1148" y="112" text-anchor="middle" class="head">4. 执行方式</text>
+  <rect x="1048" y="150" width="200" height="90" fill="#fff" stroke="#ea580c" class="box"/><text x="1148" y="184" text-anchor="middle" class="text">FlashAttention</text><text x="1148" y="211" text-anchor="middle" class="small">分块 + online softmax</text>
+  <rect x="1048" y="280" width="200" height="90" fill="#fff" stroke="#ea580c" class="box"/><text x="1148" y="314" text-anchor="middle" class="text">分页缓存</text><text x="1148" y="341" text-anchor="middle" class="small">逻辑地址 → 物理地址</text>
+  <rect x="1048" y="410" width="200" height="90" fill="#fff" stroke="#ea580c" class="box"/><text x="1148" y="444" text-anchor="middle" class="text">稀疏 gather</text><text x="1148" y="471" text-anchor="middle" class="small">选中 ID → 融合主核</text>
+  <rect x="1048" y="540" width="200" height="62" fill="#fff" stroke="#ea580c" class="box"/><text x="1148" y="578" text-anchor="middle" class="text">递归融合</text>
+  <path d="M330 352 H370" class="arrow"/><path d="M655 352 H695" class="arrow"/><path d="M980 352 H1020" class="arrow"/>
+  <text x="660" y="674" text-anchor="middle" class="head">架构改变函数或状态；kernel 改变这个函数如何执行。</text>
+</svg>

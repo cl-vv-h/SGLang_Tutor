@@ -34,6 +34,8 @@ query token t
 
 Indexer 与主 Attention 使用不同投影、承担不同职责。Indexer score 只负责选位置；最终输出仍由这些位置上的主 MLA logits 与 softmax 决定。
 
+![DSA 张量数据流](./assets/dsa-dataflow.svg)
+
 ## 3. 统一符号
 
 | 符号 | 含义 |
@@ -68,6 +70,95 @@ dot:      [Tq, Lkv, HI]
 ReLU + 沿 HI 加权求和
 scores:   [Tq, Lkv]
 ```
+
+### 4.1 逐个投影跟踪 Shape 变化
+
+indexer 同时接收模型 hidden state 与 MLA 的低秩 query 激活。SGLang 源码中有代表性的投影路径是：
+
+```text
+hidden x:   [Tq,Hmodel]
+q_lora:     [Tq,Dq]
+
+QI_flat = q_lora @ WqI^T
+WqI:        [HI*DI,Dq]
+QI_flat:    [Tq,HI*DI]
+QI:         [Tq,HI,DI]
+
+KI = LayerNorm(x @ WkI^T)
+WkI:        [DI,Hmodel]
+KI:         [Tq,DI]             # 每个 token 一个共享 key
+
+head_w = x @ WwI^T
+WwI:        [HI,Hmodel]
+head_w:     [Tq,HI]
+```
+
+indexer query 有 `HI` 个 head，但 key 是共享的。把 key 广播到 query head 后：
+
+```text
+QI[:,None,:,:]:        [Tq,1,HI,DI]
+KI_cache[None,:,:, :]: [1,Lkv,1,DI]
+dot 结果:               [Tq,Lkv,HI]
+```
+
+经过 `ReLU`，再乘 `head_w[:,None,:] [Tq,1,HI]`，最后沿 `HI` 归约：
+
+```text
+weighted: [Tq,Lkv,HI]
+scores:   [Tq,Lkv]
+```
+
+正因为这里归约了 indexer head，top-k 才会为每个 query token 返回一组位置，而不是为每个主 Attention head 分别返回位置。
+
+### 4.2 Indexer 的 RoPE 拆分
+
+indexer head 可以包含位置与非位置两个子空间：
+
+```text
+QI: [Tq,HI,DI]
+  -> QI_rope [Tq,HI,Dr]
+  -> QI_nope [Tq,HI,DI-Dr]
+
+KI: [Tq,DI]
+  -> KI_rope [Tq,Dr]
+  -> KI_nope [Tq,DI-Dr]
+```
+
+只对指定的 `Dr` 个通道应用 RoPE，再拼接回 `DI`。本仓库可见的 NPU 路径中，一个代表性 shape 是 `HI=64`、`DI=128`、`Dr=64`：投影先得到 `[Tq,64,128]`，拆成两个 64 通道部分，旋转位置部分，再恢复为 `[Tq,64,128]`。
+
+### 4.3 一个小型数值排序例子
+
+设 `HI=2`、`DI=2`，有四个候选 key：
+
+```text
+qI_0 = [1, 0]       head weight w_0 = 0.75
+qI_1 = [0, 1]       head weight w_1 = 0.25
+
+kI_0 = [ 2, 1]
+kI_1 = [-1, 4]
+kI_2 = [ 1,-2]
+kI_3 = [ 0, 3]
+```
+
+逐 head 点积为：
+
+```text
+候选 0: [2, 1]  -> ReLU -> [2,1]
+候选 1: [-1,4]  -> ReLU -> [0,4]
+候选 2: [1,-2]  -> ReLU -> [1,0]
+候选 3: [0, 3]  -> ReLU -> [0,3]
+```
+
+加权后的标量分数是：
+
+```text
+I_0 = 0.75*2 + 0.25*1 = 1.75
+I_1 = 0.75*0 + 0.25*4 = 1.00
+I_2 = 0.75*1 + 0.25*0 = 0.75
+I_3 = 0.75*0 + 0.25*3 = 0.75
+```
+
+当 `k=2` 时，候选 0 与候选 1 被选中。注意，负证据是在 head 加权归约之前被 ReLU 消除的；把 ReLU 移到归约之后会定义另一个函数。
 
 ReLU 是训练期评分函数的一部分，不是可以任意替换的实现细节。Indexer 的 head 更少、维度更小，并可使用低精度，因此完整扫描远比对所有 entry 执行主 Attention 便宜。
 
@@ -139,6 +230,8 @@ Top-k indices 是每次 forward 的 metadata，决定当前 query 读取哪些 e
 - 从主计算图 detach indexer input，使 language-model loss 与 indexer loss 走分离的优化路径。
 
 因此 DSA 是原生训练的模型结构，不只是 serving 阶段的 KV eviction heuristic。
+
+![DSA 的 prefill 与 decode 程序](./assets/dsa-prefill-decode.svg)
 
 ## 9. Prefill 数据流
 
@@ -249,7 +342,128 @@ sparse main attention + output projection
 7. Sparse output 应与模型训练时的 reference path 比较，不能假设它等于 dense MLA。
 8. 分别 profile indexer、top-k、transform、sparse core 与 graph metadata。
 
-## 17. 参考资料
+## 17. 一次 Forward 的完整 Tensor 账本
+
+设 packed prefill 含 `R` 个 request，总计 `Tq` 个新 query token；所有 request 一共可见 `Tkv` 个已缓存/新 KV 条目，`Lmax` 是单 request 最大历史长度。
+
+| 阶段 | 张量 | 逻辑 shape | 是否持久化 |
+|---|---|---:|---|
+| 输入 | hidden states | `[Tq,Hmodel]` | 否 |
+| MLA query 降投影 | `q_lora` | `[Tq,Dq]` | 否 |
+| 主 query heads | `Qmain` | `[Tq,Nq,Dmain]` | 否 |
+| 新 MLA latent | `Cnew` | `[Tq,Dc+Dr]` | 是，追加 |
+| Indexer query | `QI` | `[Tq,HI,DI]` | 否 |
+| Indexer head 权重 | `head_w` | `[Tq,HI]` | 否 |
+| 新 index key | `KInew` | `[Tq,DI]` | 是，追加 |
+| Indexer 历史 | `KIcache` | `[Tkv,DI]` 加 request 元数据 | 是 |
+| 概念 score | `scores` | `[Tq,Lmax]` | workspace 或被融合消除 |
+| 选中逻辑 ID | `topk_ids` | `[Tq,k]` | forward 元数据 |
+| 选中物理 ID | `page_ids` | `[Tq,k]` | forward 元数据 |
+| 选中 latent 条目 | `Csel` | `[Tq,k,Dc+Dr]` | 通常直接读取，不物化 |
+| 主 logits | `Alogit` | `[Tq,Nq,k]` | workspace 或分块保存 |
+| 主概率 | `P` | `[Tq,Nq,k]` | 最好 online/分块处理 |
+| Head 输出 | `Ohead` | `[Tq,Nq,Dv]` | 否 |
+| Layer 输出 | `O` | `[Tq,Hmodel]` | 否 |
+
+“逻辑 shape”不代表真的分配了稠密张量。融合 indexer 可以流式读取 key tile，只保留当前 top-k 候选；稀疏注意力 kernel 可以根据物理 page ID 直接读取 latent，而不构造 `Csel`。
+
+## 18. 带 Shape 断言的参考伪代码
+
+下面的伪代码优先表达语义，而非性能：
+
+```python
+def dsa_reference(x, q_lora, latent_cache, index_cache, valid_mask, k):
+    # x:             [Tq, Hmodel]
+    # q_lora:        [Tq, Dq]
+    # latent_cache:  [Tq, Lkv, Dlatent]  # 概念上的逐 query 视图
+    # index_cache:   [Tq, Lkv, DI]       # 概念上的逐 query 视图
+    # valid_mask:    [Tq, Lkv]
+
+    Tq, Lkv, DI = index_cache.shape
+    q_i = linear_q_index(q_lora).view(Tq, HI, DI)       # [Tq,HI,DI]
+    w_i = linear_head_weight(x)                         # [Tq,HI]
+
+    dots = einsum("thd,tld->tlh", q_i, index_cache)    # [Tq,Lkv,HI]
+    score = (relu(dots) * w_i[:, None, :]).sum(-1)     # [Tq,Lkv]
+    score = where(valid_mask, score, -inf)
+
+    actual_k = min(k, Lkv)
+    ids = topk(score, actual_k, dim=-1).indices         # [Tq,actual_k]
+    chosen_is_valid = gather(valid_mask, dim=-1, index=ids)
+    ids = where(chosen_is_valid, ids, -1)               # 将短序列补位失效化
+    ids = pad_to_k_with_minus_one(ids, k)               # [Tq,k]
+
+    selected = batched_gather(latent_cache, ids)        # [Tq,k,Dlatent]
+    out = sparse_mla(q_lora, selected, ids >= 0)        # [Tq,Nq,Dv]
+    return out, ids
+```
+
+生产代码会把概念上的逐 query cache 视图替换为 packed/paged pool，但结果必须遵守完全相同的 request 与因果边界。
+
+## 19. 为什么 Top-k 会改变 Softmax 数学
+
+稠密注意力在全部有效位置 `V_t` 上归一化：
+
+```text
+p_dense(s) = exp(a_s) / sum_(u in V_t) exp(a_u)
+```
+
+DSA 先用另一套 score 函数得到选中集合 `S_t`，主核再只在该集合上归一化：
+
+```text
+p_dsa(s) = exp(a_s) / sum_(u in S_t) exp(a_u),  s in S_t
+p_dsa(s) = 0,                                  s not in S_t
+```
+
+即使主 logit `a_s` 不变，移除候选也会改变分母。这既解释了为什么需要稀疏续训，也解释了为什么不能用极严格的逐元素误差，把稀疏结果和稠密 MLA 当成正确性目标。Kernel 正确性应对齐训练后的稀疏参考路径；模型质量则应在任务层面评估。
+
+## 20. Cache 字节数与 Decode 流量例子
+
+假设某一层使用：
+
+```text
+Dc + Dr = 576 个 latent 元素/token，BF16
+DI = 128 个 index 元素/token，INT8 并带 block scale
+L = 128K tokens
+k = 2048
+```
+
+忽略对齐和 scale：
+
+```text
+latent 容量 = 131072 * 576 * 2 bytes ≈ 144 MiB
+index 容量  = 131072 * 128 * 1 byte  ≈ 16 MiB
+```
+
+完整容量仍随 `L` 增长，但主核每个 query 的 latent 读取被约束在：
+
+```text
+2048 * 576 * 2 bytes ≈ 2.25 MiB
+```
+
+如果没有 cache/片上局部性复用或分布式扫描，indexer 仍需为这个 query 扫描约 16 MiB 量化 key。这个例子把优化目标讲清楚了：DSA 用便宜、窄的顺序扫描，换取昂贵 latent-attention 读取的大幅减少。
+
+## 21. 从症状开始调试
+
+| 症状 | 首先检查的张量/不变量 |
+|---|---|
+| 单 request 正确，混合长度错误 | `query_start_loc`、sequence length、因果/request mask |
+| `L<=k` 正确，超过 `k` 后错误 | 全量可见 shortcut 与真实 top-k 路径 |
+| eager 正确，graph replay 错误 | lengths/page tables/top-k buffer 是否刷新，地址是否稳定 |
+| index 量化后质量大降 | top-k recall、tie 处理、scale 布局、RoPE 顺序 |
+| indexer 很快但端到端很慢 | index transform、gather 局部性、稀疏主核、stream 同步 |
+| prefix cache 输出不稳定 | 主 latent 与 indexer cache 是否在不同边界提交 |
+| NPU 只在长上下文出错 | sentinel、page 地址转换宽度、top-k 顺序、累加精度 |
+
+## 22. 练习
+
+1. 当 `Tq=32`、`HI=64`、`DI=128`、`Lkv=8192` 时，写出未融合 indexer 的每个中间 shape。
+2. 当 `L=128K`、`k=2048` 时，计算稠密 MLA 与 DSA 主核 logit 数量之比。
+3. 解释为什么不能在一次 query 后淘汰所有未选 token。
+4. 设计一个不物化 `[Tq,Lkv]` score 的流式 top-k。
+5. 对 page size 64 的分页缓存，根据 request block table 推导逻辑 token 130 的物理地址。
+
+## 23. 参考资料
 
 - [DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models](https://arxiv.org/abs/2512.02556)
 - [DeepSeek-V3.2-Exp 官方仓库](https://github.com/deepseek-ai/DeepSeek-V3.2-Exp)

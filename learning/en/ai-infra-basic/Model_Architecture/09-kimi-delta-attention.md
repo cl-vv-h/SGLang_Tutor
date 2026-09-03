@@ -97,6 +97,54 @@ o_t = S_t^T q_t
 
 The two forms are equivalent after transposing. Always establish the state orientation before comparing code and equations.
 
+![KDA recurrent update](./assets/kda-recurrent-update.svg)
+
+### 5.1 Deriving the Implementation Form from the Paper Form
+
+Start from the report's `S[d_k,d_v]` equation:
+
+```text
+S_t = (I - beta k k^T) Diag(alpha) S_prev + beta k v^T
+```
+
+Transpose every factor and reverse multiplication order:
+
+```text
+M_t = S_t^T
+    = M_prev Diag(alpha) (I - beta k k^T) + beta v k^T
+```
+
+Define the column-decayed state:
+
+```text
+M_decay = M_prev Diag(alpha)
+```
+
+Then expand:
+
+```text
+M_t = M_decay - beta (M_decay k) k^T + beta v k^T
+    = M_decay + beta (v - M_decay k) k^T
+```
+
+This is exactly the storage-friendly sequence “decay → predict → residual → outer-product update.” No approximation was introduced by changing orientation.
+
+### 5.2 Element-Wise Interpretation
+
+For value row `r` and key column `c`:
+
+```text
+M_decay[r,c] = M_prev[r,c] * alpha[c]
+M_t[r,c] = M_decay[r,c] + beta * residual[r] * k[c]
+```
+
+KDA therefore has two independent axes of control:
+
+- `alpha[c]` decides how much of historical key feature `c` survives;
+- `residual[r] * k[c]` decides how the current token changes matrix cell `(r,c)`.
+
+GDN's scalar `alpha` cannot choose different lifetimes for different columns.
+
 ## 6. Projection, Short Convolution, and Output Gate
 
 KDA is more than the recurrence alone. A typical layer performs:
@@ -114,6 +162,73 @@ hidden states
 ```
 
 The short convolution supplies precise local order information before recurrent compression. Consequently, serving state includes both the KDA matrix and the convolution tail.
+
+### 6.1 Projection Shapes in SGLang
+
+Let `Hk` be the number of KDA heads, `Dk` the q/k head width, `Dv` the value width, and `C` the short-convolution kernel size. Starting from packed hidden states:
+
+```text
+X: [T,Hmodel]
+```
+
+The logical projection outputs are:
+
+```text
+q_flat:       [T,Hk*Dk]  -> q [T,Hk,Dk]
+k_flat:       [T,Hk*Dk]  -> k [T,Hk,Dk]
+v_flat:       [T,Hk*Dv]  -> v [T,Hk,Dv]
+beta_raw:     [T,Hk]     -> beta [T,Hk]
+forget_raw:   [T,Hk*Dk]  -> a [T,Hk,Dk]
+output_gate:  [T,Hk*Dv]  -> z [T,Hk,Dv]
+```
+
+In the source, forget and output gates use factored projections. For the forget path:
+
+```text
+f_a = X @ Wfa^T:       [T,Dk]
+a_flat = f_a @ Wfb^T:  [T,Hk*Dk]
+a = reshape(a_flat):   [T,Hk,Dk]
+```
+
+This reduces projection cost while still producing one forget activation for every token, head, and key channel. A fused projection can produce q/k/v, `beta`, and the low-rank gate intermediates in one call; the logical tensors do not change.
+
+### 6.2 Short Convolution Shapes
+
+Concatenate projected q/k/v before convolution:
+
+```text
+mixed_qkv: [T,Hk*(2*Dk + Dv)]
+```
+
+For kernel width `C`, each request slot retains:
+
+```text
+conv_state: [Hk*(2*Dk + Dv), C-1]
+```
+
+Prefill applies a causal convolution over each packed sequence. Decode uses the old `C-1` columns plus the new projected row, returns one filtered row with the same flattened width, and shifts the convolution state.
+
+### 6.3 Core-to-Output Shapes
+
+After convolution and reshape:
+
+```text
+q/k:       [1,T,Hk,Dk]
+v:         [1,T,Hk,Dv]
+a:         [1,T,Hk,Dk]
+beta:      [1,T,Hk]
+state pool:[slots,Hk,Dv,Dk]
+core out:  [1,T,Hk,Dv]
+```
+
+The output gate and normalization preserve `[T,Hk,Dv]`. Flatten and project:
+
+```text
+gated: [T,Hk,Dv]
+flat:  [T,Hk*Dv]
+Wout:  [Hmodel,Hk*Dv]
+out:   [T,Hmodel]
+```
 
 ## 7. Memory and Compute Complexity
 
@@ -151,6 +266,8 @@ decay state -> predict -> residual -> rank-1 update -> read output
 Splitting these into separate kernels repeatedly reads and writes the full state matrix. A fused kernel reduces high-bandwidth-memory traffic and launch overhead.
 
 Continuous batching adds a state-routing problem: each decode row must load and update the state belonging to the correct request. Request compaction and slot reuse must update this mapping atomically.
+
+![KDA chunk prefill and recurrent decode](./assets/kda-prefill-decode.svg)
 
 ## 10. Kimi Linear Is a Hybrid Architecture
 
@@ -258,7 +375,169 @@ These mechanisms solve different bottlenecks and can coexist in hybrid model fam
 7. TP sharding matches head and gate layouts from the checkpoint.
 8. Profiling reports state bandwidth, fusion boundaries, and graph replay coverage.
 
-## 18. References
+## 18. Full Tensor Ledger
+
+| Stage | Tensor | Logical shape | Persistent? |
+|---|---|---:|---|
+| Layer input | `X` | `[T,Hmodel]` | no |
+| Q/K projection | `q/k` | `[T,Hk,Dk]` | no |
+| V projection | `v` | `[T,Hk,Dv]` | no |
+| Write gate activation | `beta_raw` | `[T,Hk]` | no |
+| Forget activation | `a` | `[T,Hk,Dk]` | no |
+| Output-gate activation | `z` | `[T,Hk,Dv]` | no |
+| Packed conv input | `mixed_qkv` | `[T,Hk*(2Dk+Dv)]` | no |
+| Convolution cache | `conv_state` | `[slots,Hk*(2Dk+Dv),C-1]` | yes |
+| Retention log | `g` | `[1,T,Hk,Dk]` | no; may be fused |
+| Retention | `alpha=exp(g)` | `[1,T,Hk,Dk]` | no; may be fused |
+| Delta gate | `beta` | `[1,T,Hk]` | no; may be fused |
+| Recurrent cache | `M` | `[slots,Hk,Dv,Dk]` | yes |
+| Core output | `Ocore` | `[1,T,Hk,Dv]` | no |
+| Gated/norm output | `Onorm` | `[T,Hk,Dv]` | no |
+| Layer output | `O` | `[T,Hmodel]` | no |
+
+During decode, `T=B` and `cache_indices [B]` maps row `b` to its persistent slot. During packed prefill, `query_start_loc [R+1]` identifies the token interval belonging to each of `R` requests.
+
+## 19. Why Prefill Needs Chunk Algebra
+
+The recurrence is causal:
+
+```text
+M_1 = F(M_0, token_1)
+M_2 = F(M_1, token_2)
+...
+M_L = F(M_(L-1), token_L)
+```
+
+A literal loop launches or executes `L` dependent small updates. Chunk algorithms keep the same dependency between chunks while exposing matrix work inside a chunk:
+
+```text
+chunk 0: M_0  + tokens [0:C]   -> outputs_0, boundary M_C
+chunk 1: M_C  + tokens [C:2C]  -> outputs_1, boundary M_2C
+...
+```
+
+Within a chunk, kernels reorganize decay products, delta interactions, and triangular causal dependencies into tiles. The important correctness property is not the internal algorithm name but:
+
+```text
+chunk_output == recurrent_reference_output
+chunk_final_state == recurrent_reference_final_state
+```
+
+Both must be compared. Matching outputs while writing a wrong final state causes the next decode token to fail.
+
+## 20. Worked Numerical Update
+
+Let `Dk=Dv=2`:
+
+```text
+M_prev = [[ 1.0, 0.5],
+          [-0.5, 1.0]]
+alpha  = [0.8, 0.25]
+k      = [0.6, 0.8]
+v      = [1.0,-0.5]
+beta   = 0.5
+q      = [0.8, 0.6]
+```
+
+Column-wise decay:
+
+```text
+M_decay = [[ 0.8, 0.125],
+           [-0.4, 0.250]]
+```
+
+Prediction and residual:
+
+```text
+v_hat = M_decay @ k = [0.58,-0.04]
+r = v - v_hat       = [0.42,-0.46]
+```
+
+Delta and new state:
+
+```text
+beta * (r outer k)
+  = [[ 0.126, 0.168],
+     [-0.138,-0.184]]
+
+M = [[ 0.926, 0.293],
+     [-0.538, 0.066]]
+```
+
+Readout before later output gating/norm:
+
+```text
+o = M @ (q / sqrt(2)) ≈ [0.648,-0.276]
+```
+
+This example makes the two operations visible: old columns shrink by different factors, then one rank-one matrix writes the prediction error.
+
+## 21. Memory and Bandwidth Example
+
+For `Hk=32`, `Dk=Dv=128`:
+
+```text
+state elements per request/layer = 32 * 128 * 128 = 524,288
+BF16 state capacity             = 1 MiB per request/layer
+```
+
+With `B=64`, one layer owns 64 MiB of active state capacity. A naive decode that separately reads/writes the full matrix for decay, prediction, update, and output can multiply traffic several times. A fused recurrent kernel aims to read a state tile, perform all operations, and write it once.
+
+The state is constant with sequence length, not necessarily small. Compare it with a KV layer by solving the crossover length:
+
+```text
+L_cross * Nkv * (Dk + Dv) = Hk * Dv * Dk
+```
+
+For `Nkv=Hk` and `Dk=Dv=128`, `L_cross=64` tokens in element count. The advantage at long context comes from avoiding continued linear growth; actual bytes depend on KV/state dtype and hybrid layer count.
+
+## 22. Reference Recurrent Pseudocode
+
+```python
+def kda_step(M, q, k, v, a, beta_raw, A_log, dt_bias):
+    # M:       [Hk,Dv,Dk]
+    # q/k:     [Hk,Dk]
+    # v:       [Hk,Dv]
+    # a:       [Hk,Dk]
+    # beta_raw:[Hk]
+    g = -exp(A_log) * softplus(a + dt_bias)       # [Hk,Dk]
+    alpha = exp(g)                                # [Hk,Dk]
+    beta = sigmoid(beta_raw)                      # [Hk]
+
+    Mdec = M * alpha[:, None, :]                  # [Hk,Dv,Dk]
+    pred = einsum("hvk,hk->hv", Mdec, k)         # [Hk,Dv]
+    residual = v - pred                           # [Hk,Dv]
+    delta = beta[:, None, None] * einsum(
+        "hv,hk->hvk", residual, k
+    )                                             # [Hk,Dv,Dk]
+    Mnew = Mdec + delta
+    out = einsum("hvk,hk->hv", Mnew, q/sqrt(Dk)) # [Hk,Dv]
+    return out, Mnew
+```
+
+Use FP32 accumulation in the reference. Compare lower-precision kernels over long random sequences, checking both outputs and states at multiple checkpoints.
+
+## 23. Debugging and Exercises
+
+| Symptom | First boundary to inspect |
+|---|---|
+| Output correct for token 1, drifts later | state orientation, gate axis, accumulator precision |
+| Prefill output correct, first decode wrong | final prefill state or convolution tail not committed |
+| Single request works, continuous batch fails | `cache_indices`, slot reuse, compaction mapping |
+| Failure only after speculative rejection | in-place state/conv rollback |
+| GDN kernel reused but KDA quality collapses | scalar gate was broadcast instead of per-key gate |
+| Performance insensitive to context length but still slow | state bandwidth, launch count, missing fusion |
+| TP output scaled incorrectly | duplicated reduction or mismatched local head ownership |
+
+Exercises:
+
+1. Starting from the report's `S[d_k,d_v]` form, reproduce every transpose step to obtain `M[d_v,d_k]`.
+2. For `Hk=16`, `Dk=128`, `Dv=128`, compute state bytes in BF16 and FP32.
+3. Unroll two KDA steps and identify exactly where token 1 influences token 2's output.
+4. Explain why saving `M` but not the convolution tail cannot reproduce the next token.
+5. Design speculative-state checkpoints for a draft length of four without copying the entire pool for unrelated requests.
+
+## 24. References
 
 - [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)
 - [Official MoonshotAI/Kimi-Linear repository](https://github.com/MoonshotAI/Kimi-Linear)
