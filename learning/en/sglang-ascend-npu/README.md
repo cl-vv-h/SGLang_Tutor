@@ -4,7 +4,7 @@
 
 This directory breaks down SGLang's adaptation, deployment, and source code practice on Ascend NPU. The learning goal is not to simply transplant GPU serving experience to NPU, but to establish a clear path: first get the environment and minimal service running, then understand how SGLang identifies NPU, sets default parameters, selects Ascend backends, and finally dive deep into attention, graph, distributed communication, PD disaggregation, LoRA, and performance tuning.
 
-To track Ascend source code branches by component, enter [source-code-walkthrough](./source-code-walkthrough/README.md). That topic first establishes a complete component map of SGLang & `sgl-kernel-npu`, then uses GLM-4.7-Flash to trace an end-to-end model execution path, and finally explains branch entry points, initialization & runtime call chains, internal code composition, kernel/communication boundaries, and verification methods component by component.
+To track Ascend source code branches by component, enter [source-code-walkthrough](./source-code-walkthrough/README.md). That topic first establishes a complete component map of SGLang & `sgl-kernel-npu`, then contrasts GLM-4.7-Flash's dense/latent path with GLM-5.2's DSA/IndexShare path, and finally explains branch entry points, initialization and runtime call chains, internal code composition, kernel/communication boundaries, and verification methods component by component.
 
 ## Who Should Read
 

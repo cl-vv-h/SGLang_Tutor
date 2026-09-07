@@ -30,6 +30,7 @@ This topic provides a component-by-component walkthrough of how SGLang integrate
 | File | Content |
 |---|---|
 | [00-glm-4.7-flash-end-to-end.md](./examples/00-glm-4.7-flash-end-to-end.md) | End-to-end model execution: GLM-4.7-Flash on Ascend NPU |
+| [02-glm-5.2-end-to-end.md](./examples/02-glm-5.2-end-to-end.md) | GLM-5.2 DSA + MLA + IndexShare + Sparse MoE, with exact TP=16 tensor shapes and Ascend operator flow |
 
 ## Reading Order
 
@@ -37,6 +38,6 @@ This topic provides a component-by-component walkthrough of how SGLang integrate
 2. Foundation 01-02 — understand startup and configuration
 3. Foundation 03 — trace the request lifecycle with NPU branches
 4. 01-sglang-npu-component-map — see the full component landscape
-5. Examples 00 — see a complete model example
+5. Examples 00 and 02 — compare dense-Prefill MLA with the DSA/IndexShare model path
 6. Foundation 04-05 + component 05 — understand model loading, static buffers, and graph replay
 7. Component 15 — dive into distributed communication

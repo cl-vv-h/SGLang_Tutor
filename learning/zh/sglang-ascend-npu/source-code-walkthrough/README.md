@@ -155,7 +155,13 @@ flowchart TB
 
 这篇样例以 Qwen3.5 / Qwen3.5-MoE 的 hybrid 文本路径为主线，重点追踪 `Qwen3_5ForConditionalGeneration` wrapper、`Qwen3_5ForCausalLM` 语言主干、`layers_block_type` 驱动的 full attention / linear attention 分层、`AscendHybridLinearAttnBackend`、`AscendGDNAttnBackend`、GatedDeltaNet state cache、Qwen2Moe 复用路径、NPU Graph replay metadata、logits 与采样。
 
-先读端到端样例的目的，是让后续每个组件都能放回真实模型执行路径中，而不是把 backend、metadata 和 custom op 当成互不相干的文件。GLM 样例适合理解 MLA 与 MoE；Qwen3.5 样例适合理解 hybrid attention、GDN state 和多 backend 协同。
+#### GLM-5.2 完整执行路径
+
+已完成：[examples/02-glm-5.2-end-to-end.md](./examples/02-glm-5.2-end-to-end.md)
+
+这篇样例以 GLM-5.2 的 DSA + MLA + IndexShare + Sparse MoE 路径为主线，给出 BF16/TP=16 下每个投影、cache 与 NPU 算子的精确 shape，逐步推导 DSA token top-2048、MLA K/V 吸收、跨层索引复用、256 选 8 expert 路由、Prefix Cache、NPU Graph 与 NextN 的数据流。
+
+先读端到端样例的目的，是让后续每个组件都能放回真实模型执行路径中，而不是把 backend、metadata 和 custom op 当成互不相干的文件。GLM-4.7 样例适合理解 dense-Prefill / absorbed-Decode MLA，GLM-5.2 样例适合理解 DSA、IndexShare 和超大规模 MoE；Qwen3.5 样例适合理解 hybrid attention、GDN state 和多 backend 协同。
 
 ### 第二讲至第十八讲：逐组件追踪
 
@@ -207,7 +213,7 @@ flowchart TB
 - [模型加载、权重放置与 dtype/layout](./foundation/04-model-loading-dtype-and-layout.md)
 - [ModelRunner、ForwardBatch 与输入缓冲区](./foundation/05-model-runner-forward-batch-and-input-buffers.md)
 
-推荐阅读顺序：第一讲组件地图 → GLM-4.7-Flash 端到端样例 → Qwen3.5 Hybrid 端到端样例 → 按需补充 `foundation/` → 进入对应组件讲次。
+推荐阅读顺序：第一讲组件地图 → GLM-4.7-Flash 端到端样例 → GLM-5.2 端到端样例 → Qwen3.5 Hybrid 端到端样例 → 按需补充 `foundation/` → 进入对应组件讲次。
 
 ## 6. 版本记录要求
 
