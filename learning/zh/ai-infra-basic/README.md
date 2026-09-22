@@ -18,7 +18,7 @@
 | 8 | [Gated_Delta_Network](./Gated_Delta_Network/) | Gated DeltaNet/GDN 数学、可训练参数、recurrent state、prefill/decode shape 与 serving 状态管理 | [README.md](./Gated_Delta_Network/README.md) |
 | 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP、TP、PP、SP/CP、EP 推理并行策略 | [README.md](./Parallel_Strategy/README.md) |
 | 10 | [KV_Transfer](./KV_Transfer/) | PD 分离、KV sender/receiver、远程 KV cache | [README.md](./KV_Transfer/README.md) |
-| 11 | [Speculative_Decoding](./Speculative_Decoding/) | 投机采样数学、target verify、KV 提交、EAGLE/MTP/NGRAM/Medusa/REST 等算法谱系 | [README.md](./Speculative_Decoding/README.md) |
+| 11 | [Speculative_Decoding](./Speculative_Decoding/) | 投机采样数学、target verify、KV 提交、EAGLE/MTP/NGRAM/Medusa/REST，以及 DSpark 半自回归与置信度调度 | [README.md](./Speculative_Decoding/README.md) |
 | 12 | [Quantization](./Quantization/) | 量化数学、W/A/C 位宽命名、packed W4、FP8/MXFP8、GPTQ/AWQ、KV quant 与 serving kernel | [README.md](./Quantization/README.md) |
 | 13 | [LoRA](./LoRA/) | LoRA、QLoRA、DoRA、AdaLoRA 和多 LoRA serving | [README.md](./LoRA/README.md) |
 | 14 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS、压测、profiling、瓶颈定位 | [README.md](./Benchmark_Profiling/README.md) |
@@ -43,7 +43,7 @@
 - `Gated_Delta_Network` 对应 Qwen3-Next GDN/linear attention layer、`q/k/v/z/a/b` 投影、GDN recurrent state、chunk prefill、packed decode 和 target verify 临时状态。
 - `Parallel_Strategy` 对应 TP/PP/DP/EP rank 组织、通信模式和多进程执行。
 - `KV_Transfer` 对应 PD disaggregation、bootstrap、prealloc、KV sender/receiver 和 transfer backend。
-- `Speculative_Decoding` 对应 draft worker、target verify、`spec_info`、accept token 和 grammar/sampling 后处理。
+- `Speculative_Decoding` 对应 draft worker、target verify、`spec_info`、DSpark confidence/ragged verify、accept token 和 grammar/sampling 后处理。
 - `Quantization` 对应 weight loader、quant method、kernel 选择、FP8/W8A8/GPTQ/AWQ 等执行路径。
 - `LoRA` 对应 adapter 注册、热加载、batch 约束、LoRA memory pool 和 LoRA kernel。
 - `Benchmark_Profiling` 对应 benchmark scripts、metrics、trace、CUDA/NVTX profiling 和线上调参。

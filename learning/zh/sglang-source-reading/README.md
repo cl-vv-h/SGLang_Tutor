@@ -39,6 +39,7 @@ flowchart TD
   - [05-speculative-decoding.md](./06-advanced-features/05-speculative-decoding.md)：理解 draft worker、target verify、`spec_info`、EAGLE/NGRAM、spec v1/v2 与接受 token 后处理。
   - [07-disaggregation-pd.md](./06-advanced-features/07-disaggregation-pd.md)：理解 Prefill/Decode 分离部署、bootstrap/prealloc/transfer 队列、KV sender/receiver 和 transfer backend。
   - [08-lora-serving.md](./06-advanced-features/08-lora-serving.md)：理解 LoRA adapter 注册、热加载/卸载、Scheduler 混批约束、LoRAMemoryPool、LoRABatchInfo 和 LoRA kernel 执行路径。
+  - [09-dspark-code-walkthrough.md](./06-advanced-features/09-dspark-code-walkthrough.md)：沿 SGLang 上游固定 commit 追踪 DSpark 的 prefill hidden 注入、半自回归 draft、confidence/SPS 调度、ragged target verify、exact accept 与 KV/state commit。
 
 ## 推荐阅读路线
 
@@ -46,7 +47,7 @@ flowchart TD
 2. 再读 [请求生命周期](./01-entry-routing/01-request-lifecycle.md)，把一次 OpenAI API 请求串起来。
 3. 接着读 [Scheduler 核心](./02-scheduler-runtime/02-scheduler-core.md)、[KV Cache](./03-cache-memory/03-kv-cache-radix-cache.md)、[ModelRunner 与 attention](./04-model-execution/04-model-runner-attention.md)。
 4. 如果你正在看 decoder layer、MoE、TP/EP/CP 通信，先读 [Layer 层导读](./05-layer-communication/01-layer-communicator-and-common-layers.md)，再用 [TP/DP/EP 切分与 Ascend NPU](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md) 把 rank 拓扑、参数所有权和设备执行串起来。
-5. 最后按需要阅读 [Speculative Decoding](./06-advanced-features/05-speculative-decoding.md)、[PD 分离](./06-advanced-features/07-disaggregation-pd.md)、[LoRA Serving](./06-advanced-features/08-lora-serving.md) 和 [Router](./01-entry-routing/09-router.md)。
+5. 最后按需要阅读 [Speculative Decoding](./06-advanced-features/05-speculative-decoding.md)、[DSpark 端到端源码走读](./06-advanced-features/09-dspark-code-walkthrough.md)、[PD 分离](./06-advanced-features/07-disaggregation-pd.md)、[LoRA Serving](./06-advanced-features/08-lora-serving.md) 和 [Router](./01-entry-routing/09-router.md)。
 
 ## 怎么使用这些笔记
 

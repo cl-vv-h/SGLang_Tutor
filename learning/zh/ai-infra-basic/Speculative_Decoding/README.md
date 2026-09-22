@@ -18,13 +18,15 @@
 | [02-rejection-sampling-math.md](./02-rejection-sampling-math.md) | 严格 speculative sampling 的数学原理、拒绝采样证明、链式验证和 greedy 特例 |
 | [03-serving-implementation-dataflow.md](./03-serving-implementation-dataflow.md) | 在线 serving 中 draft、verify、accept、KV commit、draft extend、scheduler overlap 的数据流 |
 | [04-algorithm-landscape.md](./04-algorithm-landscape.md) | 小模型 draft、tree verification、Medusa、EAGLE、MTP、NGRAM、REST、LayerSkip、Lookahead 等算法谱系 |
+| [05-dspark-principles.md](./05-dspark-principles.md) | DSpark 半自回归 block draft、低秩 Markov/RNN、confidence/STS、硬件感知预算与 ragged verify 的数学和 shape 推导 |
 
 ## 推荐阅读顺序
 
 1. 先读 [01-speculative-decoding-principles.md](./01-speculative-decoding-principles.md)，建立“draft 提案、target 验证、一次提交多个 token”的整体模型。
 2. 再读 [02-rejection-sampling-math.md](./02-rejection-sampling-math.md)，理解为什么严格投机采样可以保持 target distribution。
 3. 接着读 [03-serving-implementation-dataflow.md](./03-serving-implementation-dataflow.md)，把数学上的 token 接受过程落到 KV Cache、ForwardBatch、scheduler 和输出流。
-4. 最后读 [04-algorithm-landscape.md](./04-algorithm-landscape.md)，对比各种 draft 来源和 verify 几何结构，知道不同算法在什么场景下更合适。
+4. 然后读 [04-algorithm-landscape.md](./04-algorithm-landscape.md)，对比各种 draft 来源和 verify 几何结构，知道不同算法在什么场景下更合适。
+5. 最后用 [05-dspark-principles.md](./05-dspark-principles.md) 深入一个完整案例，把并行 draft、序列依赖、置信度校准、硬件成本模型和变长 target verify 串起来。
 
 ## 统一符号
 
@@ -123,3 +125,4 @@ SGLang 的 speculative decoding 不是单一函数，而是一条跨 scheduler�
 3. target verify 为什么像一个短 prefill，而不是普通单 token decode。
 4. 接受多个 token 后，KV Cache、请求长度、stop condition、logprob 如何更新。
 5. EAGLE、Medusa、MTP、NGRAM、REST、LayerSkip 等方法到底是在改变 draft 来源，还是在改变 verify 结构。
+6. DSpark 为什么要区分 `γ` 个 draft proposal 与 `γ+1` 个 target verify rows，以及 confidence 如何安全地减少实际验证量。

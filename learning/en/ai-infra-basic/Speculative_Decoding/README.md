@@ -21,6 +21,7 @@ Instead of the standard autoregressive decode that produces one token per forwar
 | [02-rejection-sampling-math.md](./02-rejection-sampling-math.md) | Mathematical foundations of rejection sampling for spec decode |
 | [03-serving-implementation-dataflow.md](./03-serving-implementation-dataflow.md) | SGLang's `spec_info`, draft worker, and target verification dataflow |
 | [04-algorithm-landscape.md](./04-algorithm-landscape.md) | EAGLE, MTP, NGRAM, Medusa, REST, and other speculative methods |
+| [05-dspark-principles.md](./05-dspark-principles.md) | DSpark's semi-autoregressive block draft, low-rank Markov/RNN head, confidence/STS, hardware-aware budget, and ragged verification |
 
 ## Key SGLang Integration Points
 
@@ -28,3 +29,5 @@ Instead of the standard autoregressive decode that produces one token per forwar
 - `spec_info` carries draft tokens and verification metadata between forward passes
 - KV Cache commits are deferred until verification completes
 - `BatchResultProcessor` handles accept/reject logic and token output
+
+For a concrete end-to-end implementation, continue with the [SGLang DSpark code walkthrough](../../sglang-source-reading/06-advanced-features/09-dspark-code-walkthrough.md).

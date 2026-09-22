@@ -18,7 +18,7 @@ This directory supplements the foundational knowledge needed before and during S
 | 8 | [Gated_Delta_Network](./Gated_Delta_Network/) | Gated DeltaNet/GDN math, trainable parameters, recurrent state, prefill/decode shapes, and serving state management | [README.md](./Gated_Delta_Network/README.md) |
 | 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP, TP, PP, SP/CP, EP inference parallelism strategies | [README.md](./Parallel_Strategy/README.md) |
 | 10 | [KV_Transfer](./KV_Transfer/) | PD disaggregation, KV sender/receiver, remote KV cache | [README.md](./KV_Transfer/README.md) |
-| 11 | [Speculative_Decoding](./Speculative_Decoding/) | Speculative sampling math, target verify, KV commit, EAGLE/MTP/NGRAM/Medusa/REST algorithm landscape | [README.md](./Speculative_Decoding/README.md) |
+| 11 | [Speculative_Decoding](./Speculative_Decoding/) | Speculative sampling math, target verify, KV commit, EAGLE/MTP/NGRAM/Medusa/REST, and DSpark semi-autoregression with confidence scheduling | [README.md](./Speculative_Decoding/README.md) |
 | 12 | [Quantization](./Quantization/) | Weight-only, W8A8/FP8, KV quant, calibration and error | [README.md](./Quantization/README.md) |
 | 13 | [LoRA](./LoRA/) | LoRA, QLoRA, DoRA, AdaLoRA and multi-LoRA serving | [README.md](./LoRA/README.md) |
 | 14 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS, load testing, profiling, bottleneck identification | [README.md](./Benchmark_Profiling/README.md) |
@@ -43,7 +43,7 @@ This directory supplements the foundational knowledge needed before and during S
 - `Gated_Delta_Network` maps to Qwen3-Next GDN/linear attention layers, `q/k/v/z/a/b` projections, GDN recurrent state, chunk prefill, packed decode, and temporary target-verify state.
 - `Parallel_Strategy` maps to TP/PP/DP/EP rank organization, communication patterns, and multi-process execution.
 - `KV_Transfer` maps to PD disaggregation, bootstrap, prealloc, KV sender/receiver, and transfer backend.
-- `Speculative_Decoding` maps to draft worker, target verify, `spec_info`, accept token, and grammar/sampling post-processing.
+- `Speculative_Decoding` maps to draft worker, target verify, `spec_info`, DSpark confidence/ragged verification, accept token, and grammar/sampling post-processing.
 - `Quantization` maps to weight loader, quant method, kernel selection, FP8/W8A8/GPTQ/AWQ execution paths.
 - `LoRA` maps to adapter registration, hot-loading, batch constraints, LoRA memory pool, and LoRA kernel.
 - `Benchmark_Profiling` maps to benchmark scripts, metrics, trace, CUDA/NVTX profiling, and online parameter tuning.

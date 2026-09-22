@@ -9,6 +9,7 @@
 | **NGRAM** | Cache of previous outputs | Low-Medium | Very low (lookup only) | ✅ |
 | **Medusa** | Multiple extra heads | Medium | Low | ✅ |
 | **REST** | Retrieval from datastore | Varies | Low | Partial |
+| **[DSpark](./05-dspark-principles.md)** | Parallel block drafter + low-rank sequential head | High | Parallel backbone plus lightweight serial head | ✅ |
 
 ## 2. EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency)
 
@@ -31,7 +32,13 @@
 - Pros: zero additional model cost
 - Cons: lower acceptance rate, especially for creative/open-ended generation
 
-## 5. Spec v1 vs v2 in SGLang
+## 5. DSpark
+
+DSpark computes all heavy draft-backbone features in parallel, then uses a low-rank Markov/Gated/RNN head to restore token-by-token dependence. A calibrated confidence head estimates prefix survival, and a hardware-aware scheduler chooses a ragged target-verification length for every request.
+
+`gamma` counts draft proposals, while the logical target window has `gamma+1` rows because it also includes the anchor. See [DSpark principles](./05-dspark-principles.md) for the mathematics, tensor shapes, training losses, and a worked scheduling example.
+
+## 6. Spec v1 vs v2 in SGLang
 
 SGLang evolved its speculative decoding implementation:
 
@@ -46,7 +53,7 @@ SGLang evolved its speculative decoding implementation:
 - Improved KV Cache management for spec
 - Support for grammar-constrained speculative decoding
 
-## 6. Choosing a Method
+## 7. Choosing a Method
 
 | Scenario | Recommended Method |
 |---|---|
@@ -56,3 +63,4 @@ SGLang evolved its speculative decoding implementation:
 | Structured output / grammar constraints | EAGLE v2 + grammar |
 | Low latency requirement | Smaller K (fewer draft tokens) |
 | High throughput requirement | Larger K with high-quality draft |
+| Parallel draft with workload-aware verify budget | DSpark |

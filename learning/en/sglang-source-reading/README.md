@@ -39,6 +39,7 @@ flowchart TD
   - [05-speculative-decoding.md](./06-advanced-features/05-speculative-decoding.md): Understanding draft worker, target verify, `spec_info`, EAGLE/NGRAM, spec v1/v2, and accept token post-processing.
   - [07-disaggregation-pd.md](./06-advanced-features/07-disaggregation-pd.md): Understanding Prefill/Decode disaggregation deployment, bootstrap/prealloc/transfer queues, KV sender/receiver, and transfer backend.
   - [08-lora-serving.md](./06-advanced-features/08-lora-serving.md): Understanding LoRA adapter registration, hot-load/unload, Scheduler mixed-batch constraints, LoRAMemoryPool, LoRABatchInfo, and LoRA kernel execution paths.
+  - [09-dspark-code-walkthrough.md](./06-advanced-features/09-dspark-code-walkthrough.md): Tracing DSpark at a pinned upstream commit through prefill hidden injection, semi-autoregressive drafting, confidence/SPS scheduling, ragged target verification, exact acceptance, and KV/state commit.
 
 ## Recommended Reading Route
 
@@ -46,7 +47,7 @@ flowchart TD
 2. Then read [Request Lifecycle](./01-entry-routing/01-request-lifecycle.md) to trace a complete OpenAI API request end-to-end.
 3. Next, read [Scheduler Core](./02-scheduler-runtime/02-scheduler-core.md), [KV Cache](./03-cache-memory/03-kv-cache-radix-cache.md), and [ModelRunner & Attention](./04-model-execution/04-model-runner-attention.md).
 4. If you're looking at decoder layers, MoE, or TP/EP/CP communication, read the [Layer Communication Guide](./05-layer-communication/01-layer-communicator-and-common-layers.md), then use [TP/DP/EP Sharding and Ascend NPU](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md) to connect rank topology, parameter ownership, and device execution.
-5. Finally, read [Speculative Decoding](./06-advanced-features/05-speculative-decoding.md), [PD Disaggregation](./06-advanced-features/07-disaggregation-pd.md), [LoRA Serving](./06-advanced-features/08-lora-serving.md), and [Router](./01-entry-routing/09-router.md) as needed.
+5. Finally, read [Speculative Decoding](./06-advanced-features/05-speculative-decoding.md), the [DSpark end-to-end walkthrough](./06-advanced-features/09-dspark-code-walkthrough.md), [PD Disaggregation](./06-advanced-features/07-disaggregation-pd.md), [LoRA Serving](./06-advanced-features/08-lora-serving.md), and [Router](./01-entry-routing/09-router.md) as needed.
 
 ## How to Use These Notes
 

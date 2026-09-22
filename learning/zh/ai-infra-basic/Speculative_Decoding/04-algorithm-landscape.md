@@ -27,7 +27,7 @@ Draft source 决定候选质量和成本；verify geometry 决定一次 target f
 | REST | 检索语料提供候选 continuation | 候选路径 | 可配合 target verify | RAG/长文本重复场景 |
 | LayerSkip / Self-speculative | 同一模型浅层早退 | 线性链 | 可通过深层验证保持目标 | 不想加载额外 draft model |
 | Lookahead / Jacobi decoding | 并行求解未来 token guess | n-gram/window 验证 | 通常是特定解码策略 | 硬件并行充足、希望减少串行依赖 |
-| DFlash / DSpark | 专用 draft checkpoint 或结构 | block / ragged verify | 依赖实现规则 | 与特定模型和框架深度集成 |
+| DFlash / [DSpark](./05-dspark-principles.md) | 专用 draft checkpoint；DSpark 增加低秩序列头与 confidence | block / confidence-scheduled ragged verify | 严格验证时可以 | 与特定模型和框架深度集成 |
 
 ## 3. Classic speculative sampling
 
@@ -263,7 +263,7 @@ lookahead/Jacobi:     并行构造未来 token guess，减少串行依赖
 | 方法 | 高层理解 |
 |---|---|
 | DFlash | 使用专用 draft checkpoint，围绕 block size / draft window 做线性 block verify |
-| DSpark | 使用带 Markov/head 配置的 draft 结构，支持 gamma、ragged verify 和特定 mask token |
+| [DSpark](./05-dspark-principles.md) | 并行 block backbone 一次产生 base logits，再用低秩 Markov/Gated/RNN 头恢复 token 依赖，并按 confidence 与硬件 SPS 动态裁剪 ragged verify |
 
 这类方法的特点是：
 
@@ -271,6 +271,8 @@ lookahead/Jacobi:     并行构造未来 token guess，减少串行依赖
 2. 参数不只是 `K`，还可能包含 block size、window、mask token、target layer ids、Markov rank。
 3. verify layout 可能是 ragged，不一定每条请求验证同样数量的候选 token。
 4. 性能上限高，但迁移到其他模型或框架时成本也高。
+
+DSpark 中 `gamma` 是 draft proposal 数，而 target 的逻辑验证宽度是 `gamma+1`；多出的 anchor 行负责产生第一个候选的 target 分布和最终 bonus/correction 链路。详细数学、逐步 tensor shape 与调度例子见 [05-dspark-principles.md](./05-dspark-principles.md)。
 
 ## 13. 自适应 speculative decoding
 
