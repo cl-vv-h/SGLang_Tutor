@@ -1,5 +1,87 @@
 # Kimi Delta Attention（KDA）：线性注意力的细粒度门控
 
+> English version: [Kimi Delta Attention](../../../en/ai-infra-basic/Model_Architecture/09-kimi-delta-attention.md)
+
+## 阅读地图：把状态矩阵看成“可改写的键值记忆”
+
+Softmax Attention 把每个历史 `(k_s,v_s)` 原样保留，查询时再逐个比较；KDA 则把历史写入一个矩阵 `M`。对一个 head：
+
+```text
+M: [Dv,Dk]
+写入：v outer k -> [Dv,1] @ [1,Dk] = [Dv,Dk]
+读取：M @ q     -> [Dv,Dk] @ [Dk]   = [Dv]
+```
+
+外积 `v k^T` 可以直观理解为：“当查询方向接近 `k` 时，读出 `v`”。但不同 token 的 key 方向会重叠，朴素相加会不断积累冲突。Delta rule 先读出旧预测 `v_hat=Mk`，只把误差 `v-v_hat` 写回；KDA 又在写入前让不同 key 通道按各自的 `alpha[c]` 遗忘。
+
+```mermaid
+flowchart LR
+    X["Layer input X<br/>[T,Hmodel]"] --> PROJ["融合/分解投影"]
+    PROJ --> QKV["q,k [T,Hk,Dk]<br/>v [T,Hk,Dv]"]
+    PROJ --> GATE["a [T,Hk,Dk]<br/>beta [T,Hk]<br/>z [T,Hk,Dv]"]
+    QKV --> CONV["短因果卷积<br/>精确局部顺序"]
+    CS[("conv_state<br/>[slots,Cqkv,C-1]")] <--> CONV
+    CONV --> NORM["Q/K 归一化"]
+    GATE --> REC["KDA 递归核<br/>decay→predict→delta→read"]
+    NORM --> REC
+    MS[("matrix state M<br/>[slots,Hk,Dv,Dk]")] <--> REC
+    REC --> CORE["Ocore [T,Hk,Dv]"]
+    GATE --> OG["输出门 + 归一化"]
+    CORE --> OG
+    OG --> FLAT["[T,Hk*Dv]"]
+    FLAT --> OUT["输出投影<br/>[T,Hmodel]"]
+```
+
+### 四个操作如何改变同一个状态
+
+对每个 request、layer、head，状态更新严格按以下顺序：
+
+```text
+1. 遗忘：M_decay[:,c] = alpha[c] * M_prev[:,c]
+2. 预测：v_hat = M_decay @ k
+3. 纠错：M_new = M_decay + beta * (v-v_hat) outer k
+4. 读取：o = M_new @ (q/sqrt(Dk))
+```
+
+若交换顺序，函数会改变。例如用 `M_prev @ k` 而不是 `M_decay @ k` 计算预测，等于用“遗忘前的记忆”决定纠错量；这不是等价优化。
+
+### 贯穿全文的 Shape 例子
+
+```text
+B=8, decode 时 T=B=8
+Hmodel=4096, Hk=16, Dk=128, Dv=128
+短卷积宽度 C=4
+```
+
+| 阶段 | Tensor | Shape | 跨 step 保留？ |
+|---|---|---:|---|
+| 输入 | `X` | `[8,4096]` | 否 |
+| Q/K | `q,k` | `[8,16,128]` | 否 |
+| V/输出门 | `v,z` | `[8,16,128]` | 否 |
+| 遗忘门 | `alpha` | `[8,16,128]` | 否 |
+| 写入门 | `beta` | `[8,16]` | 否 |
+| 卷积尾部 | `conv_state` | `[slots,16*(128+128+128),3]` | **是** |
+| 递归矩阵 | `M` | `[slots,16,128,128]` | **是** |
+| 主核输出 | `Ocore` | `[8,16,128]` | 否 |
+| 层输出 | `O` | `[8,4096]` | 否 |
+
+这里 `slots` 不是 batch size，而是状态池容量。`cache_indices [8]` 把本轮第 `b` 行映射到某个 request slot。连续批处理中 batch 行会变化，slot 身份必须稳定。
+
+### Prefill 与 Decode 为什么不能用同一种朴素循环
+
+```mermaid
+flowchart TD
+    P["Prefill: 每请求有很多 token"] --> CH["切成长度 Cchunk 的块"]
+    CH --> MAT["块内重排为并行矩阵运算"]
+    MAT --> BD["块边界传递 M_in -> M_out"]
+    D["Decode: 每请求 1 个新 token"] --> SLOT["按 cache_indices 找到 request state"]
+    SLOT --> FUSE["一次融合 kernel<br/>读 M 一次、写 M 一次"]
+    BD --> SAME["两条路径都必须匹配<br/>逐 token reference 的输出与最终状态"]
+    FUSE --> SAME
+```
+
+Prefill 的目标是打破“每 token 一个小 kernel”的低利用率，但不能打破因果递归；decode 的目标是避免对完整 `M` 反复读写。只比较输出不够，还必须比较最终 `M` 与 `conv_state`，因为它们决定下一 token。
+
 Kimi Delta Attention（KDA）是 Kimi Linear 中的递归线性注意力组件。它在 Gated DeltaNet（GDN）基础上加入了**按 key 通道划分的遗忘门**。
 
 这一处变化对系统实现很重要：

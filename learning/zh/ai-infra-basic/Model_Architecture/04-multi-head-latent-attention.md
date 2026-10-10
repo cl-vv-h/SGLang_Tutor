@@ -1,5 +1,89 @@
 # Multi-head Latent Attention：低秩压缩与解耦位置编码
 
+> English version: [Multi-head Latent Attention](../../../en/ai-infra-basic/Model_Architecture/04-multi-head-latent-attention.md)
+
+## 阅读地图：先建立完整心智模型
+
+读 MLA 最容易迷失在一串投影矩阵里。先只记住两件事：
+
+1. **写入缓存时压缩**：每个历史 token 不再写入 `N` 组完整 K/V，而只写入一个共享的内容 latent `c^{KV}` 和一个共享的 RoPE key；
+2. **读取缓存时换坐标系**：decode 不应把全部历史 latent 展开回完整 K/V，而应把当前 query 和输出投影变换到 latent 空间，直接读取压缩缓存。
+
+```mermaid
+flowchart LR
+    X["当前层输入 X<br/>[B,Lq,H]"] --> DQ["Query 下投影<br/>[B,Lq,Dcq]"]
+    DQ --> UQ["Query 上投影与拆分"]
+    UQ --> QC["内容 Query qC<br/>[B,Lq,N,Dh]"]
+    UQ --> QR["位置 Query qR<br/>[B,Lq,N,Dr]"]
+    X --> DKV["KV 下投影"]
+    DKV --> CKV["内容 latent cKV<br/>[B,Lq,Dc]"]
+    DKV --> KR["共享位置 Key kR<br/>[B,Lq,Dr]"]
+    CKV --> CACHE[("Paged MLA Cache<br/>历史 cKV 与 kR")]
+    KR --> CACHE
+    QC --> ABSORB["K 投影吸收<br/>qC · WUK^T"]
+    ABSORB --> SCORE["内容分数：latent 点积"]
+    QR --> ROPE["RoPE 后的位置点积"]
+    CACHE --> SCORE
+    CACHE --> ROPE
+    SCORE --> ADD["相加、缩放、Mask"]
+    ROPE --> ADD
+    ADD --> SM["Softmax 权重 p<br/>[B,N,Lq,Lkv]"]
+    SM --> LATOUT["先加权 latent<br/>[B,Lq,N,Dc]"]
+    CACHE --> LATOUT
+    LATOUT --> OABSORB["V/输出投影吸收"]
+    OABSORB --> Y["层输出<br/>[B,Lq,H]"]
+```
+
+上图同时包含两条时间线：`X -> CKV/KR -> Cache` 是**写入当前 token**；`Cache -> Score/LatOut` 是**读取历史 token**。Prefill 时 `Lq=Lkv=S`，decode 时通常 `Lq=1`、`Lkv=S_past+1`。
+
+### 贯穿全文的 Shape 例子
+
+后文默认使用下面这组“教学尺寸”；它们用于算清 shape，不代表所有模型配置：
+
+```text
+B=2, S=4096, H=4096
+N=32, Dc=512, Dcq=1536
+Dh=128, Dr=64, Dv=128
+dtype=BF16/FP16（每元素 2 bytes）
+```
+
+轴的含义固定为：`B` 批大小，`S/Lkv` 历史长度，`Lq` 本次查询长度，`N` query head 数，`H` hidden size。文中 `[B,S,N,D]` 和内核常见的 `[B,N,S,D]` 只是转置，数学语义相同。
+
+标准 MHA 每 token、每层缓存：
+
+```text
+N × (Dh + Dv) = 32 × (128 + 128) = 8192 elements
+8192 × 2 bytes = 16384 bytes = 16 KiB
+```
+
+MLA 每 token、每层缓存：
+
+```text
+Dc + Dr = 512 + 64 = 576 elements
+576 × 2 bytes = 1152 bytes = 1.125 KiB
+```
+
+因此这个例子的**逻辑 KV 容量**缩小约 `8192 / 576 = 14.22×`。这只是单层单 token 的载荷；真实显存还包括 page 对齐、block table、量化尺度和 allocator 元数据。
+
+### 一次 decode 的全张量旅程
+
+设已有 `4095` 个 token，当前追加第 `4096` 个 token：
+
+| 阶段 | 输入 shape | 运算 | 输出 shape | 是否持久化 |
+|---|---:|---|---:|---|
+| 层输入 | `[2,1,4096]` | 上一子层输出/RMSNorm | `[2,1,4096]` | 否 |
+| KV 写入 | `[2,1,4096]` | `W_DKV_R` | `Ckv [2,1,512]`、`Krope [2,1,64]` | 是 |
+| Q 压缩 | `[2,1,4096]` | `W_DQ` | `Cq [2,1,1536]` | 否 |
+| Q 展开 | `[2,1,1536]` | `W_UQ` + split | `Qc [2,1,32,128]`、`Qr [2,1,32,64]` | 否 |
+| 历史视图 | block table | gather/page view | `Ckv_hist [2,4096,512]`、`Kr_hist [2,4096,64]` | 已缓存 |
+| 内容打分 | `Qc,Ckv_hist` | 吸收式 latent 点积 | `[2,32,1,4096]` | 否 |
+| 位置打分 | `RoPE(Qr),RoPE(Kr)` | 广播到 heads 后点积 | `[2,32,1,4096]` | 否 |
+| 概率 | 两部分 score | scale + causal mask + softmax | `[2,32,1,4096]` | 否 |
+| latent 聚合 | 概率、`Ckv_hist` | 对历史轴加权求和 | `[2,1,32,512]` | 否 |
+| 输出 | latent 聚合 | 吸收后的 V/O 变换并合并 heads | `[2,1,4096]` | 否 |
+
+这个表是后文所有公式的“总账”。如果实现里的某一步无法映射到其中一行，通常意味着 layout 转换、矩阵吸收或融合 kernel 隐藏了该逻辑步骤，而不是数学步骤消失了。
+
 ## 1. MLA 要解决的问题
 
 标准 Multi-Head Attention 为每个历史 token、每一层保存完整 K 和 V：

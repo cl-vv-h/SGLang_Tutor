@@ -1,5 +1,107 @@
 # 压缩稀疏注意力（CSA）与重度压缩注意力（HCA）
 
+> English version: [Compressed Sparse Attention and HCA](../../../en/ai-infra-basic/Model_Architecture/08-compressed-sparse-attention.md)
+
+## 阅读地图：三种时间尺度、两种 layer 类型
+
+先澄清最容易产生的误解：SWA、CSA、HCA 不是把同一个 KV cache 换三种读法。
+
+```mermaid
+flowchart TD
+    X["原始 hidden stream<br/>每 token [H]"] --> LOCAL[("局部未压缩缓存<br/>最近 w 个 token")]
+    X --> CCOMP["重叠压缩器<br/>width=2m, stride=m"]
+    X --> HCOMP["重度非重叠压缩器<br/>stride=m'"]
+    CCOMP --> CC[("CSA entries<br/>约 L/m 个")]
+    CCOMP --> CI[("CSA index keys<br/>约 L/m 个")]
+    HCOMP --> HC[("HCA entries<br/>约 L/m' 个")]
+
+    Q1["CSA layer query"] --> IDX["扫描压缩 index keys"]
+    CI --> IDX
+    IDX --> TOP["Top-k compressed IDs"]
+    TOP --> CSUP["支撑集 = local + selected CSA"]
+    CC --> CSUP
+    LOCAL --> CSUP
+
+    Q2["HCA layer query"] --> HSUP["支撑集 = local + all HCA"]
+    HC --> HSUP
+    LOCAL --> HSUP
+```
+
+- **CSA layer**：精确局部窗口 + 从中等压缩条目中按 query 检索的 top-k；
+- **HCA layer**：精确局部窗口 + 对重度压缩短序列的稠密全局读取；
+- 模型把两类 layer 按配置交错排列，并非每一层同时跑 CSA 和 HCA。
+
+### 一个 `S=10, m=4` 的压缩时间线
+
+把原始 token 分块：
+
+```text
+chunk 0 = token 0..3
+chunk 1 = token 4..7
+chunk 2 = token 8..9 + padding（尾块尚不完整）
+```
+
+重叠压缩的 receptive field 宽度是 `2m=8`，但 stride 是 `m=4`：
+
+```text
+entry 0: masked previous block + current chunk 0
+entry 1: previous chunk 0       + current chunk 1
+entry 2: previous chunk 1       + current chunk 2（需等尾块就绪）
+```
+
+在严格的增量因果执行里，token 长度从 1 增长到 10 时：
+
+| `token_len` | `floor(token_len/m)` | `tail_len` | 新完成条目 |
+|---:|---:|---:|---|
+| 1 | 0 | 1 | 无，只更新尾状态 |
+| 3 | 0 | 3 | 无 |
+| 4 | 1 | 0 | entry 0 |
+| 7 | 1 | 3 | 无 |
+| 8 | 2 | 0 | entry 1 |
+| 10 | 2 | 2 | 无；entry 2 仍含未完成当前块 |
+
+如果一个离线 prefill 明确用 mask 处理最后的不完整块，可以生成 `ceil(S/m)=3` 个逻辑输出；在线 decode 的**可见完成条目数**仍必须按就绪条件推进。教程后文出现 `ceil(S/m)` 时描述的是 padded batch shape，出现 `floor(token_len/m)` 时描述的是在线可见状态，两者不可混用。
+
+### 单个压缩特征的数值例子
+
+为便于手算，只观察一个输出特征 `d`，设某 entry 的四个有效源位置经过内容投影后为：
+
+```text
+Ubar[:,d] = [2.0, 1.0, -1.0, 3.0]
+gate+APE  = [0.0, 1.0,  0.0, 0.0]
+```
+
+沿**源位置轴** softmax：
+
+```text
+A[:,d] = softmax([0,1,0,0])
+       ≈ [0.175, 0.475, 0.175, 0.175]
+
+C[d] = Σ_r A[r,d] Ubar[r,d]
+     ≈ 0.175*2 + 0.475*1 + 0.175*(-1) + 0.175*3
+     = 1.175
+```
+
+真实张量对每个 `d=0..D-1` 都有独立的 `[2m]` 权重，所以不同特征可以从不同源 token 提取证据。这不是 average pooling；内容和值得保留的位置都由训练学习。
+
+### 一次 CSA decode 的完整 Tensor 账本
+
+设 `B=2,Nq=64,D=128,Dc=512,m=4,w=128,k=512`，当前每序列有 `L=32768` 个原始 token，则压缩候选约 `Nc=8192`：
+
+| 阶段 | 输入 | 输出 | 说明 |
+|---|---:|---:|---|
+| 当前 token 投影 | `[2,1,H]` | local K/V、压缩器 content/gate | 更新两类状态 |
+| 压缩器尾部 | 旧 tail + 当前投影 | tail 或新 `C [2,1,512]` | 每满 4 token 才提交 entry |
+| Indexer Q | 当前 query latent | `[2,64,128]` 等实现配置 | 与 DSA 类似的轻量 heads |
+| Index scan | Q + `KI [2,8192,128]` | score `[2,8192]` | 对压缩条目而非 token 扫描 |
+| Top-k | score | ids `[2,512]` | ids 是压缩逻辑 ID |
+| 支撑集合并 | local `≤128` + selected `≤512` | `visible [2,≤640,128]` | 可在融合 kernel 中保持两个 buffer |
+| Main logits | `Q [2,64,128]` × visible | `[2,64,≤640]` | 加 mask/sink 后 softmax |
+| Head output | probability × visible | `[2,64,128]` | 共享 K=V 的 MQA 语义 |
+| 分组低秩输出 | `[2,64,128]` | `[2,H]` | inverse partial RoPE 顺序不可改变 |
+
+这个表同时说明了为何 CSA runtime 需要局部 KV 池、压缩 KV 池、index-key 池和压缩器 tail，而不是一个普通 paged-KV pool。
+
 压缩稀疏注意力（Compressed Sparse Attention，CSA）是 DeepSeek-V4 引入的长上下文注意力设计。它的核心动作可以概括为：
 
 > 先压缩序列，再从压缩后的条目中检索少量候选，交给昂贵的注意力主核。
@@ -92,8 +194,8 @@ Z: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
 对压缩槽位 `i`，overlap transform 构造：
 
 ```text
-Ubar_i = concat(U[i-1,:,path_a,:], U[i,:,path_b,:])  # [B,2m,D]
-Zbar_i = concat(Z[i-1,:,path_a,:], Z[i,:,path_b,:])  # [B,2m,D]
+Ubar_i = concat(U[i,:,path_a,:], U[i-1,:,path_b,:])  # [B,2m,D]
+Zbar_i = concat(Z[i,:,path_a,:], Z[i-1,:,path_b,:])  # [B,2m,D]
 ```
 
 在序列左边界，缺失的前一块会被 padding 并 mask。压缩窗口内部的可学习绝对位置 embedding 为：

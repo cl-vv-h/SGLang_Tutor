@@ -1,5 +1,110 @@
 # DeepSeek Sparse Attention：在 MLA Cache 上学习检索
 
+> English version: [DeepSeek Sparse Attention](../../../en/ai-infra-basic/Model_Architecture/07-deepseek-sparse-attention.md)
+
+## 阅读地图：两次打分，不要混成一次
+
+DSA 一次 forward 中有两套完全不同的“分数”：
+
+- **Indexer score** 是便宜的检索代理，只回答“主 Attention 应该看哪些位置”；
+- **Main attention score** 才进入 softmax，决定这些位置如何加权并产生模型输出。
+
+```mermaid
+flowchart LR
+    X["当前 hidden<br/>[Tq,H]"] --> IQ["Indexer Q/权重<br/>QI [Tq,HI,DI]<br/>w [Tq,HI]"]
+    X --> MQ["主 MLA Query<br/>[Tq,N,...]"]
+    IK[("Indexer Key Cache<br/>[Lkv,DI]")] --> IS["全历史低维打分<br/>[Tq,Lkv]"]
+    IQ --> IS
+    IS --> TOPK["Top-k 逻辑位置<br/>idx [Tq,k]"]
+    TOPK --> MAP["page table 翻译<br/>physical_idx [Tq,k]"]
+    MAP --> GATHER["稀疏读取主 cache<br/>selected Ckv [Tq,k,Dc]<br/>selected Kr [Tq,k,Dr]"]
+    MC[("MLA Main Cache")] --> GATHER
+    MQ --> MS["主 MLA logits<br/>[Tq,N,k]"]
+    GATHER --> MS
+    MS --> SM["Softmax 仅在 k 个位置上<br/>P [Tq,N,k]"]
+    SM --> OUT["加权 latent + 输出投影<br/>[Tq,H]"]
+    GATHER --> OUT
+```
+
+所以 DSA 不是“对 MLA 权重做 top-k”，也不是“删掉旧 KV”。它是一个**学习得到的候选集生成器 + 在候选集上重新计算的主 Attention**。
+
+### 贯穿全文的小尺寸例子
+
+为同时看清所有轴，使用：
+
+```text
+B=1, Tq=2, Lkv=8
+HI=2, DI=2, k=3
+N=4, Dc=4, Dr=2
+```
+
+| 张量 | Shape | 轴的含义 |
+|---|---:|---|
+| `QI` | `[2,2,2]` | query token × indexer head × index feature |
+| `KI_cache` | `[8,2]` | 历史 token × index feature；key 在 indexer heads 间共享 |
+| `head_w` | `[2,2]` | query token × indexer head |
+| `index_score` | `[2,8]` | 每个 query 对每个历史位置一个标量 |
+| `topk_idx` | `[2,3]` | 每个 query 三个逻辑 token id |
+| `Ckv_selected` | `[2,3,4]` | query × selected position × latent feature |
+| `Krope_selected` | `[2,3,2]` | query × selected position × position feature |
+| `main_logits` | `[2,4,3]` | query × main head × selected position |
+| `main_prob` | `[2,4,3]` | softmax 只归一化最后的 `k=3` 个位置 |
+| `latent_out` | `[2,4,4]` | query × main head × latent feature |
+| `output` | `[2,H]` | 合并并输出投影后的残差分支 |
+
+关键在于 `topk_idx` 没有 main-head 轴。Indexer 在 `HI` 上归约后，每个 query 产生一套共享位置；随后 `N=4` 个主 query heads 都在这同一套位置上计算各自 logits。
+
+### 从逻辑位置到输出的数值演示
+
+假设第一个 query 得到 indexer 分数：
+
+```text
+position: [0,    1,    2,    3,    4,    5,    6,    7]
+score:    [0.2,  1.7, -0.1,  0.8,  2.0,  0.4,  1.1,  0.3]
+```
+
+`TopK(k=3)` 返回逻辑位置 `[4,1,6]`。假设 paged cache 中它们通过 block table 被映射为物理 slot `[20,9,14]`；**排序值是逻辑 token 位置，kernel 读取的是物理 slot**。以 main head 0 为例，真正的 MLA logits 可能是：
+
+```text
+selected logical positions: [4,   1,   6]
+main logits:                [0.3, 2.1,-0.4]
+softmax:                    [0.133,0.802,0.066]
+```
+
+若对应 latent 为：
+
+```text
+c_4=[1,0,1,0], c_1=[0,2,0,0], c_6=[0,0,1,3]
+```
+
+则该 head 在 latent 空间先得到：
+
+```text
+z = 0.133*c_4 + 0.802*c_1 + 0.066*c_6
+  = [0.133, 1.604, 0.199, 0.198]       # [Dc=4]
+```
+
+然后才经过吸收后的 value/output 变换。这里 `1.7、2.0、1.1` 这些 indexer score 从未进入主 softmax；它们只决定集合 `{4,1,6}`。
+
+### Prefill、Decode 与训练的三条路径
+
+```mermaid
+flowchart TD
+    TRAIN["训练 warm-up"] --> TD["主 Attention 保持稠密"]
+    TD --> KL["用主 Attention 分布监督 indexer<br/>KL 对齐"]
+    KL --> TS["稀疏继续训练<br/>Top-k 进入主路径"]
+
+    PREFILL["推理 Prefill<br/>Tq=S"] --> PM["因果 index score [S,S]"]
+    PM --> PK["每个位置各自 Top-k"]
+    PK --> PC["稀疏主 Attention [S,N,k]"]
+
+    DECODE["推理 Decode<br/>Tq=1"] --> DS["扫 KI_cache [Lkv,DI]"]
+    DS --> DK["Top-k + page translation"]
+    DK --> DC["读取 k 个主 cache entry"]
+```
+
+训练阶段解释“检索器如何学会”，prefill/decode 解释“学好后怎样执行”。把三者混在一张伪代码里，会掩盖 dense teacher、因果 mask、paged 地址和 graph replay 的不同契约。
+
 ## 1. DSA 要解决的问题
 
 MLA 缩窄了每个历史 cache entry，但稠密 MLA 仍让每个 query 访问所有历史 entry：

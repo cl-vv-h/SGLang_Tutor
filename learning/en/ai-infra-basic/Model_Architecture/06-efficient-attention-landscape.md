@@ -1,5 +1,103 @@
 # Efficient Attention Landscape: Compression, Sparsity, Recurrence, and Kernels
 
+> 中文版：[高效 Attention 全景](../../../zh/ai-infra-basic/Model_Architecture/06-efficient-attention-landscape.md)
+
+## Reading Map: Locate the Bottleneck Before Choosing a Technique
+
+“Efficient attention” is not one algorithm. A method may save cost at four different locations:
+
+```mermaid
+flowchart LR
+    X["Current query<br/>[B,Lq,Nq,D]"] --> GEN["Build query representation"]
+    STATE[("Historical state")] --> READ["Read candidate history"]
+    GEN --> SCORE["Compute relevance scores"]
+    READ --> SCORE
+    SCORE --> SEL["Optional position selection/top-k"]
+    SEL --> REDUCE["Softmax or recurrent reduction"]
+    READ --> REDUCE
+    REDUCE --> O["Output [B,Lq,H]"]
+
+    A["1. Width stored per position<br/>MHA/GQA/MLA"] -.-> STATE
+    B["2. Number of positions visited<br/>SWA/DSA/CSA"] -.-> READ
+    C["3. Per-token history or fixed state<br/>KDA/GDN/SSM"] -.-> STATE
+    D["4. Execution of the same math<br/>Flash/Paged/Fused kernel"] -.-> SCORE
+```
+
+- MQA/GQA/MLA mainly reduce the **width of each historical position**;
+- SWA/DSA/CSA mainly reduce the **number of positions visited by a query**;
+- KDA/GDN replace per-token history with a **fixed-shape recurrent state**;
+- FlashAttention, PagedAttention, and fused operators mainly change **execution**, not automatically the model function.
+
+These axes can be composed but must not be confused. MLA may still visit all `S` latents; FlashAttention does not turn a logically dense dependency into sparse attention.
+
+### Where Dense-Attention Cost Comes From
+
+Given:
+
+```text
+Q: [B,Nq,Lq,D]
+K: [B,Nkv,Lkv,D]
+V: [B,Nkv,Lkv,Dv]
+group_size = Nq / Nkv
+```
+
+After mapping each query head to a KV group:
+
+```text
+Scores[b,h,i,j] = <Q[b,h,i,:], K[b,g(h),j,:]> / sqrt(D)
+P = softmax(Scores + Mask)                    [B,Nq,Lq,Lkv]
+O[b,h,i,:] = sum_j P[b,h,i,j] V[b,g(h),j,:] [B,Nq,Lq,Dv]
+```
+
+Logical multiply-add work is approximately:
+
+```text
+QK^T: 2 * B * Nq * Lq * Lkv * D FLOPs
+PV:    2 * B * Nq * Lq * Lkv * Dv FLOPs
+```
+
+During decode (`Lq=1`), a lower-order estimate of historical bytes read is:
+
+```text
+B * Lkv * Nkv * (D + Dv) * bytes_per_element
+```
+
+Prefill is therefore often dominated by large matrix computation and quadratic logical work, while decode is often dominated by reading a growing historical state. Every optimization should identify which term in these equations it reduces.
+
+### Step-by-Step Comparison for One Decode Request
+
+Use `B=1, Lq=1, Lkv=32768, Nq=32, Nkv=8, D=Dv=128, BF16`:
+
+| Method | Persistent history | Positions visited now | Approx. history payload/layer/step | Logical temporary before output |
+|---|---|---:|---:|---|
+| GQA | `K,V [Lkv,8,128]` | `32768` | `128 MiB` | score `[32,1,32768]` |
+| MLA, `Dc=512,Dr=64` | `[Lkv,576]` | `32768` | `36 MiB` | content + RoPE score |
+| DSA on MLA, `k=2048` | MLA cache + index key | full index scan, `2048` main entries | about `2.25 MiB` for main core, plus indexer | gathered score `[32,1,2048]` |
+| SWA, `W=4096` | token-level local KV | `4096` | `1/8` of GQA payload | score `[32,1,4096]` |
+| KDA | recurrent matrix + convolution tail | no historical token scan | independent of `Lkv` | state update `[Nk,Dk,Dv]` |
+
+The byte column counts only core cache elements, excluding page metadata, quantization scales, indices, and repeated traffic. It is a shape-derived order-of-magnitude exercise, not a benchmark result.
+
+### A Practical Decision Tree
+
+```mermaid
+flowchart TD
+    Q0{"Does the bottleneck grow with context length?"}
+    Q0 -->|No| K["Optimize projection/FFN/kernel first"]
+    Q0 -->|Yes| Q1{"Mostly KV capacity/bandwidth?"}
+    Q1 -->|Yes| C["Consider MQA/GQA/MLA/quantization"]
+    Q1 -->|No| Q2{"Need exact token-addressable history?"}
+    Q2 -->|Yes| S["SWA / DSA / CSA: reduce candidates"]
+    Q2 -->|No, history may be compressed| R["KDA/GDN/SSM: fixed recurrent state"]
+    C --> Q3{"Still scanning too many positions?"}
+    Q3 -->|Yes| S
+    Q3 -->|No| F["Choose Flash/Paged/Fused backend"]
+    S --> F
+    R --> F
+```
+
+This is not the only model-design answer, but it prevents confusing a kernel replacement with a change in attention mathematics, and prevents FLOP-only analysis from hiding cache bytes.
+
 ## 1. Why an Attention Map Is Necessary
 
 Names such as GQA, MLA, DSA, CSA, KDA, and FlashAttention are often placed in one list, but they optimize different parts of the system:

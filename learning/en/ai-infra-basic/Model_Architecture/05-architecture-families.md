@@ -1,5 +1,89 @@
 # LLM Architecture Families: Which Modules Changed
 
+> 中文版：[主流大模型架构谱系](../../../zh/ai-infra-basic/Model_Architecture/05-architecture-families.md)
+
+## Reading Map: Do Not Memorize Architectures by Model Name
+
+Model names change, but one layer can always be decomposed into four questions:
+
+```mermaid
+flowchart LR
+    IN["Input representation<br/>X: [B,S,H]"] --> TM["Token mixer<br/>exchange information across tokens"]
+    TM --> R1["Residual stream<br/>[B,S,H]"]
+    R1 --> CM["Channel mixer<br/>transform channels within one token"]
+    CM --> R2["Residual stream<br/>[B,S,H]"]
+    TM <-->|"read/write across steps"| ST[("Runtime state<br/>KV / latent / recurrent state")]
+    R2 --> IO["Next layer or output head"]
+```
+
+1. **Input/output contract**: why does the residual stream usually remain `[B,S,H]`?
+2. **Token mixer**: which tokens may a token read, and by what operation?
+3. **Channel mixer**: how do Dense FFN, SwiGLU, and MoE transform the last dimension?
+4. **Runtime state**: what exactly survives into the next decode step?
+
+This chapter is not a list of model names. It is a method for reconstructing an architecture. Once these four boxes are filled, cache design, parallelism, kernels, and serving requirements follow.
+
+### Universal Layer Equations and Shape Invariants
+
+For the common serial Pre-Norm residual layout:
+
+```text
+U = RMSNorm(X)                   [B,S,H]
+A, state' = TokenMixer(U,state) [B,S,H]
+R = X + A                       [B,S,H]
+V = RMSNorm(R)                  [B,S,H]
+F = ChannelMixer(V)             [B,S,H]
+Y = R + F                       [B,S,H]
+```
+
+The **intermediates** and **persistent state** change; the residual stream shape does not. SwiGLU temporarily expands to `[B,S,I]`; MoE temporarily expands each token into `K` routes; attention logically creates `[B,N,Lq,Lkv]` scores; SSM/KDA reads and writes fixed-shape matrices. Every branch must project back to `H` before residual addition.
+
+### One Teaching Configuration Across Families
+
+```text
+B=2, S=1024, H=4096, L=32
+Nq=32, Nkv=8, D=128
+FFN I=11008
+MoE E=64, top-K=2, expert width Ie=1408
+```
+
+| Family | Largest logical temporary | Per-layer persistent decode state | Grows with context? |
+|---|---|---|---|
+| Encoder-only | attention score `[2,32,1024,1024]` | usually none | No |
+| Encoder-Decoder | self score + cross score `[2,32,Stgt,Ssrc]` | decoder KV + encoder memory/KV | Decoder part does |
+| Dense/MoE Decoder | causal score `[2,32,1024,1024]` | KV `[B,S,Nkv,D] × 2` | Yes |
+| MLA Decoder | latent-attention score `[2,32,1024,1024]` | `Ckv [B,S,Dc] + Krope [B,S,Dr]` | Yes, but narrower per token |
+| SSM/KDA | scan/chunk temporaries | fixed recurrent state + convolution tail | No |
+| Hybrid | depends on the current layer type | union of KV and recurrent states | Only some layers |
+
+The score tensor above is a logical training/naive shape. FlashAttention-style kernels tile the online softmax and do not write the full `[S,S]` matrix to HBM.
+
+### Decoder-Only End-to-End Main Path
+
+```mermaid
+flowchart TD
+    IDS["token_ids [B,S]"] --> EMB["Embedding lookup<br/>[V,H] -> [B,S,H]"]
+    EMB --> LAYER["Repeat L decoder layers"]
+    LAYER --> N1["RMSNorm [B,S,H]"]
+    N1 --> MIX{"Token mixer type"}
+    MIX -->|MHA/GQA| KV["project Q/K/V; write KV cache"]
+    MIX -->|MLA/DSA/CSA| LAT["latent/retrieval/compressed state"]
+    MIX -->|SSM/KDA| REC["recurrently update state"]
+    KV --> ADD1["Residual add [B,S,H]"]
+    LAT --> ADD1
+    REC --> ADD1
+    ADD1 --> N2["RMSNorm [B,S,H]"]
+    N2 --> CH{"Channel mixer type"}
+    CH -->|Dense| FFN["[B,S,H] -> [B,S,I] -> [B,S,H]"]
+    CH -->|MoE| MOE["route [B,S,E]<br/>dispatch B*S*K routes<br/>combine [B,S,H]"]
+    FFN --> ADD2["Residual add [B,S,H]"]
+    MOE --> ADD2
+    ADD2 --> LAYER
+    LAYER --> FINAL["Final norm + LM head<br/>[B,S,H] -> [B,S,V]"]
+```
+
+Prefill sends all `S` positions through this graph; decode sends only `[B,1,H]`, while the token mixer reads the previously persisted history. That distinction is why the same model has radically different performance profiles in the two phases.
+
 ## 1. Unified Analysis Framework
 
 Many model names exist, but the main structure can be analyzed along three dimensions:
@@ -135,67 +219,180 @@ routed_output: [B,S,H]
 final_output:  [B,S,H]
 ```
 
-## 7. MLA + MoE Hybrid
+## 7. Fine-Grained MoE
 
-Combining MLA attention with Sparse MoE FFN yields today's most aggressive memory and compute optimization:
-
-```text
-r = x + MLA(Norm(x))           # Compressed KV cache
-y = r + SparseMoE(Norm(r))     # Large capacity, sparse activation
-```
-
-MLA reduces KV Cache memory; MoE increases total parameters without proportionally increasing per-token compute.
-
-## 8. SSM Hybrid
-
-Some models replace or interleave Attention layers with State Space Models (Mamba, etc.):
+Fine-grained MoE uses more, smaller experts. If an expert with intermediate width `I_big` is split into `m` small experts,
 
 ```text
-Layer_i = {
-    Causal Attention, if i in attention_layers
-    SSM,              if i in ssm_layers
-}
+Ie = I_big / m
+active_width = K * Ie
 ```
 
-Hybrids attempt to combine:
-- Attention layers for high-precision long-range dependency
-- SSM layers for efficient linear-time context processing
-- Per-layer selection or fixed interleaving pattern
+the model may increase top-`K` so that the total active width per token remains near a target. The computation for flattened tokens `T=B*S` is:
 
-## 9. Architecture Comparison Summary
+```text
+X_flat:       [T,H]
+router_logits:[T,E]
+topk_id:      [T,K]
+topk_weight:  [T,K]
+dispatch:     T*K logical token-expert routes
+expert input: [Te,H] for expert e
+expert output:[Te,H]
+combine:      [T,K,H] -> weighted sum -> [T,H]
+```
 
-| Family | Token Mixer | Channel Mixer | Cached State |
+Finer routing offers more combinations of experts, but increases routing metadata, dispatch complexity, communication, and the risk of tiny GEMMs.
+
+## 8. MLA + MoE Decoder
+
+This family changes both attention state and parameter activation:
+
+```text
+X [B,S,H]
+  -> Norm
+  -> Multi-head Latent Attention
+     persists Ckv [B,S,Dc] + K_rope [B,S,Dr]
+  -> Residual
+  -> Norm
+  -> shared + routed sparse experts
+  -> Residual
+```
+
+MLA attacks long-context state cost; MoE increases parameter capacity without activating all expert parameters for every token. They solve different axes and can therefore be composed. DeepSeek-style decoders are representative of this combination.
+
+## 9. State Space Model
+
+An SSM does not dot the current query against every historical K. It recurrently updates a fixed-shape state:
+
+```text
+h_t = A_t h_(t-1) + B_t x_t
+y_t = C_t h_t + D x_t
+```
+
+Logical dataflow:
+
+```text
+x_t [B,H] + state_(t-1) [B,...]
+  -> state update
+  -> y_t [B,H] + state_t [B,...]
+```
+
+| Property | Attention | SSM |
+|---|---|---|
+| Historical state | K/V grows with context | fixed-shape recurrent state |
+| Token mixing | current Q dots historical K | state recurrence/selective scan |
+| Parallel prefill | matrix attention | scan or chunked scan |
+| Decode | read historical KV | update one fixed state |
+
+The state being fixed-size does not mean information is losslessly preserved. History is compressed into a learned dynamical system. Mamba-style models belong to this family.
+
+## 10. Attention-SSM Hybrid
+
+Hybrid architectures assign different token mixers to different layer IDs:
+
+```text
+Layer 0: SSM
+Layer 1: SSM
+Layer 2: Attention
+Layer 3: SSM
+...
+```
+
+SSM layers propagate compressed history efficiently; occasional attention layers provide direct content-addressed lookup. If attention-layer IDs are `A` and recurrent-layer IDs are `M`, the serving state is
+
+```text
+runtime state = {KV cache for l in A} union {recurrent state for l in M}
+```
+
+Schedulers must therefore route each layer to a compatible backend and manage two different state lifecycles.
+
+## 11. Multimodal Backbone Composition
+
+Multimodal models commonly keep a language-model backbone and add an encoder and projector on the input side:
+
+```text
+image -> vision encoder -> [B,Nimg,Hvision]
+      -> projector      -> visual tokens [B,Nimg,H]
+
+text_ids -> embedding  -> text tokens [B,Ntxt,H]
+
+concat/interleave -> [B,Nimg+Ntxt,H] -> language backbone
+```
+
+The projector establishes the critical width contract `Hvision -> H`. Fusion may use projected visual tokens inside decoder self-attention, separate cross-attention over visual memory, or modality adapters in selected layers. Every design must define position IDs, attention masks, and which token positions contribute to the output loss.
+
+## 12. Architecture Component Matrix
+
+| Family | Token mixer | Channel mixer | Historical state | Typical output |
+|---|---|---|---|---|
+| Encoder-only | bidirectional self-attention | Dense FFN | usually no autoregressive state | pooled/token representations |
+| Encoder-Decoder | encoder self + decoder causal/cross attention | Dense FFN or MoE | decoder KV + encoder memory | autoregressive logits |
+| Dense Decoder | causal MHA/GQA | Dense SwiGLU | per-layer KV cache | autoregressive logits |
+| Sparse MoE Decoder | causal MHA/GQA | top-K MoE | per-layer KV cache | autoregressive logits |
+| MLA + MoE | latent causal attention | shared/routed MoE | latent KV + position key | autoregressive logits |
+| SSM | selective state update | gated projection/FFN | fixed-size state | autoregressive logits |
+| Attention-SSM Hybrid | alternating attention and SSM | Dense FFN or MoE | mixed KV + recurrent state | autoregressive logits |
+
+## 13. Position-Encoding Differences
+
+| Method | Applied to | Changes tensor shape? | Main property |
 |---|---|---|---|
-| Encoder-only | Bidirectional Self-Attn | Dense FFN | None (full input) |
-| Encoder-Decoder | Causal + Cross Attn | Dense FFN | Decoder KV Cache + Encoder Memory |
-| Dense Decoder | Causal Self-Attn | Dense FFN | Per-layer KV Cache |
-| MoE Decoder | Causal Self-Attn | Sparse MoE | Per-layer KV Cache |
-| MLA + MoE | Latent Attention | Sparse MoE | Compressed Latent KV + RoPE Key |
-| SSM Hybrid | Attention + SSM mix | Dense FFN or MoE | KV Cache + SSM State |
+| Learned absolute | added to token embedding | No | learned row per position |
+| Sinusoidal | added to token embedding | No | fixed frequency functions |
+| RoPE | rotates Q/K | No | dot product carries relative position |
+| Relative bias | added to attention score | score shape unchanged | directly modifies pair score |
+| ALiBi | linear distance bias on score | score shape unchanged | no position-embedding table |
+| Decoupled RoPE | rotates only positional Q/K subspace | splits last dimension | permits MLA content-projection absorption |
 
-## 10. Why Serving Systems Must Understand Architecture Families
+Position encoding affects long-context extrapolation, cache content, and attention kernels, although the residual path usually remains `[B,S,H]`.
 
-1. **KV Cache shape** differs across families — affecting memory pool design.
-2. **Attention backend** must support the correct number of KV heads, RoPE placement, and MLA absorption.
-3. **MoE routing and dispatch** require dedicated communication (all-to-all) and load-balancing logic.
-4. **SSM state** is not KV Cache — it requires different pool, cache, and transfer design.
-5. **Cross Attention** adds extra memory traffic from encoder to decoder in Encoder-Decoder models.
+## 14. Normalization and Residual Layout
 
-## 11. Modern Efficient-Attention Families
+```text
+Post-Norm:         y = Norm(x + Sublayer(x))
+Pre-Norm:          y = x + Sublayer(Norm(x))
+Parallel Residual: y = x + Attention(Norm(x)) + FFN(Norm(x))
+```
 
-Newer architectures also change the sequence mixer and its state contract:
+Deep models commonly use Pre-Norm or a variant for optimization stability. LayerNorm centers and scales, while RMSNorm only rescales by the root-mean-square magnitude. Both preserve `[B,S,H]`.
+
+## 15. Reconstruct an Architecture from Configuration
+
+Read a model configuration in this order:
+
+1. `vocab_size`, `hidden_size`, `num_hidden_layers`: embedding, residual width, and depth.
+2. `num_attention_heads`, `num_key_value_heads`, `head_dim`: MHA/MQA/GQA and KV shape.
+3. `intermediate_size`: Dense FFN width.
+4. `num_experts`, `num_experts_per_tok`, `moe_intermediate_size`: routing and active expert width.
+5. Latent rank and qk content/RoPE dimensions: whether the model uses MLA.
+6. State size, convolution size, and SSM layer pattern: whether recurrent layers exist.
+7. Norm, activation, and RoPE parameters: numerical and positional details.
+8. Tied embeddings/output-head settings: whether input embedding and LM head share weights.
+
+## 16. Decide Whether Two Models Are Structurally Different
+
+- Changing only `H`, `L`, `N`, or `I` usually scales one architecture.
+- MHA to GQA changes historical-state structure.
+- Dense FFN to MoE changes parameter activation and token dispatch.
+- GQA to MLA changes K/V representation and factorizes attention computation.
+- Attention to SSM changes token mixing and cross-step state.
+- Adding a vision encoder changes input representation and modality fusion.
+
+The question is not whether model names differ, but whether token mixing, channel mixing, or persistent state changes.
+
+## 17. Modern Efficient-Attention Families
 
 | Family | Token mixer | Historical state | Main serving implication |
 |---|---|---|---|
-| MLA dense/sparse hybrid | MLA or DSA | token-level latent KV + position/indexer keys | compact cache, with irregular top-k gathers in DSA layers |
-| Compressed hierarchy | SWA + CSA or HCA | local KV + compressed entries + compressor tail | multiple cache granularities advance at different rates |
-| Delta-recurrent hybrid | GDN/KDA interleaved with softmax attention | recurrent matrix + convolution tail + occasional KV cache | fixed state in recurrent layers, mutable-state rollback and routing |
+| MLA dense/sparse hybrid | MLA or DSA | token-level latent KV + position/indexer keys | compact cache; DSA adds irregular top-k gather |
+| Compressed hierarchy | SWA + CSA or HCA | local KV + compressed entries + compressor tail | cache granularities advance at different rates |
+| Delta-recurrent hybrid | GDN/KDA interleaved with softmax attention | recurrent matrix + convolution tail + occasional KV cache | mutable recurrent state requires rollback and routing rules |
 
-The model family name is less important than four configuration questions:
+For any unfamiliar model, answer four final questions:
 
 1. Which layer IDs use dense, sparse, compressed, local, or recurrent mixing?
 2. What does each layer persist after one token?
-3. Which state is token-addressable and which is only a compressed summary?
+3. Which state is token-addressable, and which is only a compressed summary?
 4. Which backend handles prefill, decode, graph replay, and speculative verification?
 
 Continue with the [efficient-attention landscape](./06-efficient-attention-landscape.md), [DSA](./07-deepseek-sparse-attention.md), [CSA/HCA](./08-compressed-sparse-attention.md), and [KDA](./09-kimi-delta-attention.md) chapters.

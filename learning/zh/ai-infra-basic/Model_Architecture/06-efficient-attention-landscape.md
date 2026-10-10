@@ -1,5 +1,103 @@
 # 高效 Attention 全景：压缩、稀疏、递归与 Kernel
 
+> English version: [Efficient Attention Landscape](../../../en/ai-infra-basic/Model_Architecture/06-efficient-attention-landscape.md)
+
+## 阅读地图：先定位瓶颈，再选择技术
+
+“高效 Attention”不是单一算法。一个方法至少可能在四个不同位置省成本：
+
+```mermaid
+flowchart LR
+    X["当前 Query<br/>[B,Lq,Nq,D]"] --> GEN["生成查询表示"]
+    STATE[("历史状态")] --> READ["读取候选历史"]
+    GEN --> SCORE["相关性打分"]
+    READ --> SCORE
+    SCORE --> SEL["可选：位置选择/Top-k"]
+    SEL --> REDUCE["Softmax/递归归约"]
+    READ --> REDUCE
+    REDUCE --> O["输出 [B,Lq,H]"]
+
+    A["① 每个位置存多宽<br/>MHA/GQA/MLA"] -.-> STATE
+    B["② 要访问多少位置<br/>SWA/DSA/CSA"] -.-> READ
+    C["③ 是否保存逐 token 历史<br/>KDA/GDN/SSM"] -.-> STATE
+    D["④ 如何执行同一数学<br/>Flash/Paged/Fused kernel"] -.-> SCORE
+```
+
+- MQA/GQA/MLA 主要减小**每个历史位置的宽度**；
+- SWA/DSA/CSA 主要减小**每次查询访问的位置数**；
+- KDA/GDN 把逐 token 历史变为**固定形状递归状态**；
+- FlashAttention、PagedAttention、融合算子主要改变**执行方式**，不自动改变模型函数。
+
+这四条轴可以组合，不能互相冒充。例如 MLA 仍可能访问全部 `S` 个 latent；FlashAttention 不会让 `O(S²)` 的逻辑依赖凭空变成稀疏。
+
+### 稠密 Attention 的成本从哪里来
+
+给定：
+
+```text
+Q: [B,Nq,Lq,D]
+K: [B,Nkv,Lkv,D]
+V: [B,Nkv,Lkv,Dv]
+group_size = Nq / Nkv
+```
+
+将 KV head 按组广播给 query heads 后：
+
+```text
+Scores[b,h,i,j] = <Q[b,h,i,:], K[b,g(h),j,:]> / sqrt(D)
+P = softmax(Scores + Mask)                    [B,Nq,Lq,Lkv]
+O[b,h,i,:] = sum_j P[b,h,i,j] V[b,g(h),j,:] [B,Nq,Lq,Dv]
+```
+
+逻辑乘加量约为：
+
+```text
+QK^T: 2 * B * Nq * Lq * Lkv * D FLOPs
+PV:    2 * B * Nq * Lq * Lkv * Dv FLOPs
+```
+
+而 decode（`Lq=1`）的最低历史读取量近似为：
+
+```text
+B * Lkv * Nkv * (D + Dv) * bytes_per_element
+```
+
+因此 prefill 常由大矩阵计算和二次方逻辑工作量主导，decode 常由不断增长的历史状态读取带宽主导。优化方案必须说明自己减少的是哪一个式子里的哪一项。
+
+### 同一个 decode 请求的逐步对照
+
+使用 `B=1, Lq=1, Lkv=32768, Nq=32, Nkv=8, D=Dv=128, BF16`：
+
+| 方法 | 历史持久状态 | 本次访问位置 | 近似历史载荷/层/步 | 输出前的逻辑中间量 |
+|---|---|---:|---:|---|
+| GQA | `K,V [Lkv,8,128]` | `32768` | `128 MiB` | score `[32,1,32768]` |
+| MLA，`Dc=512,Dr=64` | `[Lkv,576]` | `32768` | `36 MiB` | content + RoPE score |
+| DSA on MLA，`k=2048` | MLA cache + index key | index 全扫、主核读 `2048` | 主核约 `2.25 MiB`，另计 indexer | gathered score `[32,1,2048]` |
+| SWA，`W=4096` | token 级局部 KV | `4096` | GQA 载荷的 `1/8` | score `[32,1,4096]` |
+| KDA | recurrent matrix + conv tail | 不扫描历史 token | 与 `Lkv` 无关 | state update `[Nk,Dk,Dv]` |
+
+表中载荷只按核心缓存元素计算，未计 page 元数据、量化尺度、索引和重复读写；其目的不是给出 benchmark，而是训练读者从 shape 推导数量级。
+
+### 一棵实用的判断树
+
+```mermaid
+flowchart TD
+    Q0{"瓶颈是否随上下文长度增长？"}
+    Q0 -->|否| K["先优化 projection/FFN/kernel"]
+    Q0 -->|是| Q1{"主要是 KV 容量/带宽？"}
+    Q1 -->|是| C["考虑 MQA/GQA/MLA/量化"]
+    Q1 -->|否| Q2{"仍需精确逐 token 内容寻址？"}
+    Q2 -->|是| S["SWA / DSA / CSA：减少候选位置"]
+    Q2 -->|否，可压缩历史| R["KDA/GDN/SSM：固定递归状态"]
+    C --> Q3{"压缩后仍扫描太多位置？"}
+    Q3 -->|是| S
+    Q3 -->|否| F["选择 Flash/Paged/Fused backend"]
+    S --> F
+    R --> F
+```
+
+这不是模型设计的唯一答案，却能防止把“更换 kernel”误当成“更换 Attention 数学”，也能防止只看 FLOPs 而忽略缓存字节数。
+
 ## 1. 为什么需要先画一张 Attention 地图
 
 GQA、MLA、DSA、CSA、KDA、FlashAttention 经常出现在同一张列表里，但它们优化的并不是同一个问题：

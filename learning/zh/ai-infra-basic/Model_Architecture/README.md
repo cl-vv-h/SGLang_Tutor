@@ -11,12 +11,12 @@
 | [01-decoder-only-transformer.md](./01-decoder-only-transformer.md) | Decoder-only Transformer 从 token 到 logits 的完整主干、残差结构和推理数据流 |
 | [02-gqa-attention-shapes.md](./02-gqa-attention-shapes.md) | MHA/MQA/GQA、QKV 投影、QK Norm、RoPE、因果 Attention 和 KV Cache |
 | [03-sparse-moe-routing.md](./03-sparse-moe-routing.md) | Router、Top-K、Dispatch、SwiGLU Expert、Combine 和 Expert Parallel |
-| [04-multi-head-latent-attention.md](./04-multi-head-latent-attention.md) | MLA 的低秩压缩、解耦 RoPE、吸收矩阵和压缩 KV Cache 原理 |
-| [05-architecture-families.md](./05-architecture-families.md) | Encoder、Encoder-Decoder、Dense Decoder、MoE、MLA+MoE 与 SSM Hybrid 的结构比较 |
-| [06-efficient-attention-landscape.md](./06-efficient-attention-landscape.md) | 统一梳理 MHA/GQA/MLA、SWA/NSA/DSA/CSA/HCA、GDN/KDA 与 kernel 级优化 |
-| [07-deepseek-sparse-attention.md](./07-deepseek-sparse-attention.md) | DSA indexer、token 级 top-k、MLA 稀疏主核、缓存映射、训练与 Ascend 执行路径 |
-| [08-compressed-sparse-attention.md](./08-compressed-sparse-attention.md) | CSA 重叠压缩、压缩检索、HCA、局部 SWA、异构缓存与 NPU 适配 |
-| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | KDA 逐 key 通道衰减、delta 递归、chunk prefill、融合 decode 与可变 serving 状态 |
+| [04-multi-head-latent-attention.md](./04-multi-head-latent-attention.md) | 从一次完整 decode 出发，推导 MLA 低秩压缩、解耦 RoPE、K/V 矩阵吸收、缓存字节数和全张量流 |
+| [05-architecture-families.md](./05-architecture-families.md) | 用“Token Mixer + Channel Mixer + Runtime State”还原 Encoder、Decoder、MoE、MLA、SSM、Hybrid 与多模态架构 |
+| [06-efficient-attention-landscape.md](./06-efficient-attention-landscape.md) | 按缓存宽度、访问位置、递归状态和执行 kernel 四条独立轴比较 MHA/GQA/MLA、SWA/DSA/CSA/HCA、GDN/KDA |
+| [07-deepseek-sparse-attention.md](./07-deepseek-sparse-attention.md) | 区分 indexer 与主 Attention 两次打分，逐 shape 追踪 top-k、paged 地址翻译、MLA 稀疏主核和训练流程 |
+| [08-compressed-sparse-attention.md](./08-compressed-sparse-attention.md) | 用压缩时间线和数值例子讲解 CSA 重叠压缩、HCA、局部 SWA、条目就绪条件、异构缓存与 NPU 适配 |
+| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | 从可改写键值记忆推导 KDA 的逐通道衰减与 delta rule，并追踪卷积、chunk prefill、融合 decode 和 serving 状态 |
 
 ## 统一符号
 
@@ -47,8 +47,8 @@
 
 1. 从 Decoder-only Transformer 建立 `token -> hidden states -> logits` 的主路径。
 2. 展开 Attention，理解 token 之间如何交换信息，以及 MHA、GQA 和 KV Cache 的空间代价。
-3. 用高效注意力技术地图区分 head 共享、特征压缩、序列稀疏/压缩、递归与 kernel 分块。
-4. 先学 MLA，再学 DSA 与 CSA/HCA，沿 latent cache、token 稀疏到压缩稀疏的演进路线阅读。
-5. 联动学习 GDN 与 KDA，理解固定大小递归状态、chunk prefill 与融合 decode。
-6. 展开 Sparse MoE，理解参数如何通过 Top-K 路由按 token 稀疏激活。
-7. 对比主要架构家族，建立“序列混合模块 + 通道变换模块 + 状态形式”的统一分析框架。
+3. 进入 04 后先读每篇开头的“阅读地图”和贯穿例子；它们给出后续公式的全局数据流与统一 shape 坐标。
+4. 先学 MLA，再学 DSA 与 CSA/HCA，沿“压缩每个位置 → 选择 token 位置 → 先压缩序列再选择”的路线阅读。
+5. 再读 KDA，对比“保存可寻址历史条目”与“把历史折叠到固定矩阵”这两类根本不同的状态契约。
+6. 回到高效 Attention 全景，用缓存宽度、访问位置数、状态增长方式与 kernel 执行四个问题横向比较。
+7. 展开 Sparse MoE，再用架构谱系章节把 Token Mixer、Channel Mixer 与 Runtime State 拼回完整模型。

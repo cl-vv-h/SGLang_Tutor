@@ -1,5 +1,110 @@
 # DeepSeek Sparse Attention: Learned Indexing over MLA Cache
 
+> 中文版：[DeepSeek Sparse Attention](../../../zh/ai-infra-basic/Model_Architecture/07-deepseek-sparse-attention.md)
+
+## Reading Map: Two Scores, Not One
+
+A DSA forward pass contains two completely different kinds of score:
+
+- the cheap **indexer score** only answers “which positions should main attention inspect?”;
+- the **main attention score** enters softmax and determines how selected entries produce model output.
+
+```mermaid
+flowchart LR
+    X["Current hidden state<br/>[Tq,H]"] --> IQ["Indexer Q and weights<br/>QI [Tq,HI,DI]<br/>w [Tq,HI]"]
+    X --> MQ["Main MLA query<br/>[Tq,N,...]"]
+    IK[("Indexer-key cache<br/>[Lkv,DI]")] --> IS["Low-dimensional full scan<br/>[Tq,Lkv]"]
+    IQ --> IS
+    IS --> TOPK["Top-k logical positions<br/>idx [Tq,k]"]
+    TOPK --> MAP["Page-table translation<br/>physical_idx [Tq,k]"]
+    MAP --> GATHER["Sparse main-cache read<br/>selected Ckv [Tq,k,Dc]<br/>selected Kr [Tq,k,Dr]"]
+    MC[("MLA main cache")] --> GATHER
+    MQ --> MS["Main MLA logits<br/>[Tq,N,k]"]
+    GATHER --> MS
+    MS --> SM["Softmax over only k positions<br/>P [Tq,N,k]"]
+    SM --> OUT["Weighted latent + output projection<br/>[Tq,H]"]
+    GATHER --> OUT
+```
+
+DSA is therefore neither “top-k over MLA weights” nor “delete old KV.” It is a **learned candidate-set generator followed by fresh main attention over that set**.
+
+### Running Small-Shape Example
+
+To expose every axis, use:
+
+```text
+B=1, Tq=2, Lkv=8
+HI=2, DI=2, k=3
+N=4, Dc=4, Dr=2
+```
+
+| Tensor | Shape | Axis meaning |
+|---|---:|---|
+| `QI` | `[2,2,2]` | query token × indexer head × index feature |
+| `KI_cache` | `[8,2]` | historical token × index feature; key shared by indexer heads |
+| `head_w` | `[2,2]` | query token × indexer head |
+| `index_score` | `[2,8]` | one scalar for every query/history pair |
+| `topk_idx` | `[2,3]` | three logical token IDs per query |
+| `Ckv_selected` | `[2,3,4]` | query × selected position × latent feature |
+| `Krope_selected` | `[2,3,2]` | query × selected position × positional feature |
+| `main_logits` | `[2,4,3]` | query × main head × selected position |
+| `main_prob` | `[2,4,3]` | softmax normalizes only the last `k=3` positions |
+| `latent_out` | `[2,4,4]` | query × main head × latent feature |
+| `output` | `[2,H]` | merged, output-projected residual branch |
+
+`topk_idx` has no main-head axis. After reduction across `HI`, each query obtains one shared position set; all `N=4` main query heads compute their own logits over that same set.
+
+### Numerical Walk from Logical Positions to Output
+
+Suppose the first query produces:
+
+```text
+position: [0,    1,    2,    3,    4,    5,    6,    7]
+score:    [0.2,  1.7, -0.1,  0.8,  2.0,  0.4,  1.1,  0.3]
+```
+
+`TopK(k=3)` returns logical positions `[4,1,6]`. Assume the block table maps these to physical cache slots `[20,9,14]`: **ranking produces logical token positions; the kernel reads physical slots**. For main head 0, the actual MLA logits might be:
+
+```text
+selected logical positions: [4,   1,   6]
+main logits:                [0.3, 2.1,-0.4]
+softmax:                    [0.133,0.802,0.066]
+```
+
+For corresponding latents
+
+```text
+c_4=[1,0,1,0], c_1=[0,2,0,0], c_6=[0,0,1,3]
+```
+
+the head first computes in latent space:
+
+```text
+z = 0.133*c_4 + 0.802*c_1 + 0.066*c_6
+  = [0.133, 1.604, 0.199, 0.198]       # [Dc=4]
+```
+
+Only then does the absorbed value/output transform run. The indexer scores `1.7, 2.0, 1.1` never enter main softmax; they only determine the set `{4,1,6}`.
+
+### Three Paths: Prefill, Decode, and Training
+
+```mermaid
+flowchart TD
+    TRAIN["Training warm-up"] --> TD["Keep main attention dense"]
+    TD --> KL["Supervise indexer from main-attention distribution<br/>KL alignment"]
+    KL --> TS["Sparse continued training<br/>top-k enters main path"]
+
+    PREFILL["Inference prefill<br/>Tq=S"] --> PM["Causal index scores [S,S]"]
+    PM --> PK["Different top-k set per position"]
+    PK --> PC["Sparse main attention [S,N,k]"]
+
+    DECODE["Inference decode<br/>Tq=1"] --> DS["Scan KI_cache [Lkv,DI]"]
+    DS --> DK["Top-k + page translation"]
+    DK --> DC["Read k main-cache entries"]
+```
+
+Training explains how the retriever learns; prefill/decode explain how the trained model executes. Combining all three into one pseudocode path hides the distinct contracts for the dense teacher, causal mask, paged addresses, and graph replay.
+
 ## 1. The Problem DSA Solves
 
 MLA makes each historical cache entry much narrower, but dense MLA still lets every query attend to every previous entry:

@@ -1,5 +1,107 @@
 # Compressed Sparse Attention (CSA) and Heavily Compressed Attention (HCA)
 
+> 中文版：[压缩稀疏注意力与 HCA](../../../zh/ai-infra-basic/Model_Architecture/08-compressed-sparse-attention.md)
+
+## Reading Map: Three Time Scales, Two Layer Types
+
+First remove the most common misconception: SWA, CSA, and HCA are not three read modes over one KV cache.
+
+```mermaid
+flowchart TD
+    X["Raw hidden stream<br/>one [H] vector per token"] --> LOCAL[("Local uncompressed cache<br/>most recent w tokens")]
+    X --> CCOMP["Overlapping compressor<br/>width=2m, stride=m"]
+    X --> HCOMP["Heavy non-overlapping compressor<br/>stride=m'"]
+    CCOMP --> CC[("CSA entries<br/>about L/m")]
+    CCOMP --> CI[("CSA index keys<br/>about L/m")]
+    HCOMP --> HC[("HCA entries<br/>about L/m'")]
+
+    Q1["CSA-layer query"] --> IDX["Scan compressed index keys"]
+    CI --> IDX
+    IDX --> TOP["Top-k compressed IDs"]
+    TOP --> CSUP["Support = local + selected CSA"]
+    CC --> CSUP
+    LOCAL --> CSUP
+
+    Q2["HCA-layer query"] --> HSUP["Support = local + all HCA"]
+    HC --> HSUP
+    LOCAL --> HSUP
+```
+
+- a **CSA layer** combines an exact local window with query-dependent top-k retrieval over moderately compressed entries;
+- an **HCA layer** combines the exact local window with dense global reading of a heavily compressed short sequence;
+- the model interleaves the two layer types according to configuration; every layer does not run both CSA and HCA.
+
+### Compression Timeline for `S=10, m=4`
+
+Partition raw tokens into:
+
+```text
+chunk 0 = tokens 0..3
+chunk 1 = tokens 4..7
+chunk 2 = tokens 8..9 + padding (tail is incomplete)
+```
+
+The overlapping receptive field has width `2m=8`, but the stride is `m=4`:
+
+```text
+entry 0: masked previous block + current chunk 0
+entry 1: previous chunk 0       + current chunk 1
+entry 2: previous chunk 1       + current chunk 2 (wait until tail is ready)
+```
+
+As strict incremental causal execution grows token length from 1 to 10:
+
+| `token_len` | `floor(token_len/m)` | `tail_len` | Newly completed entry |
+|---:|---:|---:|---|
+| 1 | 0 | 1 | none; update tail only |
+| 3 | 0 | 3 | none |
+| 4 | 1 | 0 | entry 0 |
+| 7 | 1 | 3 | none |
+| 8 | 2 | 0 | entry 1 |
+| 10 | 2 | 2 | none; entry 2 still depends on an incomplete current block |
+
+An offline prefill may produce `ceil(S/m)=3` logical outputs if it explicitly masks the padded final block. Online decode must still advance the **visible completed-entry count** according to readiness. Later, `ceil(S/m)` denotes padded batch shape, while `floor(token_len/m)` denotes online visible state; do not interchange them.
+
+### Numerical Example for One Compressed Feature
+
+For hand calculation, inspect one output feature `d`. Suppose four valid source positions have projected contents and gate logits:
+
+```text
+Ubar[:,d] = [2.0, 1.0, -1.0, 3.0]
+gate+APE  = [0.0, 1.0,  0.0, 0.0]
+```
+
+Softmax over the **source-position axis** gives:
+
+```text
+A[:,d] = softmax([0,1,0,0])
+       ≈ [0.175, 0.475, 0.175, 0.175]
+
+C[d] = Σ_r A[r,d] Ubar[r,d]
+     ≈ 0.175*2 + 0.475*1 + 0.175*(-1) + 0.175*3
+     = 1.175
+```
+
+The real tensor has an independent `[2m]` weight vector for every `d=0..D-1`, allowing different output features to draw evidence from different source tokens. This is not average pooling; both content and retention weights are learned.
+
+### Full Tensor Ledger for One CSA Decode Step
+
+Let `B=2,Nq=64,D=128,Dc=512,m=4,w=128,k=512` and current raw length `L=32768`, yielding about `Nc=8192` compressed candidates:
+
+| Stage | Input | Output | Meaning |
+|---|---:|---:|---|
+| Current-token projection | `[2,1,H]` | local K/V and compressor content/gate | update two state types |
+| Compressor tail | old tail + current projections | tail or new `C [2,1,512]` | commit one entry every 4 tokens |
+| Indexer Q | current query latent | e.g. `[2,64,128]` | lightweight heads like DSA |
+| Index scan | Q + `KI [2,8192,128]` | score `[2,8192]` | scan compressed entries, not tokens |
+| Top-k | score | IDs `[2,512]` | IDs are logical compressed-entry IDs |
+| Support union | local `≤128` + selected `≤512` | `visible [2,≤640,128]` | fused kernel may keep two buffers |
+| Main logits | `Q [2,64,128]` × visible | `[2,64,≤640]` | apply mask/sink then softmax |
+| Head output | probability × visible | `[2,64,128]` | shared K=V MQA semantics |
+| Grouped low-rank output | `[2,64,128]` | `[2,H]` | inverse partial-RoPE order is fixed |
+
+This ledger explains why a CSA runtime needs a local-KV pool, compressed-KV pool, index-key pool, and compressor tail—not one ordinary paged-KV pool.
+
 Compressed Sparse Attention (CSA) is the long-context attention design introduced with DeepSeek-V4. Its key move is easy to state:
 
 > Compress the sequence first, then retrieve a small number of compressed entries for the expensive attention core.
@@ -92,8 +194,8 @@ Z: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
 For compressed slot `i`, the overlap transform constructs:
 
 ```text
-Ubar_i = concat(U[i-1,:,path_a,:], U[i,:,path_b,:])  # [B,2m,D]
-Zbar_i = concat(Z[i-1,:,path_a,:], Z[i,:,path_b,:])  # [B,2m,D]
+Ubar_i = concat(U[i,:,path_a,:], U[i-1,:,path_b,:])  # [B,2m,D]
+Zbar_i = concat(Z[i,:,path_a,:], Z[i-1,:,path_b,:])  # [B,2m,D]
 ```
 
 At the left boundary, the missing previous chunk is padded and masked. The learned absolute position embedding inside the compression window is:

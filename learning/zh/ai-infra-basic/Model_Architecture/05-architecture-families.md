@@ -1,5 +1,89 @@
 # 主流大模型架构谱系：哪些模块发生了变化
 
+> English version: [LLM Architecture Families](../../../en/ai-infra-basic/Model_Architecture/05-architecture-families.md)
+
+## 阅读地图：不要从模型名字背架构
+
+模型名字会变，单层计算可以稳定地拆成四个问题：
+
+```mermaid
+flowchart LR
+    IN["输入表示<br/>X: [B,S,H]"] --> TM["Token Mixer<br/>跨 token 交换信息"]
+    TM --> R1["残差流<br/>[B,S,H]"]
+    R1 --> CM["Channel Mixer<br/>单 token 内变换通道"]
+    CM --> R2["残差流<br/>[B,S,H]"]
+    TM <-->|"跨步读取/写入"| ST[("Runtime State<br/>KV / latent / recurrent state")]
+    R2 --> IO["下一层或输出头"]
+```
+
+1. **输入/输出契约**：主残差流为什么通常始终是 `[B,S,H]`？
+2. **Token mixer**：一个 token 能读取哪些 token，又用什么运算读取？
+3. **Channel mixer**：Dense FFN、SwiGLU、MoE 如何改变最后一维？
+4. **Runtime state**：decode 到下一个 token 时，上一轮究竟留下了什么？
+
+本章不是模型名词表，而是一套还原架构的方法。遇到新模型时，只要能填写这四格，就能进一步判断缓存、并行、kernel 和 serving 调度需求。
+
+### 通用单层方程与 Shape 不变量
+
+以最常见的 Pre-Norm 串行残差为例：
+
+```text
+U = RMSNorm(X)                 [B,S,H]
+A, state' = TokenMixer(U,state) [B,S,H]
+R = X + A                     [B,S,H]
+V = RMSNorm(R)                [B,S,H]
+F = ChannelMixer(V)           [B,S,H]
+Y = R + F                     [B,S,H]
+```
+
+这里真正变化的是**中间张量**和**持久状态**，而不是残差流的外形。例如 SwiGLU 会暂时扩张到 `[B,S,I]`；MoE 会暂时把 token 展开成 `B×S×K` 条路由；Attention 会产生 `[B,N,Lq,Lkv]` 分数；SSM/KDA 会读写固定形状矩阵。所有分支最终必须投影回 `H`，才能和残差相加。
+
+### 用同一个教学配置观察不同家族
+
+```text
+B=2, S=1024, H=4096, L=32
+Nq=32, Nkv=8, D=128
+FFN I=11008
+MoE E=64, top-K=2, expert width Ie=1408
+```
+
+| 家族 | 最大的临时张量（逻辑形状） | 每层 decode 持久状态 | 状态是否随上下文增长 |
+|---|---|---|---|
+| Encoder-only | attention score `[2,32,1024,1024]` | 通常无 | 否 |
+| Encoder-Decoder | self score + cross score `[2,32,Stgt,Ssrc]` | decoder KV + encoder memory/KV | decoder 部分是 |
+| Dense/MoE Decoder | causal score `[2,32,1024,1024]` | KV `[B,S,Nkv,D] × 2` | 是 |
+| MLA Decoder | latent attention score `[2,32,1024,1024]` | `Ckv [B,S,Dc] + Krope [B,S,Dr]` | 是，但每 token 更窄 |
+| SSM/KDA | scan/chunk 临时量 | 固定形状 recurrent state + conv tail | 否 |
+| Hybrid | 取决于当前 layer 类型 | KV 与 recurrent state 的并集 | 部分层是 |
+
+注意：score 矩阵在训练/朴素实现里可按上述逻辑理解；FlashAttention 类 kernel 会分块计算 softmax，不会把完整 `[S,S]` 矩阵写回 HBM。
+
+### Decoder-only 的端到端主路径
+
+```mermaid
+flowchart TD
+    IDS["token_ids [B,S]"] --> EMB["Embedding lookup<br/>[V,H] -> [B,S,H]"]
+    EMB --> LAYER["重复 L 次 Decoder Layer"]
+    LAYER --> N1["RMSNorm [B,S,H]"]
+    N1 --> MIX{"Token mixer 类型"}
+    MIX -->|MHA/GQA| KV["投影 Q/K/V；KV 写 cache"]
+    MIX -->|MLA/DSA/CSA| LAT["latent/检索/压缩状态"]
+    MIX -->|SSM/KDA| REC["递归更新 state"]
+    KV --> ADD1["Residual Add [B,S,H]"]
+    LAT --> ADD1
+    REC --> ADD1
+    ADD1 --> N2["RMSNorm [B,S,H]"]
+    N2 --> CH{"Channel mixer 类型"}
+    CH -->|Dense| FFN["[B,S,H] -> [B,S,I] -> [B,S,H]"]
+    CH -->|MoE| MOE["route [B,S,E]<br/>dispatch B*S*K routes<br/>combine [B,S,H]"]
+    FFN --> ADD2["Residual Add [B,S,H]"]
+    MOE --> ADD2
+    ADD2 --> LAYER
+    LAYER --> FINAL["Final Norm + LM Head<br/>[B,S,H] -> [B,S,V]"]
+```
+
+Prefill 把 `S` 个位置一起送入该图；decode 只送 `[B,1,H]`，但 token mixer 会读取之前持久化的历史状态。这正是同一个模型在两个阶段性能特征完全不同的原因。
+
 ## 1. 统一分析框架
 
 大模型名称很多，但主体结构可以沿三个维度分析：

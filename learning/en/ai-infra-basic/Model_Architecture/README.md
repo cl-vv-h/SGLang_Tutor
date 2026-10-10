@@ -11,12 +11,12 @@ This topic independently explains the computational structure of large language 
 | [01-decoder-only-transformer.md](./01-decoder-only-transformer.md) | Decoder-only Transformer: the complete backbone from tokens to logits, residual structure, and inference dataflow |
 | [02-gqa-attention-shapes.md](./02-gqa-attention-shapes.md) | MHA/MQA/GQA, QKV projection, QK Norm, RoPE, causal Attention, and KV Cache |
 | [03-sparse-moe-routing.md](./03-sparse-moe-routing.md) | Router, Top-K, Dispatch, SwiGLU Expert, Combine, and Expert Parallel |
-| [04-multi-head-latent-attention.md](./04-multi-head-latent-attention.md) | MLA's low-rank compression, decoupled RoPE, absorption matrices, and compressed KV Cache principles |
-| [05-architecture-families.md](./05-architecture-families.md) | Structural comparison of Encoder, Encoder-Decoder, Dense Decoder, MoE, MLA+MoE, and SSM Hybrid |
-| [06-efficient-attention-landscape.md](./06-efficient-attention-landscape.md) | Unified map of MHA/GQA/MLA, SWA/NSA/DSA/CSA/HCA, GDN/KDA, and kernel-level optimization |
-| [07-deepseek-sparse-attention.md](./07-deepseek-sparse-attention.md) | DSA indexer, token-level top-k, MLA sparse core, cache mapping, training, and Ascend execution path |
-| [08-compressed-sparse-attention.md](./08-compressed-sparse-attention.md) | CSA overlapping compression, compressed retrieval, HCA, local SWA, heterogeneous cache, and NPU adaptation |
-| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | KDA's per-key-channel decay, delta recurrence, chunk prefill, fused decode, and mutable serving state |
+| [04-multi-head-latent-attention.md](./04-multi-head-latent-attention.md) | Derives MLA low-rank compression, decoupled RoPE, K/V matrix absorption, cache bytes, and every tensor from one complete decode step |
+| [05-architecture-families.md](./05-architecture-families.md) | Reconstructs Encoder, Decoder, MoE, MLA, SSM, hybrid, and multimodal architectures as Token Mixer + Channel Mixer + Runtime State |
+| [06-efficient-attention-landscape.md](./06-efficient-attention-landscape.md) | Compares MHA/GQA/MLA, SWA/DSA/CSA/HCA, and GDN/KDA along four independent axes: cache width, visited positions, recurrent state, and kernel execution |
+| [07-deepseek-sparse-attention.md](./07-deepseek-sparse-attention.md) | Separates indexer and main-attention scores, then traces top-k, paged-address translation, sparse MLA, and training tensor by tensor |
+| [08-compressed-sparse-attention.md](./08-compressed-sparse-attention.md) | Uses timelines and numerical examples for CSA overlap compression, HCA, local SWA, entry readiness, heterogeneous caches, and NPU adaptation |
+| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | Derives KDA decay and delta rule as rewritable key-value memory, including convolution, chunk prefill, fused decode, and serving state |
 
 ## Unified Notation
 
@@ -47,8 +47,8 @@ Standard Multi-Head Attention typically satisfies `H=Nq*D`; GQA satisfies `Nq>Nk
 
 1. Start with Decoder-only Transformer to establish the `token -> hidden states -> logits` main path.
 2. Unfold Attention, understanding how tokens exchange information and the space costs of MHA, GQA, and KV Cache.
-3. Use the efficient-attention landscape to separate head sharing, feature compression, sequence sparsity/compression, recurrence, and kernel tiling.
-4. Study MLA first, then DSA and CSA/HCA, following the evolution from latent cache to token sparsity and compressed sparsity.
-5. Study GDN and KDA together to understand fixed-size recurrent state, chunk prefill, and fused decode.
-6. Unfold Sparse MoE, understanding how parameters are sparsely activated per token via Top-K routing.
-7. Compare architecture families to understand design choices of mainstream open-source models.
+3. From chapter 04 onward, begin with each chapter's reading map and running example; they define the global dataflow and shared shape coordinates for the later equations.
+4. Study MLA, then DSA and CSA/HCA, following “compress each position → select token positions → compress the sequence before selection.”
+5. Study KDA next and contrast token-addressable history with history folded into a fixed matrix.
+6. Return to the efficient-attention landscape and compare cache width, visited positions, state growth, and kernel execution across techniques.
+7. Study Sparse MoE, then use architecture families to reassemble Token Mixer, Channel Mixer, and Runtime State into complete models.

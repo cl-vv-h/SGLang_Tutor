@@ -1,5 +1,89 @@
 # Multi-head Latent Attention: Low-Rank Compression & Decoupled RoPE
 
+> 中文版：[Multi-head Latent Attention](../../../zh/ai-infra-basic/Model_Architecture/04-multi-head-latent-attention.md)
+
+## Reading Map: Build the Whole Mental Model First
+
+MLA is easy to lose inside a forest of projection matrices. Start with only two ideas:
+
+1. **Compress on cache write**: instead of writing `N` complete K/V pairs for every historical token, write one shared content latent `c^{KV}` and one shared RoPE key;
+2. **Change coordinates on cache read**: during decode, do not expand every historical latent back to complete K/V. Transform the current query and output projection into latent coordinates and read the compressed cache directly.
+
+```mermaid
+flowchart LR
+    X["Layer input X<br/>[B,Lq,H]"] --> DQ["Query down projection<br/>[B,Lq,Dcq]"]
+    DQ --> UQ["Query up projection and split"]
+    UQ --> QC["Content query qC<br/>[B,Lq,N,Dh]"]
+    UQ --> QR["Positional query qR<br/>[B,Lq,N,Dr]"]
+    X --> DKV["KV down projection"]
+    DKV --> CKV["Content latent cKV<br/>[B,Lq,Dc]"]
+    DKV --> KR["Shared positional key kR<br/>[B,Lq,Dr]"]
+    CKV --> CACHE[("Paged MLA cache<br/>historical cKV and kR")]
+    KR --> CACHE
+    QC --> ABSORB["Absorb K projection<br/>qC · WUK^T"]
+    ABSORB --> SCORE["Content score: latent dot product"]
+    QR --> ROPE["Positional dot product after RoPE"]
+    CACHE --> SCORE
+    CACHE --> ROPE
+    SCORE --> ADD["Add, scale, and mask"]
+    ROPE --> ADD
+    ADD --> SM["Softmax weights p<br/>[B,N,Lq,Lkv]"]
+    SM --> LATOUT["Weighted latent first<br/>[B,Lq,N,Dc]"]
+    CACHE --> LATOUT
+    LATOUT --> OABSORB["Absorbed V/output projection"]
+    OABSORB --> Y["Layer output<br/>[B,Lq,H]"]
+```
+
+The diagram contains two timelines. `X -> CKV/KR -> Cache` **writes the current token**; `Cache -> Score/LatOut` **reads historical tokens**. In prefill, `Lq=Lkv=S`; in decode, usually `Lq=1` and `Lkv=S_past+1`.
+
+### Running Shape Example
+
+The rest of the chapter uses this teaching configuration. It is chosen to make shapes concrete, not to prescribe every model:
+
+```text
+B=2, S=4096, H=4096
+N=32, Dc=512, Dcq=1536
+Dh=128, Dr=64, Dv=128
+dtype=BF16/FP16 (2 bytes per element)
+```
+
+Axes are fixed throughout: `B` batch size, `S/Lkv` history length, `Lq` query length of this call, `N` query heads, and `H` hidden size. `[B,S,N,D]` in the exposition and `[B,N,S,D]` in many kernels differ only by layout; their mathematical meaning is identical.
+
+Standard MHA caches per token per layer:
+
+```text
+N × (Dh + Dv) = 32 × (128 + 128) = 8192 elements
+8192 × 2 bytes = 16384 bytes = 16 KiB
+```
+
+MLA caches per token per layer:
+
+```text
+Dc + Dr = 512 + 64 = 576 elements
+576 × 2 bytes = 1152 bytes = 1.125 KiB
+```
+
+The **logical KV payload** is therefore about `8192 / 576 = 14.22×` smaller in this example. Real allocations also contain page alignment, block tables, quantization scales, and allocator metadata.
+
+### One Decode Step, End to End
+
+Assume `4095` tokens already exist and token `4096` is appended:
+
+| Stage | Input shape | Operation | Output shape | Persistent? |
+|---|---:|---|---:|---|
+| Layer input | `[2,1,4096]` | Previous sublayer/RMSNorm | `[2,1,4096]` | No |
+| KV write | `[2,1,4096]` | `W_DKV_R` | `Ckv [2,1,512]`, `Krope [2,1,64]` | Yes |
+| Q compression | `[2,1,4096]` | `W_DQ` | `Cq [2,1,1536]` | No |
+| Q expansion | `[2,1,1536]` | `W_UQ` + split | `Qc [2,1,32,128]`, `Qr [2,1,32,64]` | No |
+| History view | Block table | gather/page view | `Ckv_hist [2,4096,512]`, `Kr_hist [2,4096,64]` | Already cached |
+| Content score | `Qc,Ckv_hist` | absorbed latent dot product | `[2,32,1,4096]` | No |
+| Position score | `RoPE(Qr),RoPE(Kr)` | dot product after head broadcast | `[2,32,1,4096]` | No |
+| Probabilities | both score terms | scale + causal mask + softmax | `[2,32,1,4096]` | No |
+| Latent reduction | probabilities, `Ckv_hist` | weighted sum over history | `[2,1,32,512]` | No |
+| Output | latent reduction | absorbed V/O transform and head merge | `[2,1,4096]` | No |
+
+This table is the ledger behind every later equation. If an implementation step cannot be found as an explicit operation, a layout transform, matrix absorption, or fused kernel has usually hidden it—the mathematical step has not vanished.
+
 ## 1. The Problem MLA Solves
 
 Standard Multi-Head Attention stores complete K and V for every historical token, every layer:

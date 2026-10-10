@@ -1,5 +1,87 @@
 # Kimi Delta Attention (KDA): Fine-Grained Gating for Linear Attention
 
+> 中文版：[Kimi Delta Attention](../../../zh/ai-infra-basic/Model_Architecture/09-kimi-delta-attention.md)
+
+## Reading Map: Treat the State Matrix as Rewritable Key-Value Memory
+
+Softmax attention retains every historical `(k_s,v_s)` and compares them at query time. KDA instead writes history into a matrix `M`. For one head:
+
+```text
+M: [Dv,Dk]
+write: v outer k -> [Dv,1] @ [1,Dk] = [Dv,Dk]
+read:  M @ q     -> [Dv,Dk] @ [Dk]   = [Dv]
+```
+
+The outer product `v k^T` intuitively says, “when a query points near `k`, retrieve `v`.” Key directions from different tokens overlap, so naive addition accumulates conflicts. The delta rule first reads the old prediction `v_hat=Mk` and writes only the error `v-v_hat`. KDA additionally lets each key channel forget at its own `alpha[c]` rate before the write.
+
+```mermaid
+flowchart LR
+    X["Layer input X<br/>[T,Hmodel]"] --> PROJ["Fused/factored projections"]
+    PROJ --> QKV["q,k [T,Hk,Dk]<br/>v [T,Hk,Dv]"]
+    PROJ --> GATE["a [T,Hk,Dk]<br/>beta [T,Hk]<br/>z [T,Hk,Dv]"]
+    QKV --> CONV["Short causal convolution<br/>exact local order"]
+    CS[("conv_state<br/>[slots,Cqkv,C-1]")] <--> CONV
+    CONV --> NORM["Q/K normalization"]
+    GATE --> REC["KDA recurrent core<br/>decay→predict→delta→read"]
+    NORM --> REC
+    MS[("matrix state M<br/>[slots,Hk,Dv,Dk]")] <--> REC
+    REC --> CORE["Ocore [T,Hk,Dv]"]
+    GATE --> OG["Output gate + normalization"]
+    CORE --> OG
+    OG --> FLAT["[T,Hk*Dv]"]
+    FLAT --> OUT["Output projection<br/>[T,Hmodel]"]
+```
+
+### Four Operations on the Same State
+
+For every request, layer, and head, the order is exact:
+
+```text
+1. Forget: M_decay[:,c] = alpha[c] * M_prev[:,c]
+2. Predict: v_hat = M_decay @ k
+3. Correct: M_new = M_decay + beta * (v-v_hat) outer k
+4. Read:    o = M_new @ (q/sqrt(Dk))
+```
+
+Changing the order changes the function. For example, predicting with `M_prev @ k` instead of `M_decay @ k` uses memory before forgetting to determine the correction; that is not an equivalent optimization.
+
+### Running Shape Example
+
+```text
+B=8, and T=B=8 during decode
+Hmodel=4096, Hk=16, Dk=128, Dv=128
+short-convolution width C=4
+```
+
+| Stage | Tensor | Shape | Persists across steps? |
+|---|---|---:|---|
+| Input | `X` | `[8,4096]` | No |
+| Q/K | `q,k` | `[8,16,128]` | No |
+| V/output gate | `v,z` | `[8,16,128]` | No |
+| Forget gate | `alpha` | `[8,16,128]` | No |
+| Write gate | `beta` | `[8,16]` | No |
+| Convolution tail | `conv_state` | `[slots,16*(128+128+128),3]` | **Yes** |
+| Recurrent matrix | `M` | `[slots,16,128,128]` | **Yes** |
+| Core output | `Ocore` | `[8,16,128]` | No |
+| Layer output | `O` | `[8,4096]` | No |
+
+`slots` is state-pool capacity, not batch size. `cache_indices [8]` maps row `b` of this decode step to a request slot. Batch rows change under continuous batching, while slot identity must remain stable.
+
+### Why Prefill and Decode Need Different Programs
+
+```mermaid
+flowchart TD
+    P["Prefill: many tokens per request"] --> CH["Split into chunks of Cchunk tokens"]
+    CH --> MAT["Rearrange within-chunk work into parallel matrix operations"]
+    MAT --> BD["Carry M_in -> M_out across chunk boundaries"]
+    D["Decode: one new token per request"] --> SLOT["Locate request state through cache_indices"]
+    SLOT --> FUSE["One fused kernel<br/>read M once, write M once"]
+    BD --> SAME["Both paths must match token-wise reference<br/>for outputs and final state"]
+    FUSE --> SAME
+```
+
+Prefill avoids one tiny kernel per token without breaking causal recurrence; decode avoids repeatedly reading and writing the full `M`. Output comparison alone is insufficient: final `M` and `conv_state` must also match because they determine the next token.
+
 Kimi Delta Attention (KDA) is the recurrent linear-attention component of Kimi Linear. It extends Gated DeltaNet (GDN) with a **per-key-channel forget gate**.
 
 That one change is operationally important:
