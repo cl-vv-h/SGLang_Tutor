@@ -1,5 +1,7 @@
 # Parallel Strategy Tutorial
 
+DP in this tutorial means complete-model data-parallel replicas. SGLang's `--enable-dp-attention` uses different attention and FFN/MoE layouts within one model world; see [DP Attention principles](./01-dp-attention-principles.md) and the [source walkthrough](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md).
+
 ## 1. Why Parallelism in LLM Inference
 
 Modern LLMs (70B+ parameters in BF16) need ~140GB+ of memory just to store weights — more than a single GPU. Even when a model fits, parallelism improves throughput by distributing the workload.

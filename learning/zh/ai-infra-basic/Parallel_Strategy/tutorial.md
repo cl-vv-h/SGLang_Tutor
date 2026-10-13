@@ -1,5 +1,7 @@
 # 大模型推理并行策略整理：DP / TP / PP / SP / EP
 
+本讲义的 DP 指完整模型副本的数据并行。SGLang 的 `--enable-dp-attention` 会在同一模型 world 内采用不同的 Attention 与 FFN/MoE 布局，请另读 [DP Attention 原理](./01-dp-attention-principles.md)和 [源码走读](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md)。
+
 常见并行策略包括：
 
 | 缩写 | 名称 | 中文名 | 切分对象 | 主要解决问题 | 典型通信方式 |

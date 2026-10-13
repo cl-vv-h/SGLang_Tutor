@@ -19,6 +19,8 @@ This topic covers the parallelization strategies used in LLM inference: Data Par
 | File | Content |
 |---|---|
 | [tutorial.md](./tutorial.md) | Comprehensive parallel strategy tutorial |
+| [01-dp-attention-principles.md](./01-dp-attention-principles.md) | DP Attention: request ownership, attention subgroups, FFN/MoE layouts, partial/replicated values, padding, IDLE, and KV ownership |
+| [dp_attention_layout_demo.py](./dp_attention_layout_demo.py) | Standard-library CPU simulator for SUM_LEN/MAX_LEN gathering, replica deduplication, and reduce-scatter output returns |
 | [dp_inference_demo.py](./dp_inference_demo.py) | Data Parallelism demo |
 | [tp_inference_demo.py](./tp_inference_demo.py) | Tensor Parallelism demo |
 | [pp_inference_demo.py](./pp_inference_demo.py) | Pipeline Parallelism demo |
@@ -26,6 +28,8 @@ This topic covers the parallelization strategies used in LLM inference: Data Par
 | [ep_moe_demo.py](./ep_moe_demo.py) | Expert Parallelism demo for MoE |
 
 ## SGLang Integration
+
+For `--enable-dp-attention`, read [DP Attention principles](./01-dp-attention-principles.md), run the layout simulator, then follow the [end-to-end source walkthrough](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md). DP Attention combines request parallelism, attention TP, and FFN/MoE parallelism inside one model world. Its device count and communication differ from ordinary complete-model DP replicas.
 
 - TP/PP ranks are initialized in `ParallelState` during `Scheduler.__init__`
 - Communication backends (NCCL/HCCL) selected based on device type

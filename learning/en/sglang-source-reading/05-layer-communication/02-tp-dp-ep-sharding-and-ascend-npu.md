@@ -1,5 +1,7 @@
 # How TP, DP, and EP Are Actually Sharded: From Rank Topology to Ascend NPU Execution
 
+For complete DP Attention rounds, padding, IDLE participation, partial/replicated gathering, and LM-head boundaries, see the [DP Attention source walkthrough](./03-dp-attention-code-walkthrough.md) and [principles chapter](../../ai-infra-basic/Parallel_Strategy/01-dp-attention-principles.md).
+
 [简体中文](../../../zh/sglang-source-reading/05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md) | **English**
 
 This chapter answers a question that is easily hidden behind the phrase "parallel strategy":

@@ -1,5 +1,7 @@
 # TP、DP、EP 如何真正完成切分：从 rank 拓扑到 Ascend NPU 执行
 
+DP Attention 的完整执行轮次、padding、IDLE、partial/replica gather 和 LM Head 边界见 [DP Attention 源码走读](./03-dp-attention-code-walkthrough.md)，数学与布局见 [原理篇](../../ai-infra-basic/Parallel_Strategy/01-dp-attention-principles.md)。
+
 [English](../../../en/sglang-source-reading/05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md) | **简体中文**
 
 这一讲回答一个容易被“并行策略”四个字掩盖的问题：
