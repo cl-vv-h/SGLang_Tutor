@@ -87,3 +87,7 @@ checksum / completion marker
 2. 估算一个 8k prompt 的 KV transfer 数据量。
 3. 画出请求取消发生在 KV transfer 中途时，需要清理哪些状态。
 4. 比较同机 GPU 间传输和跨节点传输的瓶颈差异。
+
+## 通信实现延伸
+
+参见 [Mooncake、NIXL 与 Ascend TransferEngine](../Communication/05-kv-transfer-mooncake-and-nixl.md)，学习 TE/Store/EP 的区别、KV 字节量估算、注册内存和请求完成协议；底层知识见 [链路与 RDMA](../Communication/02-links-rdma-and-memory.md)。

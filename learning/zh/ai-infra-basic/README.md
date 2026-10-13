@@ -2,7 +2,7 @@
 
 **简体中文** | [English](../../en/ai-infra-basic/README.md)
 
-这个目录用于补齐阅读 SGLang 源码前后的基础知识。它不直接复刻生产级实现，而是用讲义和小型 Python demo 拆开 LLM serving 中最常见的机制：模型结构、推理流程、调度、KV Cache、attention kernel、执行图、Mamba/SSM、GDN/线性注意力、并行、KV 传输、投机解码、量化、LoRA 和 benchmark/profiling。
+这个目录用于补齐阅读 SGLang 源码前后的基础知识。它不直接复刻生产级实现，而是用讲义和小型 Python demo 拆开 LLM serving 中最常见的机制：模型结构、推理流程、调度、KV Cache、attention kernel、执行图、Mamba/SSM、GDN/线性注意力、并行、通信、KV 传输、投机解码、量化、LoRA 和 benchmark/profiling。
 
 ## 目录结构
 
@@ -17,11 +17,12 @@
 | 7 | [Mamba_State_Space](./Mamba_State_Space/) | Mamba/SSM 原理、Mamba state、MambaPool、scheduler strategy 和 radix cache 状态 | [01-mamba-and-sglang-state.md](./Mamba_State_Space/01-mamba-and-sglang-state.md) |
 | 8 | [Gated_Delta_Network](./Gated_Delta_Network/) | Gated DeltaNet/GDN 数学、可训练参数、recurrent state、prefill/decode shape 与 serving 状态管理 | [README.md](./Gated_Delta_Network/README.md) |
 | 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP、TP、PP、SP/CP、EP 与 DP Attention 的请求/张量布局、通信和 CPU 模拟 | [README.md](./Parallel_Strategy/README.md)、[DP Attention 原理](./Parallel_Strategy/01-dp-attention-principles.md) |
-| 10 | [KV_Transfer](./KV_Transfer/) | PD 分离、KV sender/receiver、远程 KV cache | [README.md](./KV_Transfer/README.md) |
-| 11 | [Speculative_Decoding](./Speculative_Decoding/) | 投机采样数学、target verify、KV 提交、EAGLE/MTP/NGRAM/Medusa/REST，以及 DSpark 半自回归与置信度调度 | [README.md](./Speculative_Decoding/README.md) |
-| 12 | [Quantization](./Quantization/) | 量化数学、W/A/C 位宽命名、packed W4、FP8/MXFP8、GPTQ/AWQ、KV quant 与 serving kernel | [README.md](./Quantization/README.md) |
-| 13 | [LoRA](./LoRA/) | LoRA、QLoRA、DoRA、AdaLoRA 和多 LoRA serving | [README.md](./LoRA/README.md) |
-| 14 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS、压测、profiling、瓶颈定位 | [README.md](./Benchmark_Profiling/README.md) |
+| 10 | [Communication](./Communication/) | 通信原语、RDMA、Gloo/NCCL/HCCL、DeepEP/ZBAL、Mooncake/NIXL 与性能排查 | [README.md](./Communication/README.md) |
+| 11 | [KV_Transfer](./KV_Transfer/) | PD 分离、KV sender/receiver、远程 KV cache | [README.md](./KV_Transfer/README.md) |
+| 12 | [Speculative_Decoding](./Speculative_Decoding/) | 投机采样数学、target verify、KV 提交、EAGLE/MTP/NGRAM/Medusa/REST，以及 DSpark 半自回归与置信度调度 | [README.md](./Speculative_Decoding/README.md) |
+| 13 | [Quantization](./Quantization/) | 量化数学、W/A/C 位宽命名、packed W4、FP8/MXFP8、GPTQ/AWQ、KV quant 与 serving kernel | [README.md](./Quantization/README.md) |
+| 14 | [LoRA](./LoRA/) | LoRA、QLoRA、DoRA、AdaLoRA 和多 LoRA serving | [README.md](./LoRA/README.md) |
+| 15 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS、压测、profiling、瓶颈定位 | [README.md](./Benchmark_Profiling/README.md) |
 
 ## 建议学习路线
 
@@ -30,6 +31,8 @@
 3. 然后读 [Execution_Graph](./Execution_Graph/)、[Mamba_State_Space](./Mamba_State_Space/) 和 [Gated_Delta_Network](./Gated_Delta_Network/)，理解生产推理如何减少 CPU overhead，并管理非 Transformer 的 recurrent/linear-attention 状态。
 4. 再读 [Parallel_Strategy](./Parallel_Strategy/)、[KV_Transfer](./KV_Transfer/) 和 [Speculative_Decoding](./Speculative_Decoding/)，理解高阶 serving 优化如何围绕“更快拿到 token”和“更好使用不同资源”展开。
 5. 最后读 [Quantization](./Quantization/)、[LoRA](./LoRA/) 和 [Benchmark_Profiling](./Benchmark_Profiling/)，把模型压缩、adapter serving 和性能验证闭环串起来。
+
+通信基础建议在并行策略之后学习：[Communication](./Communication/README.md) 将 TP collective、EP token 路由和 PD/KV 传输串成一条学习路线。
 
 ## 与 SGLang 源码阅读的关系
 
@@ -42,6 +45,7 @@
 - `Mamba_State_Space` 对应 Mamba/SSM layer、Mamba state pool、mamba scheduler strategy、Mamba radix cache 和 state transfer。
 - `Gated_Delta_Network` 对应 Qwen3-Next GDN/linear attention layer、`q/k/v/z/a/b` 投影、GDN recurrent state、chunk prefill、packed decode 和 target verify 临时状态。
 - `Parallel_Strategy` 对应 TP/PP/DP/EP rank 组织、通信模式和多进程执行；DP Attention 专题进一步连接 Scheduler 同步、LayerCommunicator、MoE、Graph 与 LM Head。
+- `Communication` 对应 ProcessGroup、设备 communicator、MoE dispatcher、transfer engine 与通信性能测量。
 - `KV_Transfer` 对应 PD disaggregation、bootstrap、prealloc、KV sender/receiver 和 transfer backend。
 - `Speculative_Decoding` 对应 draft worker、target verify、`spec_info`、DSpark confidence/ragged verify、accept token 和 grammar/sampling 后处理。
 - `Quantization` 对应 weight loader、quant method、kernel 选择、FP8/W8A8/GPTQ/AWQ 等执行路径。

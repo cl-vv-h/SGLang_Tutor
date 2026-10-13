@@ -25,3 +25,7 @@ Instead of running prefill and decode on the same GPU, disaggregated serving ass
 - `disaggregation_mode` determines worker role (NULL/PREFILL/DECODE)
 - `AscendTransferEngine` handles Ascend NPU-specific KV transfer
 - Bootstrap/prealloc queues manage the lifecycle of disaggregated requests
+
+## Transfer Implementations
+
+Read [Mooncake, NIXL, and Ascend TransferEngine](../Communication/05-kv-transfer-mooncake-and-nixl.md) for TE/Store/EP boundaries, KV byte estimates, registered memory, and request-completion protocols. See [links and RDMA](../Communication/02-links-rdma-and-memory.md) for lower-level foundations.

@@ -35,3 +35,7 @@ For `--enable-dp-attention`, read [DP Attention principles](./01-dp-attention-pr
 - Communication backends (NCCL/HCCL) selected based on device type
 - `LayerCommunicator` abstracts TP/EP/CP communication patterns
 - EP uses `deep_ep::Buffer` for dispatch/combine in MoE layers
+
+## Communication Foundations
+
+After sharding strategies, read [Communication](../Communication/README.md): tensor semantics for AllReduce/AllGather/ReduceScatter/AllToAllV, followed by Gloo, NCCL, HCCL, DeepEP, and ZBAL implementation boundaries.

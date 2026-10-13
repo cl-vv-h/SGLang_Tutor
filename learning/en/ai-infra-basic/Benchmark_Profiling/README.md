@@ -27,3 +27,7 @@ Performance benchmarking and profiling for LLM serving: TTFT, ITL, TPS metrics, 
 - `ProfilerManager._profile_batch_predicate()` triggers profiling for selected batches
 - `forward_ct` counter used for profiling iteration tracking
 - Benchmark scripts available for standard workloads
+
+## Communication Measurement
+
+[Communication paths and performance diagnosis](../Communication/06-sglang-paths-and-performance.md) covers collective/EP/KV timing boundaries, algorithm/bus bandwidth, slow-rank and overlap diagnosis, and an experiment-record template.

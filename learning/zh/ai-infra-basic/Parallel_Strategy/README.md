@@ -31,3 +31,7 @@
 - SP/CP 主要服务长上下文，和 KV Cache、attention backend、decode 阶段显存压力关系很强。
 - 实际 serving 通常会组合多种策略，例如 TP + DP、TP + EP 或 PD disaggregation + TP。
 - DP Attention 在同一个模型 world 内组合请求并行、Attention TP 和 FFN/MoE 并行；与普通 DP 的完整模型副本模式不同，`tp_size=4,dp_size=2` 的计算设备数也可能不同。
+
+## 通信基础延伸
+
+读完切分策略后，继续学习 [Communication](../Communication/README.md)：从 AllReduce/AllGather/ReduceScatter/AllToAllV 的张量语义，到 Gloo、NCCL、HCCL、DeepEP 和 ZBAL 的实现边界。

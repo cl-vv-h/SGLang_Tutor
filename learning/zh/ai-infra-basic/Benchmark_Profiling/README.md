@@ -85,3 +85,7 @@ GPU 指标:
 2. 解释为什么平均延迟可能掩盖线上问题。
 3. 遇到 TTFT 高但 ITL 正常时，你会先看哪些指标。
 4. 遇到 GPU 利用率低但请求很多时，你会怀疑哪些环节。
+
+## 通信专项测量
+
+[通信路径与性能排查](../Communication/06-sglang-paths-and-performance.md)补充 collective/EP/KV 的测量边界、algorithm/bus bandwidth、慢 rank 和 overlap 排查，以及实验记录模板。

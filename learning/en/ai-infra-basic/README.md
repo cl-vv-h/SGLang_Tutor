@@ -2,7 +2,7 @@
 
 [简体中文](../../zh/ai-infra-basic/README.md) | **English**
 
-This directory supplements the foundational knowledge needed before and during SGLang source code reading. It doesn't replicate production-grade implementations directly, but instead breaks down the most common mechanisms in LLM serving through lecture notes and small Python demos: model architecture, inference flow, scheduling, KV Cache, attention kernels, execution graphs, Mamba/SSM, GDN/linear attention, parallelism, KV transfer, speculative decoding, quantization, LoRA, and benchmark/profiling.
+This directory supplements the foundational knowledge needed before and during SGLang source code reading. It doesn't replicate production-grade implementations directly, but instead breaks down the most common mechanisms in LLM serving through lecture notes and small Python demos: model architecture, inference flow, scheduling, KV Cache, attention kernels, execution graphs, Mamba/SSM, GDN/linear attention, parallelism, communication, KV transfer, speculative decoding, quantization, LoRA, and benchmark/profiling.
 
 ## Directory Structure
 
@@ -17,11 +17,12 @@ This directory supplements the foundational knowledge needed before and during S
 | 7 | [Mamba_State_Space](./Mamba_State_Space/) | Mamba/SSM principles, Mamba state, MambaPool, scheduler strategy, and radix cache states | [01-mamba-and-sglang-state.md](./Mamba_State_Space/01-mamba-and-sglang-state.md) |
 | 8 | [Gated_Delta_Network](./Gated_Delta_Network/) | Gated DeltaNet/GDN math, trainable parameters, recurrent state, prefill/decode shapes, and serving state management | [README.md](./Gated_Delta_Network/README.md) |
 | 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP, TP, PP, SP/CP, EP, and DP Attention request/tensor layouts, communication, and CPU simulation | [README.md](./Parallel_Strategy/README.md), [DP Attention principles](./Parallel_Strategy/01-dp-attention-principles.md) |
-| 10 | [KV_Transfer](./KV_Transfer/) | PD disaggregation, KV sender/receiver, remote KV cache | [README.md](./KV_Transfer/README.md) |
-| 11 | [Speculative_Decoding](./Speculative_Decoding/) | Speculative sampling math, target verify, KV commit, EAGLE/MTP/NGRAM/Medusa/REST, and DSpark semi-autoregression with confidence scheduling | [README.md](./Speculative_Decoding/README.md) |
-| 12 | [Quantization](./Quantization/) | Weight-only, W8A8/FP8, KV quant, calibration and error | [README.md](./Quantization/README.md) |
-| 13 | [LoRA](./LoRA/) | LoRA, QLoRA, DoRA, AdaLoRA and multi-LoRA serving | [README.md](./LoRA/README.md) |
-| 14 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS, load testing, profiling, bottleneck identification | [README.md](./Benchmark_Profiling/README.md) |
+| 10 | [Communication](./Communication/) | Primitives, RDMA, Gloo/NCCL/HCCL, DeepEP/ZBAL, Mooncake/NIXL, and performance diagnosis | [README.md](./Communication/README.md) |
+| 11 | [KV_Transfer](./KV_Transfer/) | PD disaggregation, KV sender/receiver, remote KV cache | [README.md](./KV_Transfer/README.md) |
+| 12 | [Speculative_Decoding](./Speculative_Decoding/) | Speculative sampling math, target verify, KV commit, EAGLE/MTP/NGRAM/Medusa/REST, and DSpark semi-autoregression with confidence scheduling | [README.md](./Speculative_Decoding/README.md) |
+| 13 | [Quantization](./Quantization/) | Weight-only, W8A8/FP8, KV quant, calibration and error | [README.md](./Quantization/README.md) |
+| 14 | [LoRA](./LoRA/) | LoRA, QLoRA, DoRA, AdaLoRA and multi-LoRA serving | [README.md](./LoRA/README.md) |
+| 15 | [Benchmark_Profiling](./Benchmark_Profiling/) | TTFT/ITL/TPS, load testing, profiling, bottleneck identification | [README.md](./Benchmark_Profiling/README.md) |
 
 ## Suggested Learning Path
 
@@ -30,6 +31,8 @@ This directory supplements the foundational knowledge needed before and during S
 3. Next, read [Execution_Graph](./Execution_Graph/), [Mamba_State_Space](./Mamba_State_Space/), [Gated_Delta_Network](./Gated_Delta_Network/), and [Parallel_Strategy](./Parallel_Strategy/) to understand how production inference reduces CPU overhead, manages non-Transformer states, handles linear-attention recurrent states, and scales to multiple GPUs.
 4. Then read [KV_Transfer](./KV_Transfer/) and [Speculative_Decoding](./Speculative_Decoding/) to understand how advanced serving optimizations revolve around "getting tokens faster" and "better utilizing different resources."
 5. Finally, read [Quantization](./Quantization/), [LoRA](./LoRA/), and [Benchmark_Profiling](./Benchmark_Profiling/) to close the loop on model compression, adapter serving, and performance validation.
+
+Read [Communication](./Communication/README.md) after parallel strategies to connect TP collectives, EP token routing, and PD/KV transfer into one learning path.
 
 ## Relationship to SGLang Source Code Reading
 
@@ -42,6 +45,7 @@ This directory supplements the foundational knowledge needed before and during S
 - `Mamba_State_Space` maps to Mamba/SSM layers, Mamba state pool, mamba scheduler strategy, Mamba radix cache, and state transfer.
 - `Gated_Delta_Network` maps to Qwen3-Next GDN/linear attention layers, `q/k/v/z/a/b` projections, GDN recurrent state, chunk prefill, packed decode, and temporary target-verify state.
 - `Parallel_Strategy` maps to TP/PP/DP/EP rank organization, communication patterns, and multi-process execution; DP Attention additionally connects Scheduler synchronization, LayerCommunicator, MoE, Graph, and LM head.
+- `Communication` maps to ProcessGroup, device communicators, MoE dispatchers, transfer engines, and communication measurement.
 - `KV_Transfer` maps to PD disaggregation, bootstrap, prealloc, KV sender/receiver, and transfer backend.
 - `Speculative_Decoding` maps to draft worker, target verify, `spec_info`, DSpark confidence/ragged verification, accept token, and grammar/sampling post-processing.
 - `Quantization` maps to weight loader, quant method, kernel selection, FP8/W8A8/GPTQ/AWQ execution paths.
