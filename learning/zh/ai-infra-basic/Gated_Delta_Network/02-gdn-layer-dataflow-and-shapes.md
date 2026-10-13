@@ -1,5 +1,7 @@
 # 02. GDN 层内数据流与 shape
 
+**简体中文** | [English](../../../en/ai-infra-basic/Gated_Delta_Network/02-gdn-layer-dataflow-and-shapes.md)
+
 ## 1. 符号约定
 
 这一讲用下面的符号描述 GDN 层。它们对应 Qwen3-Next/SGLang 实现中的字段。
@@ -15,6 +17,8 @@
 | `V` | `head_v_dim` | 每个 value head 的维度 |
 | `C` | `conv_kernel_size` | causal conv1d 的窗口大小 |
 | `R` | `HV / H` | 每个 key head 对应几个 value head |
+
+本文默认描述未做 tensor parallel（TP）切分的逻辑 shape。这里的分组要求 `HV` 是 `H` 的整数倍；实际单卡张量使用该 TP rank 的本地 head 数。
 
 Qwen3-Next 默认配置中常见：
 
@@ -54,7 +58,7 @@ hidden_states
 
 q/k/v -> causal conv1d -> GDN recurrent/chunk kernel -> core_attn_out
 z     -> output gate / RMSNormGated
-core_attn_out + z -> out_proj -> layer output
+RMSNormGated(core_attn_out, z) -> out_proj -> layer output
 ```
 
 ## 3. 输入投影：`in_proj_qkvz`
@@ -91,6 +95,30 @@ projected_states_qkvz: [T, 2*key_dim + 2*value_dim]
 | `z` | `[T,HV,V]` | output gate/norm 的 gate 输入 |
 
 其中 `z` 不进入 recurrent state update，它用于调制 GDN 输出。
+
+### 3.1 `z` 到底是什么？与 `g/beta` 有什么区别？
+
+`z` 是由当前层输入 `x_t` 投影得到的**输出门控激活**。从逻辑上看，`z_t = W_z x_t`；实现把 `W_z` 与 q/k/v 的投影融合进 `in_proj_qkvz`。`W_z` 是训练参数，`z_t` 是随 token 变化的中间张量，不是另一个 KV Cache，也不是 recurrent state。
+
+以本章 Qwen3-Next 默认的 SiLU/Swish 输出门为例，源码设置 `norm_before_gate=True`。对每个 token、每个 value head，先沿 `V` 维做 RMSNorm，再逐元素相乘：
+
+```text
+o = core_attn_out[t,h,:]                         # [V]
+z = z[t,h,:]                                    # [V]
+rms = sqrt(mean(o * o) + eps)                    # scalar
+normed[t,h,:] = (weight * o / rms) * silu(z)      # [V]
+silu(z) = z * sigmoid(z)
+```
+
+这里 `weight` 是长度为 `V` 的可训练 norm 权重，`*` 是逐元素乘法。`z` 的 shape 因而和输出相同，都是 `[T,HV,V]`。SiLU 门不是 `[0,1]` 的概率：它可以大于 1，也可以为负，不能把它当成 sigmoid 门或二值开关。若模型配置显式指定其他 `output_gate_type`，应以该配置为准。
+
+| 控制信号 | 每 token 的 shape | 控制什么 | 直接参与当前层 recurrent state 更新？ |
+|---|---|---|---|
+| `exp(g)` | `[HV]` | 旧状态保留多少 | 是 |
+| `beta` | `[HV]` | 当前预测残差写入多少 | 是 |
+| `silu(z)` | `[HV,V]` | 读出的各个 value 通道向后续网络传递多少 | 否 |
+
+因此，“记住一条信息”和“当前 token 是否把它输出”可以分开控制。例如某通道的 `z=0` 时，该通道输出被置零，但这不会清空本层状态中的对应记忆；后续 token 仍可以读取它。它也不是 `core_attn_out + z`：这里是**归一化后的乘法门控**，然后才接 `out_proj`。
 
 ## 4. 输入投影：`in_proj_ba`
 
@@ -177,6 +205,44 @@ conv_states: [num_slots, conv_dim, C-1] 或 backend 定义的等价布局
 
 prefill 时可以对整段序列一次做 causal conv；decode 时用 `causal_conv1d_update` 更新每个请求的 conv state。
 
+### 6.1 它具体算什么？为什么叫 causal？
+
+这里是沿 token 轴的 **depthwise 短卷积**：每个 q/k/v 通道有自己的长度为 `C` 的卷积核，不在卷积这一步混合不同通道。前面的线性投影已负责 hidden 通道之间的混合。令 `u` 表示卷积前的 `mixed_qkv`，`c` 表示其中一个通道，以滞后量编号卷积权重：
+
+```text
+y[t,c] = silu(sum(w[c,j] * u[t-j,c] for j in range(C)))
+
+C = 4:
+y[t,c] = silu(w[c,0]*u[t,c]   + w[c,1]*u[t-1,c]
+            + w[c,2]*u[t-2,c] + w[c,3]*u[t-3,c])
+```
+
+该式对应本章默认 SiLU、无 bias 的路径；存储中的卷积权重顺序由 kernel 决定。它只访问当前位置及过去 `C-1` 个位置，不读取未来 token，因此满足自回归因果性。新请求序列开头的缺失历史视作零，继续已有请求则读取该请求的 conv state。packed batch 必须按请求边界分别处理，不能把上一个请求的末尾当成下一个请求的历史。
+
+卷积与 SiLU 不改变 `[T,conv_dim]` 的 shape，但改变每个位置的特征。q/k 随后还会做 L2 normalization（可以融合在 GDN kernel 内）；这与输出端 RMSNorm 是不同步骤。`z/a/b` 不经过这里的短卷积。
+
+### 6.2 为什么引入它：局部顺序特征 + 长期关联记忆
+
+从计算机制看，不加卷积时，本层输入投影在每个 token 上独立计算；加上卷积后，进入状态读写的 q/k/v 显式依赖本层输入的最近几个位置。可以把它理解为两种互补能力：
+
+- **局部位置建模**：不同滞后量有不同权重，模型可以学到“前一个 token”和“前三个 token”的不同作用。例如窗口覆盖“not good”时，`good` 位置的特征可以包含前面的否定信息。这个例子说明可表达的能力，不表示某个卷积核一定学到了该规则。
+- **长期内容关联**：GDN 用固定大小的矩阵保存并更新 key→value 关联。短卷积先构造带局部上下文的查询、写入地址和内容，再交给矩阵记忆处理，减少其独自承担局部模式建模的负担。
+- **较低的额外成本**：固定 `C` 时，短卷积计算量为 `O(T * conv_dim * C)`，decode 只需保留每通道最近 `C-1` 个输入，与上下文长度无关。该成本是额外开销；引入卷积的主要目的在于建模质量。
+
+这是一种局部性与相对顺序的归纳偏置。即使没有短卷积，GDN 的顺序递归本身仍对顺序敏感，`hidden_states` 也可能已经包含前面层的上下文；不能说“不加卷积就完全不知道 token 顺序”。卷积也不等于 RoPE，更不是让 delta rule 数学上成立的必要条件。
+
+### 6.3 科学依据：机制解释之外还要看消融
+
+[Gated Delta Networks 论文 §3.3 与附录 A.2、表 S.1](https://arxiv.org/html/2412.06464v1#A1.SS2)给出了结构说明和移除组件的实验。表中模型为 400M 参数、使用相同 FineWeb-Edu 子集训练 15B tokens：
+
+| 设置 | Avg-PPL ↓ | Avg-Acc ↑ |
+|---|---:|---:|
+| 完整 Gated DeltaNet（head dim 128） | 27.35 | 47.26 |
+| 移除短卷积 | 28.95 | 46.16 |
+| 移除输出门 | 29.12 | 45.46 |
+
+这支持“在该实验设置下，短卷积和输出门有助于模型质量”，不构成对所有规模、数据集都必然有效的证明，也不是 Qwen3-Next 的消融结果。上一节是根据计算结构给出的机制解释；它不等于这些消融已单独验证了每一种解释。
+
 ## 7. conv 后 split 为 q/k/v
 
 conv 后再 split：
@@ -251,13 +317,65 @@ HV * V * K
 32 * 128 * 128 = 524288 elements
 ```
 
-如果用 BF16，约：
+如果用 BF16 存储：
 
 ```text
-524288 * 2 bytes = 1 MB per linear-attention layer per request slot
+524288 * 2 bytes = 1 MiB per linear-attention layer per request slot
 ```
 
-它看起来不小，但关键是它不随历史 token 数增长。
+这只是指定 dtype 的算例。本仓库 `mamba2_state_dtype()` 的 recurrent state 默认是 FP32，此时为 **2 MiB**；配置或环境变量可以覆盖它。以上只计算 recurrent state，不包含 conv state、额外缓存槽位和临时缓冲。它看起来不小，但关键是它不随历史 token 数增长。
+
+### 9.1 为什么没有再乘一个 q/k head 数 `H`？
+
+因为每个 value head **只对应一个** q/k head，不会与全部 `H` 个 q/k heads 两两组合。对 value head `h_v`，对应的 q/k head 是：
+
+```text
+R = HV // H
+h_k = h_v // R
+
+H = 16, HV = 32, R = 2:
+q/k head 0  -> value heads 0, 1   -> S[0], S[1]
+q/k head 1  -> value heads 2, 3   -> S[2], S[3]
+...
+q/k head 15 -> value heads 30, 31 -> S[30], S[31]
+```
+
+同组 value heads 共享 q/k 向量，但各有自己的 `v`、`g`、`beta` 和状态矩阵。比如 `S[0]` 与 `S[1]` 都使用 head 0 的 k 写入、q 读取，却不要求两个状态相同。这种分组通常称为 grouped-value attention；不要直接套用 softmax GQA 中多个 query heads 共享 K/V heads 的维度关系。
+
+把第 01 讲的单 head 公式补上 head 下标，就能直接看出 shape（q/k 已归一化，读取缩放单独写出）：
+
+```text
+q = query[t,h_k,:]                         # [K]
+k = key[t,h_k,:]                           # [K]
+v = value[t,h_v,:]                         # [V]
+S_decay = exp(g[t,h_v]) * S_prev[h_v]       # [V,K]
+r = v - S_decay @ k                        # [V]
+S_new[h_v] = S_decay + beta[t,h_v] * r[:,None] * k[None,:]
+o[t,h_v,:] = S_new[h_v] @ (q * scale)       # [V]
+```
+
+一个状态矩阵实现从 `K` 维 key/query 空间到 `V` 维 value 空间的映射，因此是 `[V,K]`；共有 `HV` 个这样的矩阵，所以整体是 `[HV,V,K]`。`q` 只用来读取，无须另存一份 query state。q/k 的维度已体现在 `K` 中，q/k 的 head 数则体现在分组关系里：
+
+```text
+[HV,V,K] == reshape([H,R,V,K])
+HV * V * K = H * R * V * K
+```
+
+所以 `H` 并没有被“漏算”；它已通过 `HV = H * R` 计入。再乘一次 `H`，相当于为不存在的所有 q/k-head × value-head 配对分配状态。即使 `H=HV`，也只有 `H` 个状态矩阵，而不是 `H*H` 个。
+
+### 9.2 对照 kernel 与 TP 下的显存计算
+
+本仓库的 [packed recurrent decode kernel](../../../../python/sglang/srt/layers/attention/fla/fused_recurrent.py) 直接使用：
+
+```python
+i_h = i_hv // (HV // H)
+```
+
+q/k 按 `i_h` 寻址，v 与 state 按 `i_hv` 寻址；state 中一个 head 的偏移是 `i_hv * V * K`。这就是上面分组推导在代码中的实现，不需要先物理复制 q/k 才能表达共享。
+
+在 head 数可整除的常规 attention TP 切分下，若 TP degree 为 `P`，每个 rank 的状态为 `[num_slots,HV/P,V,K]`。单请求单层的每卡字节数为 `(HV/P)*V*K*state_element_bytes`，跨 rank 合计仍为 `HV*V*K*state_element_bytes`。有 head padding 或特殊 backend 布局时，应以实际分配为准。
+
+另一个容易混淆的点是：**卷积状态仍直接包含 `H`**，其逻辑元素数为 `(2*H*K + HV*V)*(C-1)`。它保存短窗口的 q/k/v 投影；recurrent state 保存 key→value 的矩阵记忆，两者不是同一个缓存。
 
 ## 10. GDN kernel 输出
 
@@ -405,3 +523,12 @@ disable_state_update=True:
 3. `a/b` 生成 `g/beta`，控制状态遗忘和写入。
 4. `z` 不写入状态，而是在输出阶段调制 `core_attn_out`。
 5. GDN 状态是 `[num_slots,HV,V,K]`，按请求槽位保存，不随 token 数增长。
+
+## 16. 源码与论文核对入口
+
+- [Qwen3GatedDeltaNet](../../../../python/sglang/srt/models/qwen3_next.py)：投影、卷积权重、`norm_before_gate=True` 与输出路径。
+- [Gated RMSNorm](../../../../python/sglang/srt/layers/attention/fla/layernorm_gated.py)：RMSNorm 与 SiLU/Swish 输出门的计算顺序。
+- [GDN backend](../../../../python/sglang/srt/layers/attention/linear/gdn_backend.py)：按请求处理 causal conv，分发 prefill/decode。
+- [Fused recurrent kernel](../../../../python/sglang/srt/layers/attention/fla/fused_recurrent.py)：q/k head 映射、L2 normalization 与 state 读写。
+- [Mamba state 配置](../../../../python/sglang/srt/configs/mamba_utils.py)：state dtype、卷积与 recurrent state 的 TP shape。
+- [Gated Delta Networks 论文](https://arxiv.org/html/2412.06464v1)：§3.3 模型结构；附录 A.2 表 S.1 组件消融。论文实验用于解释设计动机，具体 shape 与执行路径以本仓库实现为准。

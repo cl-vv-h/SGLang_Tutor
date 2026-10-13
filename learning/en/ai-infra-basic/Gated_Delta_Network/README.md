@@ -9,7 +9,7 @@ In this topic, **GDN** means **Gated Delta Network / Gated DeltaNet**, the linea
 | Order | File | Key Question |
 |---|---|---|
 | 1 | [01-gdn-math-and-state.md](./01-gdn-math-and-state.md) | GDN equations, variable meanings, and why the state update is called a delta rule |
-| 2 | [02-gdn-layer-dataflow-and-shapes.md](./02-gdn-layer-dataflow-and-shapes.md) | End-to-end shapes from hidden states to `q/k/v/z/a/b`, convolution, gating, state update, and output |
+| 2 | [02-gdn-layer-dataflow-and-shapes.md](./02-gdn-layer-dataflow-and-shapes.md) | End-to-end shapes, the `z` output gate, short-convolution mechanisms and ablations, q/k-to-value head grouping, and state size |
 | 3 | [03-gdn-training-and-serving.md](./03-gdn-training-and-serving.md) | Trainable parameters, training flow, prefill/decode/target-verify execution, and serving state management |
 
 ## One Overview Diagram

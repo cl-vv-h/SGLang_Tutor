@@ -9,7 +9,7 @@ GDN 在本专题中指 **Gated Delta Network / Gated DeltaNet**，也就是 Qwen
 | 顺序 | 文件 | 重点问题 |
 |---|---|---|
 | 1 | [01-gdn-math-and-state.md](./01-gdn-math-and-state.md) | GDN 的数学公式、每个变量含义、state update 为什么叫 delta rule |
-| 2 | [02-gdn-layer-dataflow-and-shapes.md](./02-gdn-layer-dataflow-and-shapes.md) | 从 hidden states 到 `q/k/v/z/a/b`、conv、gating、state、output 的端到端 shape |
+| 2 | [02-gdn-layer-dataflow-and-shapes.md](./02-gdn-layer-dataflow-and-shapes.md) | 端到端 shape、`z` 输出门、短卷积的机制与消融依据、q/k 与 value head 分组及状态大小 |
 | 3 | [03-gdn-training-and-serving.md](./03-gdn-training-and-serving.md) | 哪些参数可训练、训练怎么做、prefill/decode/target verify 如何执行 |
 
 ## 一张总览图

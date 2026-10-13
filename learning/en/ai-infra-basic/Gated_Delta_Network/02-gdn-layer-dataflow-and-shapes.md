@@ -1,5 +1,7 @@
 # 02. GDN Layer Dataflow and Shapes
 
+**English** | [简体中文](../../../zh/ai-infra-basic/Gated_Delta_Network/02-gdn-layer-dataflow-and-shapes.md)
+
 ## 1. Notation
 
 This lecture uses the following symbols to describe a GDN layer. They correspond to fields used by Qwen3-Next and the SGLang implementation.
@@ -15,6 +17,8 @@ This lecture uses the following symbols to describe a GDN layer. They correspond
 | `V` | `head_v_dim` | dimension of each value head |
 | `C` | `conv_kernel_size` | causal conv1d window size |
 | `R` | `HV / H` | number of value heads mapped to each key head |
+
+Unless stated otherwise, shapes are logical shapes before tensor parallel (TP) sharding. This grouping requires `HV` to be an integer multiple of `H`; tensors on a device use that TP rank's local head counts.
 
 A common Qwen3-Next-style configuration is:
 
@@ -54,7 +58,7 @@ hidden_states
 
 q/k/v -> causal conv1d -> GDN recurrent/chunk kernel -> core_attn_out
 z     -> output gate / RMSNormGated
-core_attn_out + z -> out_proj -> layer output
+RMSNormGated(core_attn_out, z) -> out_proj -> layer output
 ```
 
 ## 3. Input Projection: `in_proj_qkvz`
@@ -91,6 +95,30 @@ The four projected segments mean:
 | `z` | `[T,HV,V]` | gate input for output gate/norm |
 
 `z` does not enter the recurrent state update. It modulates the GDN output at the output stage.
+
+### 3.1 What Is `z`, and How Does It Differ from `g/beta`?
+
+`z` is an **output-gate activation** projected from the current layer input `x_t`. Logically, `z_t = W_z x_t`; the implementation fuses `W_z` with the q/k/v projections in `in_proj_qkvz`. `W_z` is a trained parameter, whereas `z_t` is a token-dependent intermediate tensor, not another KV cache or the recurrent state.
+
+For the default Qwen3-Next SiLU/Swish output gate described here, the code sets `norm_before_gate=True`. For each token and value head, RMSNorm operates along `V`, followed by elementwise multiplication:
+
+```text
+o = core_attn_out[t,h,:]                         # [V]
+z = z[t,h,:]                                    # [V]
+rms = sqrt(mean(o * o) + eps)                    # scalar
+normed[t,h,:] = (weight * o / rms) * silu(z)      # [V]
+silu(z) = z * sigmoid(z)
+```
+
+Here `weight` is a trainable norm weight of length `V`, and `*` means elementwise multiplication. Thus `z` has the same shape as the output: `[T,HV,V]`. A SiLU gate is not a probability in `[0,1]`: it can exceed 1 or be negative, so it is neither a sigmoid gate nor a binary switch. If a model explicitly configures another `output_gate_type`, follow that configuration.
+
+| Control Signal | Shape per Token | What It Controls | Directly Updates This Layer's Recurrent State? |
+|---|---|---|---|
+| `exp(g)` | `[HV]` | how much old state survives | yes |
+| `beta` | `[HV]` | how much prediction residual is written | yes |
+| `silu(z)` | `[HV,V]` | how much of each retrieved value channel reaches subsequent computation | no |
+
+This separates retaining information from exposing it for the current token. For example, `z=0` zeros that output channel without clearing the corresponding memory in this layer's state; later tokens can still retrieve it. The operation is not `core_attn_out + z`: it is **multiplicative gating after normalization**, followed by `out_proj`.
 
 ## 4. Input Projection: `in_proj_ba`
 
@@ -175,6 +203,44 @@ conv_states: [num_slots, conv_dim, C-1] or an equivalent backend-specific layout
 
 During prefill, causal conv can be applied over the whole sequence. During decode, `causal_conv1d_update` updates each request's conv state incrementally.
 
+### 6.1 What Does It Compute, and Why Is It Causal?
+
+This is a **depthwise short convolution** along the token axis: each q/k/v channel has its own length-`C` kernel, with no cross-channel mixing in this operation. The preceding linear projection already mixes hidden channels. Let `u` denote `mixed_qkv` before convolution and `c` denote one channel, with convolution weights indexed by lag:
+
+```text
+y[t,c] = silu(sum(w[c,j] * u[t-j,c] for j in range(C)))
+
+C = 4:
+y[t,c] = silu(w[c,0]*u[t,c]   + w[c,1]*u[t-1,c]
+            + w[c,2]*u[t-2,c] + w[c,3]*u[t-3,c])
+```
+
+This describes the default SiLU path without bias used here; the kernel determines the stored weight order. Only the current position and the previous `C-1` positions are accessed, never future tokens, preserving autoregressive causality. Missing history at the start of a new request is zero; a continuing request reads its own conv state. Packed batches must respect request boundaries: the end of one request cannot become the history of the next.
+
+Convolution and SiLU preserve `[T,conv_dim]` while changing the features at each position. q/k also undergo L2 normalization afterward, potentially fused into the GDN kernel; this is distinct from output RMSNorm. `z/a/b` do not pass through this short convolution.
+
+### 6.2 Why Add It: Local Order Features and Long-Term Associative Memory
+
+Without convolution, this layer's input projection operates independently at each token. With convolution, the q/k/v used for state reads and writes explicitly depend on several recent positions of this layer's input. The two operations provide complementary capabilities:
+
+- **Local positional modeling**: separate weights for different lags can distinguish the preceding token from one three positions back. For example, when the window covers “not good,” the features at “good” can include the preceding negation. This illustrates representational capability, not a claim that a particular learned kernel implements this rule.
+- **Long-term content association**: GDN stores and updates key→value associations in a fixed-size matrix. Short convolution first builds queries, write addresses, and content with local context, reducing the burden on that matrix memory to model local patterns on its own.
+- **Modest additional cost**: for fixed `C`, convolution costs `O(T * conv_dim * C)`, and decode retains only the previous `C-1` inputs per channel, independent of context length. This is additional work; modeling quality is the main reason to include it.
+
+This introduces an inductive bias for locality and relative order. Even without short convolution, GDN's sequential recurrence is order-sensitive, and `hidden_states` may already contain context from preceding layers. It is incorrect to claim that removing convolution removes all awareness of token order. Convolution is also distinct from RoPE and is not mathematically required for the delta rule to work.
+
+### 6.3 Scientific Evidence: Component Ablations Beyond the Mechanism
+
+[Gated Delta Networks, §3.3 and Appendix A.2, Table S.1](https://arxiv.org/html/2412.06464v1#A1.SS2), describes the architecture and tests component removal. These models have 400M parameters and were trained for 15B tokens on the same FineWeb-Edu subset:
+
+| Setting | Avg-PPL ↓ | Avg-Acc ↑ |
+|---|---:|---:|
+| Full Gated DeltaNet (head dim 128) | 27.35 | 47.26 |
+| Without short convolution | 28.95 | 46.16 |
+| Without output gate | 29.12 | 45.46 |
+
+This supports a quality benefit from short convolution and the output gate in that experimental setting. It does not prove a universal benefit across all scales and datasets, and it is not a Qwen3-Next ablation. The preceding section explains plausible mechanisms from the computation; these ablations do not independently establish every proposed explanation.
+
 ## 7. Split into q/k/v After Convolution
 
 After convolution, `mixed_qkv` is split again:
@@ -249,13 +315,65 @@ With the common configuration:
 32 * 128 * 128 = 524288 elements
 ```
 
-If stored in BF16, this is roughly:
+If stored in BF16:
 
 ```text
-524288 * 2 bytes = 1 MB per linear-attention layer per request slot
+524288 * 2 bytes = 1 MiB per linear-attention layer per request slot
 ```
 
-This is not tiny, but the key point is that it does not grow with the number of historical tokens.
+This is a calculation for a specified dtype. In this repository, `mamba2_state_dtype()` defaults the recurrent state to FP32, giving **2 MiB**; configuration or an environment variable can override it. These numbers cover recurrent state only, excluding conv state, extra cache slots, and temporary buffers. This is not tiny, but it does not grow with the number of historical tokens.
+
+### 9.1 Why Not Multiply by the q/k Head Count `H` Again?
+
+Each value head maps to **one** q/k head, rather than pairing with all `H` q/k heads. For value head `h_v`, its q/k head is:
+
+```text
+R = HV // H
+h_k = h_v // R
+
+H = 16, HV = 32, R = 2:
+q/k head 0  -> value heads 0, 1   -> S[0], S[1]
+q/k head 1  -> value heads 2, 3   -> S[2], S[3]
+...
+q/k head 15 -> value heads 30, 31 -> S[30], S[31]
+```
+
+Value heads in a group share q/k vectors but have separate `v`, `g`, `beta`, and state matrices. For example, both `S[0]` and `S[1]` use head 0's k for writes and q for reads, but their states need not match. This grouping is commonly called grouped-value attention; do not directly reuse the head relationships of softmax GQA, where multiple query heads share K/V heads.
+
+Adding head indices to the single-head equations from Chapter 01 makes the shapes explicit. Here q/k are already normalized, and the read scale is shown separately:
+
+```text
+q = query[t,h_k,:]                         # [K]
+k = key[t,h_k,:]                           # [K]
+v = value[t,h_v,:]                         # [V]
+S_decay = exp(g[t,h_v]) * S_prev[h_v]       # [V,K]
+r = v - S_decay @ k                        # [V]
+S_new[h_v] = S_decay + beta[t,h_v] * r[:,None] * k[None,:]
+o[t,h_v,:] = S_new[h_v] @ (q * scale)       # [V]
+```
+
+One state matrix maps the `K`-dimensional key/query space to the `V`-dimensional value space, giving `[V,K]`. There are `HV` such matrices, giving `[HV,V,K]` overall. `q` only reads the state, so no separate query state is needed. The q/k feature dimension is represented by `K`, while the q/k head count is represented through grouping:
+
+```text
+[HV,V,K] == reshape([H,R,V,K])
+HV * V * K = H * R * V * K
+```
+
+Thus `H` is not missing: it is already counted through `HV = H * R`. Multiplying by `H` again would allocate state for nonexistent all-to-all q/k-head × value-head pairs. Even when `H=HV`, there are only `H` state matrices, not `H*H`.
+
+### 9.2 Checking the Kernel and Memory Under TP
+
+The repository's [packed recurrent decode kernel](../../../../python/sglang/srt/layers/attention/fla/fused_recurrent.py) directly uses:
+
+```python
+i_h = i_hv // (HV // H)
+```
+
+It addresses q/k using `i_h` and v/state using `i_hv`; the state offset for a head is `i_hv * V * K`. This implements the grouping above without requiring q/k to be physically replicated first.
+
+With conventional attention TP sharding and divisible head counts, TP degree `P` gives each rank a state of `[num_slots,HV/P,V,K]`. Per-request, per-layer bytes on each device are `(HV/P)*V*K*state_element_bytes`; the sum across ranks remains `HV*V*K*state_element_bytes`. Head padding or special backend layouts require inspecting the actual allocation.
+
+Also, **convolution state still includes `H` directly**: its logical element count is `(2*H*K + HV*V)*(C-1)`. It retains a short window of q/k/v projections, whereas recurrent state retains key→value matrix memory. These are different caches.
 
 ## 10. GDN Kernel Output
 
@@ -403,3 +521,12 @@ After accept/reject is resolved, the correct state along the accepted path is co
 3. `a/b` produce `g/beta`, controlling state forgetting and residual write strength.
 4. `z` is not written into the state; it modulates `core_attn_out` at the output stage.
 5. GDN state is `[num_slots,HV,V,K]`, stored by request slot, and does not grow with token count.
+
+## 16. Source and Paper References
+
+- [Qwen3GatedDeltaNet](../../../../python/sglang/srt/models/qwen3_next.py): projections, convolution weights, `norm_before_gate=True`, and the output path.
+- [Gated RMSNorm](../../../../python/sglang/srt/layers/attention/fla/layernorm_gated.py): the ordering of RMSNorm and the SiLU/Swish output gate.
+- [GDN backend](../../../../python/sglang/srt/layers/attention/linear/gdn_backend.py): causal convolution per request and prefill/decode dispatch.
+- [Fused recurrent kernel](../../../../python/sglang/srt/layers/attention/fla/fused_recurrent.py): q/k head mapping, L2 normalization, and state reads/writes.
+- [Mamba state configuration](../../../../python/sglang/srt/configs/mamba_utils.py): state dtype and TP shapes for convolution and recurrent state.
+- [Gated Delta Networks paper](https://arxiv.org/html/2412.06464v1): §3.3 for the architecture; Appendix A.2, Table S.1 for component ablations. Paper results motivate the design; exact shapes and execution paths follow this repository's implementation.
