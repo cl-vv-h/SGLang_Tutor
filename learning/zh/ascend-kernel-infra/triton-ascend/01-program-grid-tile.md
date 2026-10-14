@@ -264,9 +264,9 @@ add_kernel[grid](x, y, out, n, BLOCK_SIZE=1024)
 
 `triton.cdiv` 是向上整除：
 
-\[
+```math
 grid = \lceil n / BLOCK \rceil
-\]
+```
 
 `grid` 写成 lambda，是因为它可以读取 autotune/config 选择后的 meta-parameter。
 

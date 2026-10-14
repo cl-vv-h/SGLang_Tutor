@@ -102,9 +102,9 @@ mask = row_mask[:, None] & col_mask[None, :]
 
 RMSNorm 对一行 `x[D]` 的核心是：
 
-\[
+```math
 rstd = \frac{1}{\sqrt{\frac{1}{D}\sum_i x_i^2 + \epsilon}}
-\]
+```
 
 下面给出变量闭合的单行 RMSNorm kernel；为突出归约，省略 weight/bias，但没有省略任何地址或 mask：
 

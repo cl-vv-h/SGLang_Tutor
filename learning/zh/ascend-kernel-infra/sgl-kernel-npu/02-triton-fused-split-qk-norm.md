@@ -187,9 +187,9 @@ tl.store(
 
 三段地址必须严格拼接。理论上应该满足：
 
-\[
+```math
 total\_hidden = q\_lora\_rank + kv\_lora\_rank + qk\_rope\_dim
-\]
+```
 
 当前 wrapper 检查三个 rank 为正，但这份源码中没有显式断言该等式。生产调用依赖模型配置和上游投影保证契约；为独立复用 wrapper 时，补充 shape 断言会更安全。
 
@@ -314,9 +314,9 @@ RMSNorm 要累加一整行的 `x²`。低精度类型尾数较短，逐项累加
 
 **答案：**输入最后一维应由三个连续片段恰好组成：
 
-\[
+```math
 total\_hidden=q\_lora\_rank+kv\_lora\_rank+qk\_rope\_dim
-\]
+```
 
 Kernel 依据这个顺序计算 `base`、`k_base` 和 `pe_base`。若 total_hidden 更小，会越界读取；若更大，尾部数据被忽略；若片段顺序不同，输出会语义错位。
 

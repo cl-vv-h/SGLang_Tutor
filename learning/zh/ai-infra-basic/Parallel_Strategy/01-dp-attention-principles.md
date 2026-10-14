@@ -227,7 +227,7 @@ rank2 partial: [3,4]；rank3 partial: [27,36]      -> DP1 [30,40]
 m=\max_dn_d,\qquad N=Dm
 ```
 
-当 $`T>1`$，先在 Attention TP group 内执行 reduce-scatter：完成 partial 加和，同时让每 rank 只保留 $`m/T`$ 行。随后在全 world all-gather：
+当 $`T\gt 1`$，先在 Attention TP group 内执行 reduce-scatter：完成 partial 加和，同时让每 rank 只保留 $`m/T`$ 行。随后在全 world all-gather：
 
 ```text
 组内 reduce-scatter:
@@ -259,11 +259,11 @@ R=X+A_0+A_1
 \ne\mathrm{RMSNorm}(A_0+X)+\mathrm{RMSNorm}(A_1)
 ```
 
-当 $`T=1`$ 时本地 Attention 输出已经完整，Norm 可以先在较小本地数据上执行，再 gather；$`T>1`$ 时须先合并数值贡献。
+当 $`T=1`$ 时本地 Attention 输出已经完整，Norm 可以先在较小本地数据上执行，再 gather；$`T\gt 1`$ 时须先合并数值贡献。
 
 ## 8. 路径 B：token 保持分片，MoE 自己 dispatch/combine
 
-专用 MoE A2A backend 启用时，`LayerScatterModes` 通常选择 `SCATTERED`。当 $`T>1`$，Attention 后在子组内 reduce-scatter，得到完整数值但只含部分 token 行的张量：
+专用 MoE A2A backend 启用时，`LayerScatterModes` 通常选择 `SCATTERED`。当 $`T\gt 1`$，Attention 后在子组内 reduce-scatter，得到完整数值但只含部分 token 行的张量：
 
 ```text
 Attention 输出 [n_d,H] partial

@@ -63,9 +63,9 @@ draft 生成 γ 个候选 -> target 一次验证 -> 接受最长前缀 -> 追加
 
 若一轮总耗时是 `T_draft + T_verify`，平均最终提交 `τ` 个 token，则平均每个输出 token 的延迟近似为：
 
-$$
+```math
 L \approx \frac{T_{draft}+T_{verify}}{\tau}.
-$$
+```
 
 所以优化只有三条路：
 
@@ -75,30 +75,30 @@ $$
 
 自回归小模型需要执行 `γ` 次 decode：
 
-$$
+```math
 T_{draft}^{AR}(\gamma) \approx \sum_{k=1}^{\gamma} T_d(k),
-$$
+```
 
 即使模型很小，`γ` 次 kernel launch、KV 访问和同步也可能吃掉收益。完全并行的 block drafter 只 forward 一次，但会近似成：
 
-$$
+```math
 q(x_{1:\gamma}\mid x_0) \approx \prod_{k=1}^{\gamma}q_k(x_k\mid x_0),
-$$
+```
 
 第 `k` 个位置看不到真实采样出的 `x_{<k}`。预测距离越远，这个条件缺失越严重。
 
 DSpark 将两者拆开：
 
-$$
+```math
 \underbrace{h_{1:\gamma},U_{1:\gamma}=F_{parallel}(x_0,\text{MASK}_{1:\gamma-1},H_{ctx})}_{\text{一次重型并行 forward}}
-$$
+```
 
 再用很小的序列头恢复 token 依赖：
 
-$$
+```math
 q(x_{1:\gamma}\mid x_0)
-=\prod_{k=1}^{\gamma}q_k(x_k\mid x_0,x_{<k}).
-$$
+=\prod_{k=1}^{\gamma}q_k(x_k\mid x_0,x_{\lt k}).
+```
 
 ## 3. 并行 backbone：一次获得整块 base logits
 
@@ -112,16 +112,16 @@ DSpark 复用 DFlash 风格的 block drafter。给定每个请求本轮的 ancho
 
 并行 draft block 允许块内位置彼此交互，并把 target 的上下文特征注入 draft attention。若从 target 的若干层取出特征：
 
-$$
-H_{ctx}=\operatorname{RMSNorm}\left(W_c[H^{(l_1)};H^{(l_2)};\ldots;H^{(l_m)}]\right),
-$$
+```math
+H_{ctx}=\mathrm{RMSNorm}\left(W_c[H^{(l_1)};H^{(l_2)};\ldots;H^{(l_m)}]\right),
+```
 
 其中 `H_ctx` 与已提交上下文对齐。对 draft 第 `i` 层，可将 context 与当前 block 的 K/V 拼接：
 
-$$
+```math
 K_i=[W_i^K H_{ctx}; W_i^K H_d],\qquad
 V_i=[W_i^V H_{ctx}; W_i^V H_d].
-$$
+```
 
 这让轻量 draft 不必自己重新编码全部 target 历史。一次 backbone forward 的核心 shape 是：
 
@@ -152,32 +152,32 @@ flowchart TB
 
 最直接的转移偏置需要矩阵：
 
-$$
+```math
 B\in\mathbb{R}^{V\times V},\qquad B[x_{k-1},:]\in\mathbb{R}^V.
-$$
+```
 
 它有 `V²` 个参数，词表十几万时不可接受。DSpark 用低秩分解：
 
-$$
+```math
 B\approx W_1W_2,
 \quad W_1\in\mathbb{R}^{V\times r},
 \quad W_2\in\mathbb{R}^{r\times V},
 \quad r\ll V.
-$$
+```
 
 于是单步只需要：
 
-$$
+```math
 e_{k-1}=W_1[x_{k-1}]\in\mathbb{R}^{r},
-$$
+```
 
-$$
+```math
 b_k=e_{k-1}W_2\in\mathbb{R}^{V},
-$$
+```
 
-$$
-z_k=U_k+b_k,\qquad x_k\sim\operatorname{softmax}(z_k/T).
-$$
+```math
+z_k=U_k+b_k,\qquad x_k\sim\mathrm{softmax}(z_k/T).
+```
 
 ### 4.1 单步与整块 shape
 
@@ -209,29 +209,29 @@ flowchart LR
 
 Vanilla Markov 只看 `x_{k-1}`。Gated 变体让当前位置 hidden 决定使用多少转移信息：
 
-$$
+```math
 g_k=\sigma(W_g[h_k;e_{k-1}]),\qquad
 b_k=W_2(g_k\odot e_{k-1}).
-$$
+```
 
 RNN 变体维护尺寸为 `r` 的序列状态 `s_k`。一种等价写法为：
 
-$$
+```math
 u_k=[s_{k-1};e_{k-1};h_k]\in\mathbb{R}^{2r+D},
-$$
+```
 
-$$
+```math
 g_k=\sigma(W_g u_k),\qquad
 \tilde{s}_k=\tanh(W_c u_k),
-$$
+```
 
-$$
+```math
 s_k=g_k\odot s_{k-1}+(1-g_k)\odot\tilde{s}_k,
-$$
+```
 
-$$
+```math
 b_k=W_2^T\tanh(W_o u_k).
-$$
+```
 
 它能压缩更长的 `x_{<k}` 信息，但每步计算也更复杂。三种 head 都不会取消 target verify；它们只影响 draft 质量和成本。
 
@@ -241,15 +241,15 @@ $$
 
 DSpark confidence head 对每个位置输出：
 
-$$
+```math
 c_k\approx P(A_k=1\mid A_1=\cdots=A_{k-1}=1,\text{draft state}),
-$$
+```
 
 其中 `A_k=1` 表示第 `k` 个候选通过验证。典型输入是 draft hidden 与前一 token 的 Markov embedding：
 
-$$
+```math
 c_k=\sigma\left(w^T[h_k;W_1[x_{k-1}]]\right).
-$$
+```
 
 shape 变化：
 
@@ -263,9 +263,9 @@ squeeze + sigmoid/STS         [B,γ]
 
 训练时可以用 draft 与 target 分布的 total variation 距离构造软标签：
 
-$$
+```math
 c_k^*=1-\frac{1}{2}\lVert q_k-p_k\rVert_1.
-$$
+```
 
 因为 `\frac12\|q-p\|_1\in[0,1]`，两者越接近，标签越接近 1。它不是“这个 token 的最大 softmax 概率”，也不是“最终肯定接受”的硬标签。
 
@@ -273,9 +273,9 @@ $$
 
 第 `j` 个候选有用的前提是 1 到 `j` 全部通过，所以：
 
-$$
+```math
 a_j=P(A_1=\cdots=A_j=1)\approx\prod_{i=1}^{j}c_i.
-$$
+```
 
 例如：
 
@@ -290,10 +290,10 @@ a = [0.90, 0.72, 0.36, 0.072]
 
 模型的 raw confidence 往往过度自信或保守。Sequential Temperature Scaling 为每个位置学习温度 `T_k`：
 
-$$
+```math
 \hat c_k=\sigma(z_k/T_k),\qquad
 \hat a_j=\prod_{k=1}^{j}\hat c_k.
-$$
+```
 
 校准目标是让预测的 prefix survival 与真实接受长度分布匹配。因为 scheduler 消费的是累积乘积，逐位置 accuracy 很高并不等于长度预算正确；尾部的轻微偏差会被连乘放大。
 
@@ -301,22 +301,22 @@ $$
 
 假设每个请求至少验证 anchor 行，初始总 token 数为 `B`，每轮至少能提交一个 target token。因此：
 
-$$
+```math
 N=B,\qquad \mathbb{E}[\text{commit}]=B.
-$$
+```
 
 若为请求 `r` 增加第 `j` 个 draft 候选，target token 数加 1，期望提交量增加它的 prefix survival：
 
-$$
+```math
 N\leftarrow N+1,\qquad
 E\leftarrow E+a_{r,j}.
-$$
+```
 
 系统真正关心的不是单轮接受数，而是单位时间输出：
 
-$$
+```math
 \Theta(N)=E(N)\cdot SPS(N),
-$$
+```
 
 其中 `SPS(N)` 是 target 在一次处理 `N` 个 verify token 时的实测 steps per second。它包含 graph tier、padding、attention kernel、TP/DP 同步等硬件效应，通常不是光滑函数。
 
@@ -427,16 +427,16 @@ flowchart LR
 
 对 sampling，第 `k` 个 draft token `x_k` 的接受概率是：
 
-$$
+```math
 \alpha_k=\min\left(1,\frac{p_k(x_k)}{q_k(x_k)}\right).
-$$
+```
 
 若拒绝，则从修正分布采样：
 
-$$
+```math
 p'_k(x)=\frac{\max(p_k(x)-q_k(x),0)}
 {\sum_v\max(p_k(v)-q_k(v),0)}.
-$$
+```
 
 只要 target logits 与 draft proposal probability 都正确、按最长前缀验证，并且 scheduler 只裁掉尚未验证的尾部，动态长度就不会改变 target 分布。scheduler 决定“算多少”，acceptor 决定“哪些能提交”，两者职责不能混淆。
 
@@ -456,34 +456,34 @@ new_seq_len_r = S_r + commit_len_r
 
 对更远位置可使用衰减权重：
 
-$$
+```math
 w_k=\exp\left(-\frac{k-1}{\gamma}\right).
-$$
+```
 
 token 监督的交叉熵：
 
-$$
+```math
 \mathcal L_{CE}=-\sum_{k=1}^{\gamma}w_k\log q_k(x_k^*).
-$$
+```
 
 逼近 target 分布的 total variation 项：
 
-$$
+```math
 \mathcal L_{TV}=\sum_{k=1}^{\gamma}w_k\lVert q_k-p_k\rVert_1.
-$$
+```
 
 confidence 使用软标签 BCE：
 
-$$
+```math
 \mathcal L_{conf}=-\sum_k
 \left[c_k^*\log c_k+(1-c_k^*)\log(1-c_k)\right].
-$$
+```
 
 论文中的组合形式为：
 
-$$
+```math
 \mathcal L=0.1\mathcal L_{CE}+0.9\mathcal L_{TV}+1.0\mathcal L_{conf}.
-$$
+```
 
 TV 权重较高体现了目标：draft 不只是猜中训练 label，而要让整个 proposal distribution 接近 target，才能提高严格 rejection sampling 的接受率。
 
@@ -511,11 +511,11 @@ TV 权重较高体现了目标：draft 不只是猜中训练 label，而要让�
 
 收益取决于：
 
-$$
+```math
 \text{speedup}\approx
 \frac{\text{baseline target step time}\times\text{baseline steps}}
 {T_{parallel\ draft}+T_{sequential\ head}+T_{ragged\ verify}+T_{bookkeeping}}.
-$$
+```
 
 接受率低、batch 太小、graph tier 填充过多、draft/target 通信昂贵时都可能无收益。论文报告的低序列头开销来自特定模型与硬件，不能当作所有部署的常数。
 

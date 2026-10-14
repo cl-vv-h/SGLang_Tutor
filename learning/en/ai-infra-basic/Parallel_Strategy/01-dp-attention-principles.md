@@ -227,7 +227,7 @@ Pad every DP subgroup to the same length:
 m=\max_dn_d,\qquad N=Dm
 ```
 
-When $`T>1`$, first reduce-scatter within attention TP: sum partial values and assign $`m/T`$ rows to each rank. Then all-gather over the entire world:
+When $`T\gt 1`$, first reduce-scatter within attention TP: sum partial values and assign $`m/T`$ rows to each rank. Then all-gather over the entire world:
 
 ```text
 Subgroup reduce-scatter:
@@ -259,11 +259,11 @@ Also:
 \ne\mathrm{RMSNorm}(A_0+X)+\mathrm{RMSNorm}(A_1)
 ```
 
-When $`T=1`$, local attention output is already complete: normalization may run on smaller local data before gathering. With $`T>1`$, contributions must be combined first.
+When $`T=1`$, local attention output is already complete: normalization may run on smaller local data before gathering. With $`T\gt 1`$, contributions must be combined first.
 
 ## 8. Path B: Sharded Source Tokens and Expert Dispatch/Combine
 
-With a dedicated MoE A2A backend, `LayerScatterModes` normally selects `SCATTERED`. For $`T>1`$, attention-subgroup reduce-scatter produces complete values for only a slice of token rows:
+With a dedicated MoE A2A backend, `LayerScatterModes` normally selects `SCATTERED`. For $`T\gt 1`$, attention-subgroup reduce-scatter produces complete values for only a slice of token rows:
 
 ```text
 Attention output [n_d,H], partial values

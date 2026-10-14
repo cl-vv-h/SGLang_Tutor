@@ -411,9 +411,9 @@ Previous ids and embeddings therefore have shapes `[B,γ]` and `[B,γ,r]` and ar
 
 `DSparkConfidenceHead.apply_sts()` implements
 
-$$
+```math
 c_{r,k}=\sigma(z_{r,k}/T_k),
-$$
+```
 
 returning `[B,γ]`; an invariant checks values remain in `[0,1]`. Without a confidence head:
 
@@ -574,9 +574,9 @@ flowchart TD
 
 For each request, compare from left to right:
 
-$$
+```math
 x_k\stackrel{?}{=}\arg\max_v p_k(v).
-$$
+```
 
 Stop at the first mismatch. `correct_len` counts matching draft tokens; `bonus` is the target argmax at the stop position. If all drafts match, the final target row supplies an extra bonus.
 
@@ -584,9 +584,9 @@ Stop at the first mismatch. `correct_len` counts matching draft tokens; `bonus` 
 
 Sampling converts `draft_block.corrected_logits` to `q_k` using the request temperature, then accepts candidate `x_k` with
 
-$$
+```math
 \alpha_k=\min(1,p_k(x_k)/q_k(x_k)).
-$$
+```
 
 On rejection, the correction token comes from normalized `max(p_k-q_k,0)`. TP ranks synchronize draft and target sampling at defined sites so they cannot enter different chains.
 
@@ -601,9 +601,9 @@ block_accept    commit_lens + cap_trim_lens, used to observe the uncapped ceilin
 
 Finally,
 
-$$
+```math
 new\_seq\_lens=prefix\_lens+commit\_lens.
-$$
+```
 
 An uncomputed compact tail can never contribute to commit. `cap-accept` computes the full block but still gates formal commit with `min(commit_lens,verify_lens)`.
 

@@ -8,9 +8,9 @@
 
 假设要计算：
 
-\[
+```math
 y_i = a x_i + b
-\]
+```
 
 在模型代码里，它可能只是一行表达式；在工程里至少有三层对象：
 
@@ -178,9 +178,9 @@ Kernel 的契约至少有四部分：
 
 地址计算的本质是：
 
-\[
+```math
 address(i,j) = base + i \times stride_0 + j \times stride_1
-\]
+```
 
 很多“kernel 算错”其实是地址、stride 或尾块问题，而不是数学公式错了。
 

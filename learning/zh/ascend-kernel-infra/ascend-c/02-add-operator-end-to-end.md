@@ -236,9 +236,9 @@ Reference 用 `torch.add`，并在每次修改 tiling 后重新跑完整矩阵�
 
 Vector Add 是带宽型。报告：
 
-\[
+```math
 effective\ bandwidth = \frac{bytes(x)+bytes(y)+bytes(z)}{kernel\ time}
-\]
+```
 
 同时比较：
 

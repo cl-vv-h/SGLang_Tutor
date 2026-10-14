@@ -63,9 +63,9 @@ task queue 解决的是“Host 把这次 launch 提交给 runtime 后要不要�
 
 以矩阵乘为例：
 
-\[
+```math
 num\_tiles = \lceil M / BLOCK\_SIZE\_M \rceil \times \lceil N / BLOCK\_SIZE\_N \rceil
-\]
+```
 
 如果 `num_tiles` 远大于设备的可用物理核数，就会出现：
 

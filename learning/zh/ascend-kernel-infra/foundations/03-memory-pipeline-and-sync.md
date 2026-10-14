@@ -38,9 +38,9 @@ Tile 2:                 [CopyIn][Compute][CopyOut]
 
 稳态吞吐不再接近三阶段耗时之和，而更接近最慢阶段的耗时：
 
-\[
+```math
 T_{steady} \approx \max(T_{copyin}, T_{compute}, T_{copyout})
-\]
+```
 
 首尾仍有填充和排空开销，所以 tile 太少时流水收益有限。
 
@@ -168,9 +168,9 @@ Triton 把其中较多工作交给编译器和 meta-parameter；Ascend C 往往�
 
 算术强度（Arithmetic Intensity）可粗略定义为：
 
-\[
+```math
 AI = \frac{计算操作数}{从较慢存储搬运的字节数}
-\]
+```
 
 向量加法 `z=x+y` 对每个 FP16 元素：
 

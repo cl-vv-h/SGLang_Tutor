@@ -411,9 +411,9 @@ position γ-1 previous = draft_token[γ-2]
 
 `DSparkConfidenceHead.apply_sts()` 的运行时语义是：
 
-$$
+```math
 c_{r,k}=\sigma(z_{r,k}/T_k),
-$$
+```
 
 输出 `[B,γ]` 并由 invariant 检查在 `[0,1]` 内。没有 confidence head 时：
 
@@ -574,9 +574,9 @@ flowchart TD
 
 对每个请求，从前往后比较：
 
-$$
+```math
 x_k \stackrel{?}{=} \arg\max_v p_k(v).
-$$
+```
 
 第一个不相等位置停止。`correct_len` 是匹配的 draft 数，`bonus` 是 target 在停止位置的 argmax；全 draft 都匹配时，最后一行 target logits 给出额外 bonus。
 
@@ -584,9 +584,9 @@ $$
 
 sampling 需要 `draft_block.corrected_logits`，经请求温度得到 `q_k`。对候选执行：
 
-$$
+```math
 \alpha_k=\min(1,p_k(x_k)/q_k(x_k)).
-$$
+```
 
 拒绝时从归一化的 `max(p_k-q_k,0)` 采 correction token。TP ranks 还要同步 draft/target sampling 结果，避免每个 rank 进入不同链路。
 
@@ -601,9 +601,9 @@ block_accept    commit_lens + cap_trim_lens（用于观测潜在上限）
 
 最终：
 
-$$
+```math
 new\_seq\_lens=prefix\_lens+commit\_lens.
-$$
+```
 
 `compact` 中没有计算的尾部不可能贡献 commit；`cap-accept` 虽计算了完整窗口，也用 `min(commit_lens,verify_lens)` 限制正式提交。
 

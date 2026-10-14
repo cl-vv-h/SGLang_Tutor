@@ -63,9 +63,9 @@ draft γ candidates -> target verifies once -> accept longest prefix -> append b
 
 If a round costs `T_draft + T_verify` and commits `τ` output tokens on average, latency per output token is approximately
 
-$$
+```math
 L \approx \frac{T_{draft}+T_{verify}}{\tau}.
-$$
+```
 
 There are only three optimization levers:
 
@@ -75,29 +75,29 @@ There are only three optimization levers:
 
 An autoregressive small model runs `γ` decode steps:
 
-$$
+```math
 T_{draft}^{AR}(\gamma)\approx\sum_{k=1}^{\gamma}T_d(k).
-$$
+```
 
 Even a small model can lose the gain to `γ` kernel launches, KV reads, and synchronization points. A fully parallel block drafter needs one forward pass but approximates
 
-$$
+```math
 q(x_{1:\gamma}\mid x_0)\approx\prod_{k=1}^{\gamma}q_k(x_k\mid x_0),
-$$
+```
 
 so position `k` does not know the sampled `x_{<k}`. This missing conditioning becomes more harmful farther into the block.
 
 DSpark splits the work:
 
-$$
+```math
 \underbrace{h_{1:\gamma},U_{1:\gamma}=F_{parallel}(x_0,\text{MASK}_{1:\gamma-1},H_{ctx})}_{\text{one heavy parallel forward}},
-$$
+```
 
 then restores token dependency with a small sequential head:
 
-$$
-q(x_{1:\gamma}\mid x_0)=\prod_{k=1}^{\gamma}q_k(x_k\mid x_0,x_{<k}).
-$$
+```math
+q(x_{1:\gamma}\mid x_0)=\prod_{k=1}^{\gamma}q_k(x_k\mid x_0,x_{\lt k}).
+```
 
 ## 3. Parallel backbone: produce the whole base-logit block once
 
@@ -111,16 +111,16 @@ with shape `[B,γ]`. Some checkpoints use a “do not sample from anchor” layo
 
 The block positions interact, while target context features are injected into draft attention. If features are taken from selected target layers,
 
-$$
-H_{ctx}=\operatorname{RMSNorm}\left(W_c[H^{(l_1)};H^{(l_2)};\ldots;H^{(l_m)}]\right).
-$$
+```math
+H_{ctx}=\mathrm{RMSNorm}\left(W_c[H^{(l_1)};H^{(l_2)};\ldots;H^{(l_m)}]\right).
+```
 
 For draft layer `i`, context K/V can be concatenated with the block's K/V:
 
-$$
+```math
 K_i=[W_i^K H_{ctx};W_i^K H_d],\qquad
 V_i=[W_i^V H_{ctx};W_i^V H_d].
-$$
+```
 
 The lightweight drafter therefore does not have to re-encode the complete target history. Core shapes for one parallel forward are:
 
@@ -151,32 +151,32 @@ The parallel backbone has already produced all `U_k`. Position `k` now only need
 
 A direct transition bias would require
 
-$$
+```math
 B\in\mathbb{R}^{V\times V},\qquad B[x_{k-1},:]\in\mathbb{R}^{V},
-$$
+```
 
 which is prohibitive for a vocabulary in the hundred-thousand range. DSpark factorizes it:
 
-$$
+```math
 B\approx W_1W_2,
 \quad W_1\in\mathbb{R}^{V\times r},
 \quad W_2\in\mathbb{R}^{r\times V},
 \quad r\ll V.
-$$
+```
 
 Each step performs
 
-$$
+```math
 e_{k-1}=W_1[x_{k-1}]\in\mathbb{R}^{r},
-$$
+```
 
-$$
+```math
 b_k=e_{k-1}W_2\in\mathbb{R}^{V},
-$$
+```
 
-$$
-z_k=U_k+b_k,\qquad x_k\sim\operatorname{softmax}(z_k/T).
-$$
+```math
+z_k=U_k+b_k,\qquad x_k\sim\mathrm{softmax}(z_k/T).
+```
 
 ### 4.1 Per-step and whole-block shapes
 
@@ -208,28 +208,28 @@ That is the meaning of “semi-autoregressive”: the probability factorization 
 
 Vanilla Markov sees only `x_{k-1}`. A gated variant lets the current hidden state control how much transition information to use:
 
-$$
+```math
 g_k=\sigma(W_g[h_k;e_{k-1}]),\qquad
 b_k=W_2(g_k\odot e_{k-1}).
-$$
+```
 
 The RNN variant maintains a state `s_k` of width `r`. One equivalent formulation is
 
-$$
+```math
 u_k=[s_{k-1};e_{k-1};h_k]\in\mathbb{R}^{2r+D},
-$$
+```
 
-$$
+```math
 g_k=\sigma(W_g u_k),\qquad \tilde{s}_k=\tanh(W_c u_k),
-$$
+```
 
-$$
+```math
 s_k=g_k\odot s_{k-1}+(1-g_k)\odot\tilde{s}_k,
-$$
+```
 
-$$
+```math
 b_k=W_2^T\tanh(W_o u_k).
-$$
+```
 
 It can compress more of `x_{<k}` than a first-order transition, at higher per-step cost. None of the three heads replaces target verification; they only change draft cost and quality.
 
@@ -239,15 +239,15 @@ Verifying all `γ` proposals is wasteful: if proposal 2 is rejected, proposals 3
 
 The confidence head predicts
 
-$$
+```math
 c_k\approx P(A_k=1\mid A_1=\cdots=A_{k-1}=1,\text{draft state}),
-$$
+```
 
 where `A_k=1` means candidate `k` passes verification. A typical head consumes the draft hidden and previous-token Markov embedding:
 
-$$
+```math
 c_k=\sigma\left(w^T[h_k;W_1[x_{k-1}]]\right).
-$$
+```
 
 Shape flow:
 
@@ -261,9 +261,9 @@ squeeze + sigmoid/STS         [B,γ]
 
 A soft training target can be built from total variation distance between draft and target distributions:
 
-$$
+```math
 c_k^*=1-\frac12\lVert q_k-p_k\rVert_1.
-$$
+```
 
 Because `\frac12\|q-p\|_1∈[0,1]`, closer distributions produce labels closer to one. This is not the maximum softmax probability and not a hard guarantee of acceptance.
 
@@ -271,9 +271,9 @@ Because `\frac12\|q-p\|_1∈[0,1]`, closer distributions produce labels closer t
 
 Candidate `j` is useful only if candidates 1 through `j` all pass:
 
-$$
+```math
 a_j=P(A_1=\cdots=A_j=1)\approx\prod_{i=1}^{j}c_i.
-$$
+```
 
 For example:
 
@@ -288,10 +288,10 @@ Sorting raw `c_k` is incorrect because a later token cannot skip an earlier toke
 
 Raw confidence can be overconfident or conservative. Sequential Temperature Scaling learns a temperature per position:
 
-$$
+```math
 \hat c_k=\sigma(z_k/T_k),\qquad
 \hat a_j=\prod_{k=1}^{j}\hat c_k.
-$$
+```
 
 Calibration aims to match predicted prefix survival to the observed accepted-length distribution. Because the scheduler consumes a product, small tail errors accumulate even when per-position classification accuracy looks good.
 
@@ -299,21 +299,21 @@ Calibration aims to match predicted prefix survival to the observed accepted-len
 
 Every request first verifies its anchor row. Initial total target rows and expected commits are therefore
 
-$$
+```math
 N=B,\qquad E=B.
-$$
+```
 
 Adding candidate `j` for request `r` increments both compute and expected output:
 
-$$
+```math
 N\leftarrow N+1,\qquad E\leftarrow E+a_{r,j}.
-$$
+```
 
 The system cares about output per wall-clock time:
 
-$$
+```math
 \Theta(N)=E(N)\cdot SPS(N),
-$$
+```
 
 where `SPS(N)` is measured target steps per second at `N` verification rows. It captures graph tiers, padding, attention kernels, and TP/DP synchronization and is often jagged rather than smooth.
 
@@ -423,16 +423,16 @@ For greedy decoding, candidates are truncated at the first mismatch with the tar
 
 For sampling, candidate `x_k` is accepted with probability
 
-$$
+```math
 \alpha_k=\min\left(1,\frac{p_k(x_k)}{q_k(x_k)}\right).
-$$
+```
 
 On rejection, sample from the residual distribution
 
-$$
+```math
 p'_k(x)=\frac{\max(p_k(x)-q_k(x),0)}
 {\sum_v\max(p_k(v)-q_k(v),0)}.
-$$
+```
 
 Dynamic length preserves the target distribution when target logits and proposal probabilities are correct, verification follows the longest-prefix rule, and scheduling only removes an unverified tail. The scheduler decides how much to compute; the acceptor decides what may be committed.
 
@@ -452,33 +452,33 @@ Training usually freezes the target, shares and freezes its embedding and LM hea
 
 A position-decay weight can be
 
-$$
+```math
 w_k=\exp\left(-\frac{k-1}{\gamma}\right).
-$$
+```
 
 Token cross-entropy:
 
-$$
+```math
 \mathcal L_{CE}=-\sum_{k=1}^{\gamma}w_k\log q_k(x_k^*).
-$$
+```
 
 Target-distribution total variation:
 
-$$
+```math
 \mathcal L_{TV}=\sum_{k=1}^{\gamma}w_k\lVert q_k-p_k\rVert_1.
-$$
+```
 
 Confidence BCE with soft targets:
 
-$$
+```math
 \mathcal L_{conf}=-\sum_k[c_k^*\log c_k+(1-c_k^*)\log(1-c_k)].
-$$
+```
 
 The paper's combined objective is
 
-$$
+```math
 \mathcal L=0.1\mathcal L_{CE}+0.9\mathcal L_{TV}+1.0\mathcal L_{conf}.
-$$
+```
 
 The high TV weight reflects the real goal: not merely predict the training label, but make the complete proposal distribution close to the target so exact rejection sampling accepts more often.
 
@@ -506,11 +506,11 @@ This table uses the common `sample_from_anchor=True` semantics. A special checkp
 
 The gain depends on
 
-$$
+```math
 \text{speedup}\approx
 \frac{\text{baseline target step time}\times\text{baseline steps}}
 {T_{parallel\ draft}+T_{sequential\ head}+T_{ragged\ verify}+T_{bookkeeping}}.
-$$
+```
 
 Low acceptance, tiny batches, excessive graph-tier padding, or expensive draft/target communication can remove the gain. The paper's small sequential-head overhead is measured under specific models and hardware and is not a universal constant.
 
