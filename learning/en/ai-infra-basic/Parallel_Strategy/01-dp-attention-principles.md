@@ -61,13 +61,13 @@ T = attention_tp_size = P / (D*C)
 
 These sizes must divide evenly. The source orders ranks as `(DP, CP, TP)`, with TP changing fastest:
 
-\[
+$$
 p=(dC+c)T+a
-\]
+$$
 
-\[
+$$
 a=p\bmod T,\qquad c=\lfloor p/T\rfloor\bmod C,\qquad d=\lfloor p/(TC)\rfloor
-\]
+$$
 
 The running example is `P=4,D=2,C=1,T=2`:
 
@@ -99,28 +99,28 @@ For `P=8,D=2,C=2,T=2`, attention TP groups are `[0,1], [2,3], [4,5], [6,7]`; att
 
 ## 4. Why Requests Can Run Attention Separately
 
-For request `r`, head `h`, and query position `i`:
+For request $r$, head $h$, and query position $i$:
 
-\[
+$$
 o_{r,h,i}=\sum_{j\in\mathcal V_r(i)}
 \operatorname{softmax}_{j}\left(q_{r,h,i}^{\mathsf T}k_{r,g(h),j}/\sqrt{D_k}\right)v_{r,g(h),j}
-\]
+$$
 
-`g(h)` maps GQA query heads to KV heads; `V_r(i)` is the request's causal history. No K/V from another request `r'` appears.
+$g(h)$ maps GQA query heads to KV heads; $\mathcal V_r(i)$ is the request's causal history. No K/V from another request $r'$ appears.
 
 Requests may pack token rows into one tensor, but request boundaries, lengths, and page tables must remain intact. Packed attention normalizes within each request's visible history. Combining all requests' K/V without boundary constraints changes the model.
 
 An FFN acts independently on each row:
 
-\[
+$$
 f(x)=W_{\mathrm{down}}\bigl(\operatorname{SiLU}(W_{\mathrm{gate}}x)\odot W_{\mathrm{up}}x\bigr)
-\]
+$$
 
 Concatenating DP0/DP1 hidden rows for FFN execution preserves the mathematics if outputs return in the original order. MoE also routes and combines per token, while communication must preserve source-token identity.
 
 ## 5. Attention TP Shards Weights; DP Assigns Requests
 
-Use row-vector notation for GQA with `H=4096,Nq=32,Nkv=8,Dk=Dv=128`. DP0 has `n0=4` tokens this step and DP1 has `n1=2`; `T=2`:
+Use row-vector notation for GQA with `H=4096,Nq=32,Nkv=8,Dk=Dv=128`. DP0 has $n_0=4$ tokens this step and DP1 has $n_1=2$; `T=2`:
 
 ```text
 Input within attention-DP subgroup: X_d [n_d,4096]
@@ -137,9 +137,9 @@ A_partial = O_flat @ W_O_local: [n_d,4096]
 
 Output projection on the two subgroup ranks produces **partial sums** over different input channels:
 
-\[
+$$
 A_d=A_{d,0}^{\mathrm{partial}}+A_{d,1}^{\mathrm{partial}}
-\]
+$$
 
 Shapes match, but values are incomplete. Communication must sum contributions before the appropriate residual/RMSNorm operation.
 
@@ -182,19 +182,19 @@ flowchart TD
 
 Mathematically, the MLP input is:
 
-\[
+$$
 U=\operatorname{concat}_{d}\operatorname{RMSNorm}(X_d+A_d)
-\]
+$$
 
 Gathering must perform both partial-value reduction and DP-row concatenation. Padding mode determines how collectives accomplish those operations.
 
 ### 7.1 SUM_LEN: Zero-Filled All-Reduce Implements Concatenation
 
-Assign non-overlapping global intervals from communication lengths `n_d`:
+Assign non-overlapping global intervals from communication lengths $n_d$:
 
-\[
+$$
 N=\sum_dn_d,\qquad s_d=\sum_{j<d}n_j
-\]
+$$
 
 Each rank creates a zero `[N,H]` buffer and writes only its subgroup interval `[s_d:s_d+n_d]`. A world all-reduce sums these buffers:
 
@@ -223,11 +223,11 @@ If rank0/1 already both hold `[10,20]` and both contribute, the result incorrect
 
 Pad every DP subgroup to the same length:
 
-\[
+$$
 m=\max_dn_d,\qquad N=Dm
-\]
+$$
 
-When `T>1`, first reduce-scatter within attention TP: sum partial values and assign `m/T` rows to each rank. Then all-gather over the entire world:
+When $T>1$, first reduce-scatter within attention TP: sum partial values and assign $m/T$ rows to each rank. Then all-gather over the entire world:
 
 ```text
 Subgroup reduce-scatter:
@@ -244,26 +244,26 @@ For replicated inputs, non-leader subgroup copies are zeroed first so the same r
 
 ### 7.3 Residual Is Added Once; Norm Follows Reduction
 
-For attention partials `A0/A1`, the complete residual is:
+For attention partials $A_0$ and $A_1$, the complete residual is:
 
-\[
+$$
 R=X+A_0+A_1
-\]
+$$
 
-Adding `X` on both ranks before reduction produces `2X+A0+A1`. The source therefore adds the replicated residual only on subgroup rank0.
+Adding $X$ on both ranks before reduction produces $2X+A_0+A_1$. The source therefore adds the replicated residual only on subgroup rank0.
 
 Also:
 
-\[
+$$
 \operatorname{RMSNorm}(A_0+A_1+X)
 \ne\operatorname{RMSNorm}(A_0+X)+\operatorname{RMSNorm}(A_1)
-\]
+$$
 
-When `T=1`, local attention output is already complete: normalization may run on smaller local data before gathering. With `T>1`, contributions must be combined first.
+When $T=1$, local attention output is already complete: normalization may run on smaller local data before gathering. With $T>1$, contributions must be combined first.
 
 ## 8. Path B: Sharded Source Tokens and Expert Dispatch/Combine
 
-With a dedicated MoE A2A backend, `LayerScatterModes` normally selects `SCATTERED`. For `T>1`, attention-subgroup reduce-scatter produces complete values for only a slice of token rows:
+With a dedicated MoE A2A backend, `LayerScatterModes` normally selects `SCATTERED`. For $T>1$, attention-subgroup reduce-scatter produces complete values for only a slice of token rows:
 
 ```text
 Attention output [n_d,H], partial values
@@ -290,9 +290,9 @@ flowchart LR
 
 With `P=4,ep_size=4,moe_dp_size=1`:
 
-\[
+$$
 \mathrm{moe\_tp\_size}=P/(\mathrm{moe\_dp\_size}\cdot\mathrm{ep\_size})=1
-\]
+$$
 
 Ranks own different experts. Source-token ownership and expert ownership are independent; a rank with no local requests can still own experts needed by other ranks.
 
@@ -323,9 +323,9 @@ Request ownership is separate, but execution rounds remain coordinated. Throughp
 
 ## 10. Three Different Lengths in Padding
 
-1. **Real length** `n_d`: valid tokens in this step. Decode usually has one per request; prefill counts new tokens; speculative verification may have several per request.
-2. **Aligned communication length** `a_d`: padded for operations such as reduce-scatter.
-3. **Graph length** `b`: selected capture bucket, potentially larger than real length.
+1. **Real length** $n_d$: valid tokens in this step. Decode usually has one per request; prefill counts new tokens; speculative verification may have several per request.
+2. **Aligned communication length** $a_d$: padded for operations such as reduce-scatter.
+3. **Graph length** $b$: selected capture bucket, potentially larger than real length.
 
 In this snapshot, `ForwardBatch.prepare_mlp_sync_batch()` aligns first to `attn_tp_size`, then to `attn_cp_size*2`. For `T=2,C=1`, real `[3,1]` becomes `[4,2]`. Real token count is not automatically the collective buffer length.
 
@@ -352,7 +352,7 @@ Without CP, a request's KV lives in its attention-DP subgroup and follows attent
 Per-rank historical K/V: [L_request,Nkv/T,D]
 ```
 
-With too few KV heads, an implementation may replicate heads; do not apply `Nkv/T` mechanically to every configuration.
+With too few KV heads, an implementation may replicate heads; do not apply $N_{\mathrm{kv}}/T$ mechanically to every configuration.
 
 An MLA latent entry may be replicated across subgroup TP ranks. Lower attention TP can reduce those copies while increasing local query heads and attention-weight share. Memory benefits require accounting for real cache pools and weights.
 
@@ -360,7 +360,7 @@ Cross-DP prefix reuse is not automatic: prefix lookup and physical pages belong 
 
 ## 12. A Performance Ledger
 
-Let full attention weights be `W_A` and FFN/expert weights `W_F`, for an order-of-magnitude estimate:
+Let full attention weights be $W_A$ and FFN/expert weights $W_F$, for an order-of-magnitude estimate:
 
 ```text
 Attention weights per rank ≈ W_A/T       # account separately for replicated projections
@@ -390,7 +390,7 @@ It shows rank topology, equivalent gather results, replica deduplication, real-t
 
 1. For `P=8,D=4,C=1`, enumerate coordinates and attention TP groups.
 2. For `P=8,D=2,C=2`, enumerate TP/CP groups and identify which requests they handle.
-3. Remove replicated-input deduplication in the demo and observe the erroneous factor `T`.
+3. Remove replicated-input deduplication in the demo and observe the erroneous factor $T$.
 4. For real counts `[7,1,0,2]`, apply this snapshot's `T=2,C=1` alignment before selecting eager padding mode.
 5. Explain why `dp_scatter()` can be a local copy while `dp_reduce_scatter_tensor()` requires a collective.
 
