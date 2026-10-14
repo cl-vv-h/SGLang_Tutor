@@ -99,24 +99,110 @@ For `P=8,D=2,C=2,T=2`, attention TP groups are `[0,1], [2,3], [4,5], [6,7]`; att
 
 ## 4. Why Requests Can Run Attention Separately
 
-For request $`r`$, head $`h`$, and query position $`i`$:
+The point of this section is simple: **attention for one request does not need another request's history, so different requests can run in different attention-DP groups.** This does not split one request's history, nor does it mean that tokens within a request are independent.
+
+### 4.1 Imagine Two People Using the Same Model
+
+User A asks about “the weather in Beijing,” while user B asks the model to “write a poem.” They use the same model weights, but have separate conversation histories:
+
+- A's Query compares only against A's historical Keys and takes a weighted sum of A's Values.
+- B's Query compares only against B's historical Keys and takes a weighted sum of B's Values.
+- B mentioning poetry must not make those tokens part of A's context.
+
+Think of model weights as a shared rulebook, and KV caches as each user's conversation notes. **Sharing the rulebook does not mean sharing the notes.** Requests with a common prefix may reuse physical cache pages, but each request's logically visible context is still determined by its own metadata.
+
+### 4.2 Follow the Tensors: Why Does A Not Need B?
+
+Consider a decode step with one Query per request. Omit the batch/head axes and follow one Query head and its corresponding KV head. Suppose A's Query sees 3 tokens and B's sees 2. These are illustrative visible lengths, **not the actual tokenization of the sentences above**. Causal attention may see the current position and earlier positions.
+
+Here `Dk` is the Query/Key width, and `Dv` is the Value width:
+
+```text
+Request A:
+Q_A [1,Dk] @ K_A.T [Dk,3] -> scores_A [1,3]
+scores_A / sqrt(Dk)       -> scaled_scores_A [1,3]
+softmax (over 3 positions)-> weights_A [1,3]
+weights_A @ V_A [3,Dv]    -> O_A [1,Dv]
+
+Request B:
+Q_B [1,Dk] @ K_B.T [Dk,2] -> scores_B [1,2]
+scores_B / sqrt(Dk)       -> scaled_scores_B [1,2]
+softmax (over 2 positions)-> weights_B [1,2]
+weights_B @ V_B [2,Dv]    -> O_B [1,Dv]
+```
+
+For example, if A's three scores become `[0.2,0.5,0.3]` after softmax, A's output is `0.2*v_A1 + 0.5*v_A2 + 0.3*v_A3`. B's Values do not participate in this sum, and B's scores do not participate in A's softmax denominator.
+
+Consequently, placing A in DP0 and B in DP1 preserves the mathematical outputs as long as their inputs, weights, and visible KV remain unchanged (floating-point execution may introduce rounding differences). If a DP group also uses TP, its ranks still collaborate to compute attention. Independent requests do not mean every device can perform the entire computation alone.
+
+```mermaid
+flowchart TD
+    A["Request A: Query + A's visible KV"] --> AA["DP0: Attention"]
+    B["Request B: Query + B's visible KV"] --> AB["DP1: Attention"]
+    AA --> HA["A's current hidden rows"]
+    AB --> HB["B's current hidden rows"]
+    HA --> F["Process rows using the FFN/MoE parallel strategy"]
+    HB --> F
+    F --> RA["Return A's results to DP0"]
+    F --> RB["Return B's results to DP1"]
+    RA --> NA["Next attention layer: read only A's visible KV"]
+    RB --> NB["Next attention layer: read only B's visible KV"]
+```
+
+The hidden rows in this diagram are the current token representations entering FFN/MoE after attention. Output projection, residual connections, and normalization are omitted to emphasize request ownership.
+
+### 4.3 Computing Together Does Not Mean Seeing Each Other
+
+Even when A's and B's token rows are packed into one tensor, attention must preserve request boundaries. A's Query may access only A's visible KV, and B's Query only B's visible KV. Implementations can enforce this through masks, sequence lengths, page tables, and related metadata; they do not necessarily materialize a giant mask matrix.
+
+If A's Query incorrectly applies softmax over all 5 Keys from A and B, the denominator changes and B's Values may enter the result. This is no longer the original model computation for A. That is why packed attention requires request boundaries.
+
+Remember: **different requests are independent; positions within one request are not.** A's current token still depends on A's history. Splitting A's long context across devices is the dimension handled by CP, not a consequence of request independence.
+
+### 4.4 Why Can an FFN Batch A and B Together?
+
+Attention takes weighted sums across visible positions within a request. An ordinary FFN transforms each current token's features without reading other token rows. At the FFN input, each token has a hidden vector of width `H`; the earlier single-head width `Dv` must not be confused with `H`.
+
+Suppose A and B each contribute one row:
+
+```text
+X_A [1,H] --+
+            +-- concatenate rows -> X [2,H] -> FFN -> Y [2,H]
+X_B [1,H] --+                                       +-- row 0 -> A
+                                                    +-- row 1 -> B
+```
+
+Using row-vector notation, the complete shape flow through a SwiGLU FFN is:
+
+```text
+X [2,H] @ W_gate [H,I] -> G [2,I]
+X [2,H] @ W_up   [H,I] -> U [2,I]
+SiLU(G) * U            -> Z [2,I]   # elementwise; no mixing of rows
+Z [2,I] @ W_down [I,H] -> Y [2,H]
+```
+
+`I` is the FFN intermediate width. Each matrix multiplication applies the same weights to each input row. A's output depends only on A's row. Combining two rows into a larger GEMM batches the computation; it does not exchange context between the requests.
+
+Thus, **separating attention by request and batching FFN computation by token row are compatible.** Whether hidden rows are collected across DP groups depends on the FFN/MoE parallel strategy: not every path begins with a global all-gather. MoE additionally dispatches tokens to their experts and returns results to the original token positions. Later sections distinguish these communication paths.
+
+### 4.5 Now Revisit the Original Equation
+
+For request $`r`$, head $`h`$, and query position $`i`$, use column vectors for Q/K/V:
 
 ```math
 o_{r,h,i}=\sum_{j\in\mathcal{V}_r(i)}
 \mathrm{softmax}_{j}\left(q_{r,h,i}^{\mathsf T}k_{r,g(h),j}/\sqrt{D_k}\right)v_{r,g(h),j}
 ```
 
-$`g(h)`$ maps GQA query heads to KV heads; $`\mathcal{V}_r(i)`$ is the request's causal history. No K/V from another request $`r'`$ appears.
+This is simply the general form of the computation in Section 4.2:
 
-Requests may pack token rows into one tensor, but request boundaries, lengths, and page tables must remain intact. Packed attention normalizes within each request's visible history. Combining all requests' K/V without boundary constraints changes the model.
+- $`q_{r,h,i}`$: request r's Query at position i and head h, with shape `[Dk]`.
+- $`g(h)`$: the KV head associated with this Query head in GQA.
+- $`\mathcal{V}_r(i)`$: the set of token positions visible to request r at position i; it excludes other requests' positions.
+- $`k_{r,g(h),j}`$ and $`v_{r,g(h),j}`$: this request's Key/Value at visible position j, with shapes `[Dk]` and `[Dv]`.
+- The inner product produces a scalar score for each position. Softmax normalizes only over this request's visible positions, and the weighted sum produces a `[Dv]` output.
 
-An FFN acts independently on each row:
-
-```math
-f(x)=W_{\mathrm{down}}\bigl(\mathrm{SiLU}(W_{\mathrm{gate}}x)\odot W_{\mathrm{up}}x\bigr)
-```
-
-Concatenating DP0/DP1 hidden rows for FFN execution preserves the mathematics if outputs return in the original order. MoE also routes and combines per token, while communication must preserve source-token identity.
+The key observation for request partitioning is that **every Query, Key, and Value in this equation belongs to request r. No other request's K/V appears.**
 
 ## 5. Attention TP Shards Weights; DP Assigns Requests
 

@@ -99,24 +99,110 @@ flowchart LR
 
 ## 4. 为什么请求可以分开做 Attention
 
-对请求 $`r`$、head $`h`$、query position $`i`$：
+这一节只想说明一件事：**不同请求的 Attention 不需要互相读取历史，因此可以把不同请求分配给不同的 Attention DP 组。** 这不是把一个请求的历史拆开，也不是说 Attention 中的每个 token 都彼此独立。
+
+### 4.1 先想象两个人同时使用同一个模型
+
+用户 A 在问“北京的天气”，用户 B 在说“帮我写诗”。模型使用同一套权重，但两个人的对话历史不同：
+
+- A 的 Query 只与 A 自己的历史 Key 比较，再对 A 自己的 Value 加权求和。
+- B 的 Query 只与 B 自己的历史 Key 比较，再对 B 自己的 Value 加权求和。
+- A 不应该因为 B 输入了“写诗”，就把 B 的 token 当成自己的上下文。
+
+可以把模型权重理解为“同一本计算规则”，把 KV cache 理解为“各自的对话笔记”。**规则相同，不代表笔记也要共享。** 两个请求可能因共享前缀而复用相同的物理 cache 页，但每个请求的逻辑可见上下文仍然由自己的元数据决定。
+
+### 4.2 跟着张量走一遍：A 为什么不需要 B？
+
+以 decode 中每个请求本轮有一个 Query 为例。暂时省略 batch/head 轴，只看一个 Query head 及它对应的 KV head。设 A 的 Query 可以看到 3 个 token，B 可以看到 2 个 token；这是教学用的可见长度，**不是上面两句中文的实际分词数**。因果 Attention 可以看到当前位置及更早的位置。
+
+其中 `Dk` 是 Query/Key 的向量宽度，`Dv` 是 Value 的向量宽度：
+
+```text
+请求 A：
+Q_A [1,Dk] @ K_A.T [Dk,3] -> scores_A [1,3]
+scores_A / sqrt(Dk)       -> scaled_scores_A [1,3]
+softmax（沿 3 个位置）    -> weights_A [1,3]
+weights_A @ V_A [3,Dv]    -> O_A [1,Dv]
+
+请求 B：
+Q_B [1,Dk] @ K_B.T [Dk,2] -> scores_B [1,2]
+scores_B / sqrt(Dk)       -> scaled_scores_B [1,2]
+softmax（沿 2 个位置）    -> weights_B [1,2]
+weights_B @ V_B [2,Dv]    -> O_B [1,Dv]
+```
+
+例如，A 的三个分数经过 softmax 得到 `[0.2,0.5,0.3]`，那么 A 的输出就是 `0.2*v_A1 + 0.5*v_A2 + 0.3*v_A3`。B 的 Value 完全没有参与这个加权和，B 的分数也没有参与 A 的 softmax 分母。
+
+因此，只要保持各自的输入、权重和可见 KV 不变，把 A 放在 DP0、B 放在 DP1，在数学上仍然得到相同的输出（实际浮点执行可能有舍入差异）。DP 组内部若还有 TP，各 rank 仍需要协作完成该组的 Attention；“请求独立”不等于“每张卡都能独自完成全部计算”。
+
+```mermaid
+flowchart TD
+    A["请求 A：Query + A 的可见 KV"] --> AA["DP0：Attention"]
+    B["请求 B：Query + B 的可见 KV"] --> AB["DP1：Attention"]
+    AA --> HA["A 的当前 hidden rows"]
+    AB --> HB["B 的当前 hidden rows"]
+    HA --> F["按 FFN/MoE 并行策略处理这些行"]
+    HB --> F
+    F --> RA["A 的结果返回 DP0"]
+    F --> RB["B 的结果返回 DP1"]
+    RA --> NA["下一层 Attention：仍只读 A 的可见 KV"]
+    RB --> NB["下一层 Attention：仍只读 B 的可见 KV"]
+```
+
+图中的 hidden rows 指 Attention 之后、送入 FFN/MoE 的当前 token 表示；中间的输出投影、残差和归一化为突出请求流向而省略了。
+
+### 4.3 “一起计算”不等于“互相看见”
+
+即使把 A、B 的 token 行打包进同一个张量，Attention 也必须保留请求边界。A 的 Query 只能访问 A 的可见 KV，B 的 Query 只能访问 B 的可见 KV。实现可以通过 mask、序列长度、page table 等元数据限制访问；不一定真的构造一个巨大的 mask 矩阵。
+
+如果错误地让 A 的 Query 对 A、B 总共 5 个 Key 做 softmax，就会改变归一化分母，还可能读到 B 的 Value，结果已不是原模型对 A 的计算。这正是为什么 packed attention 需要请求边界。
+
+注意：**独立的是不同请求，不是同一请求里的不同位置。** A 的当前 token 仍依赖 A 的历史。如果要把 A 的长上下文分给多张卡，那是 CP 所处理的维度，不能直接用这里的请求独立性解释。
+
+### 4.4 那为什么 FFN 又能把 A、B 合批？
+
+Attention 会在一个请求的多个可见位置之间加权求和；普通 FFN 则只变换当前 token 的特征，不读取其他 token 行。送入 FFN 时，每个 token 已经是宽度为 `H` 的 hidden 向量，不能把前面单个 head 的 `Dv` 直接当成 `H`。
+
+假设 A、B 各有一行送入 FFN：
+
+```text
+X_A [1,H] ─┐
+            ├─ 按行拼接 -> X [2,H] -> FFN -> Y [2,H]
+X_B [1,H] ─┘                              ├─ 第 0 行 -> A
+                                         └─ 第 1 行 -> B
+```
+
+用 row-vector 记法，SwiGLU FFN 的完整形状变化为：
+
+```text
+X [2,H] @ W_gate [H,I] -> G [2,I]
+X [2,H] @ W_up   [H,I] -> U [2,I]
+SiLU(G) * U            -> Z [2,I]   # 逐元素乘；不混合两行
+Z [2,I] @ W_down [I,H] -> Y [2,H]
+```
+
+`I` 是 FFN 的中间维度。每个矩阵乘法都对输入的每一行应用相同权重，A 的结果只由 A 那一行决定；把两行合成一个更大的 GEMM，是合批执行，不是让两个请求交换上下文。
+
+因此，**Attention 可以按请求分开，而 FFN 可以按 token 行合批，这两件事并不矛盾。** 实际是否跨 DP 组收集 hidden rows，取决于 FFN/MoE 的并行策略，并非所有路径都先做全局 all-gather。MoE 还需要把 token 发给相应专家，再把结果返回原 token 的位置；后文会区分这些通信路径。
+
+### 4.5 最后再读原来的公式
+
+对请求 $`r`$、head $`h`$、query position $`i`$，用列向量表示 Q/K/V：
 
 ```math
 o_{r,h,i}=\sum_{j\in\mathcal{V}_r(i)}
 \mathrm{softmax}_{j}\left(q_{r,h,i}^{\mathsf T}k_{r,g(h),j}/\sqrt{D_k}\right)v_{r,g(h),j}
 ```
 
-$`g(h)`$ 是 GQA 的 query-head 到 KV-head 映射，$`\mathcal{V}_r(i)`$ 是该请求的因果可见历史。式子里没有另一个请求 $`r'`$ 的 K/V。
+这只是把 4.2 的过程写成通用形式：
 
-多个请求可以把 token 行打包进同一个张量，但必须保持 request boundary、长度和 page table。正确的 packed attention 只在各自请求内部归一化；把所有请求的 K/V 拼起来且不加边界约束，会改变模型函数。
+- $`q_{r,h,i}`$：请求 r 在位置 i、head h 上的 Query，shape 为 `[Dk]`。
+- $`g(h)`$：GQA 中该 Query head 对应的 KV head。
+- $`\mathcal{V}_r(i)`$：请求 r 在位置 i 可以看到的 token 位置集合，不包含其他请求的位置。
+- $`k_{r,g(h),j}`$、$`v_{r,g(h),j}`$：这个请求在可见位置 j 上的 Key/Value，shape 分别为 `[Dk]`、`[Dv]`。
+- 内积得到每个位置的标量分数，softmax 只沿该请求的可见位置归一化；最终加权求和得到 `[Dv]` 输出。
 
-FFN 则逐 token 执行：
-
-```math
-f(x)=W_{\mathrm{down}}\bigl(\mathrm{SiLU}(W_{\mathrm{gate}}x)\odot W_{\mathrm{up}}x\bigr)
-```
-
-它对不同 token 行独立。因此把 DP0/DP1 的 hidden rows 拼到同一 FFN 输入中，只要输出按原顺序返回，就保持数学等价。MoE 也按 token 产生路由和加权专家输出，但通信要保持 token 到原位置的映射。
+判断能否按请求拆分时，最关键的是：**整个公式只出现请求 r 的 Query、Key、Value，没有另一个请求的 K/V。**
 
 ## 5. Attention TP 切权重，DP 切请求
 
