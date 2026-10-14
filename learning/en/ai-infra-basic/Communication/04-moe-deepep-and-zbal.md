@@ -60,6 +60,8 @@ This is the **ZBAL used by SGLang NPU**: **Zero Buffer Acceleration Library**, u
 
 Its motivation can be understood as jointly designing memory allocation/layout and communication operators to reduce intermediate buffering and copying. It is more than renaming HCCL. **Zero Buffer does not mean no memory or no synchronization**: model tensors, outputs, registered regions, and auxiliary data still have lifetimes.
 
+For implementation details, read [07: ZBAL zero buffer source and dataflow](./07-zbal-zero-buffer-source-dataflow.md). It follows GVA bootstrap, allocation, the AllGather ring, and direct MoE addressing, then identifies remaining scratch, UB, and flatten/copy operations.
+
 ## 5. Three ZBAL Integration Points in SGLang
 
 | Entry | Current Code Behavior | Why It Matters |

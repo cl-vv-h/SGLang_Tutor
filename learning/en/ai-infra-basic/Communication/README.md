@@ -16,6 +16,7 @@ Read this topic after [Parallel Strategy](../Parallel_Strategy/README.md), along
 | [04-moe-deepep-and-zbal.md](./04-moe-deepep-and-zbal.md) | What do DeepEP dispatch/combine do, and how does SGLang NPU integrate ZBAL? |
 | [05-kv-transfer-mooncake-and-nixl.md](./05-kv-transfer-mooncake-and-nixl.md) | How do Mooncake TE, Store, EP/PG, NIXL, and Ascend TransferEngine differ? |
 | [06-sglang-paths-and-performance.md](./06-sglang-paths-and-performance.md) | How do we trace model calls into communication and diagnose slow ranks, links, and overlap? |
+| [07-zbal-zero-buffer-source-dataflow.md](./07-zbal-zero-buffer-source-dataflow.md) | Source deep dive after Chapter 04: GVA/allocators, zero buffer, retained/avoided copies, HCCL delegation, and actual MoE address dataflow |
 | [communication_semantics_demo.py](./communication_semantics_demo.py) | Verify reduction, concatenation, sharding, and MoE restoration with pure Python and no accelerator |
 
 ## Technology Map
@@ -53,6 +54,8 @@ python3 learning/en/ai-infra-basic/Communication/communication_semantics_demo.py
 The demo simulates semantics and estimates costs in one process; it **does not measure network performance**. Chapter 03 also includes a two-process Gloo example that can be saved and run with a distributed/Gloo-enabled PyTorch installation.
 
 Sources checked: **2026-10-13**. SGLang call paths use this repository's `f249f7b` source as the baseline; relative links support reading alongside the code. Upstream communication libraries evolve quickly: in particular, do not mix DeepEP's `Buffer/Config` interface with newer `EPBuffer` APIs. Consult the linked official documentation for hardware matrices and installation versions.
+
+The ZBAL deep dive was checked on **2026-10-14**. Read Chapter 07 after Chapter 04 to follow the actual allocator, ProcessGroup, and Ascend C kernels at a pinned MemFabric commit.
 
 ## Further Source Walkthroughs
 

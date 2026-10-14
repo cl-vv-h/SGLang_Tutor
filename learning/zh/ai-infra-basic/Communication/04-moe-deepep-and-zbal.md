@@ -60,6 +60,8 @@ flowchart LR
 
 理解动机时可以把它看作“内存布局/分配与通信算子共同设计”：减少中间通信缓冲和搬运机会，而不只是把 HCCL 的名字替换掉。**Zero Buffer 不代表无需内存，也不代表无需同步**；模型 tensor、输出、注册区域和辅助信息仍有生命周期。
 
+进一步理解实现，继续读 [07：ZBAL zero buffer 源码与数据流](./07-zbal-zero-buffer-source-dataflow.md)。该讲逐步追踪 GVA bootstrap、allocator、AllGather ring 和 MoE 直接寻址，并用实际 scratch、UB、flatten/copy 说明“zero buffer”的适用边界。
+
 ## 5. SGLang 中 ZBAL 的三个接入点
 
 | 入口 | 当前代码行为 | 阅读意义 |

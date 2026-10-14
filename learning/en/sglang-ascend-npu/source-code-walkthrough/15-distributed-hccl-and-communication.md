@@ -1,5 +1,7 @@
 # 15. Distributed HCCL & Communication on NPU
 
+For ZBAL internals, see [zero buffer source and dataflow](../../ai-infra-basic/Communication/07-zbal-zero-buffer-source-dataflow.md): GVA/allocation, ProcessGroupZBAL delegation to HCCL, and direct application-tensor access through the DeepEP adapter.
+
 ## 1. HCCL Collective Operations in SGLang
 
 | Operation | SGLang Usage | HCCL Call |

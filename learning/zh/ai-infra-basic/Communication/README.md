@@ -16,6 +16,7 @@
 | [04-moe-deepep-and-zbal.md](./04-moe-deepep-and-zbal.md) | DeepEP dispatch/combine 做了哪些事？SGLang NPU 的 ZBAL 怎样接入？ |
 | [05-kv-transfer-mooncake-and-nixl.md](./05-kv-transfer-mooncake-and-nixl.md) | Mooncake TE、Store、EP/PG、NIXL、Ascend TransferEngine 如何区分？ |
 | [06-sglang-paths-and-performance.md](./06-sglang-paths-and-performance.md) | 如何从模型调用追到通信实现，再定位慢 rank、链路和重叠问题？ |
+| [07-zbal-zero-buffer-source-dataflow.md](./07-zbal-zero-buffer-source-dataflow.md) | 第 04 讲的源码进阶：GVA/分配器、zero buffer、省掉与保留的复制、HCCL 委托、MoE 实际地址数据流 |
 | [communication_semantics_demo.py](./communication_semantics_demo.py) | 用纯 Python 验证规约、拼接、分片与 MoE 回排，不需要加速卡 |
 
 ## 技术地图
@@ -53,6 +54,8 @@ python3 learning/zh/ai-infra-basic/Communication/communication_semantics_demo.py
 demo 是单进程语义模拟和成本估算，**不测量真实网络性能**。第 03 讲另有可保存运行的两进程 Gloo 示例，需要安装支持 distributed/Gloo 的 PyTorch。
 
 资料核对日期：**2026-10-13**。SGLang 调用路径以本仓库 `f249f7b` 源码为基线，文内相对源码链接便于随仓库阅读。上游通信项目迭代快，尤其 DeepEP 的 `Buffer/Config` 与新版 `EPBuffer` 不应混用；硬件矩阵和安装版本以链接的官方说明为准。
+
+ZBAL 专项补充于 **2026-10-14** 核对：建议读完第 04 讲后接着读第 07 讲，跟随固定 MemFabric commit 查看实际 allocator、ProcessGroup 和 Ascend C kernel。
 
 ## 后续源码课
 
