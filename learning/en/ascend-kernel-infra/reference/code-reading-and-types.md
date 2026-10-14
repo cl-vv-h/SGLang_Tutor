@@ -181,7 +181,7 @@ In current public PyTorch headers, `c10::optional` exposes `std::optional` for c
 
 - `has_value()` only says whether the optional contains a value;
 - `value()` or `*indices` obtains the contained Tensor handle;
-- no optional value is not the same as a present tensor with shape `[0]`;
+- no optional value is not the same as a present tensor with shape $`\left[0\right]`$;
 - a present value still needs `defined()`, `numel()`, dtype, device, and shape checks.
 
 Different namespaces compose normally in C++ templates: C10 supplies the optional-value abstraction, while ATen supplies the Tensor type.

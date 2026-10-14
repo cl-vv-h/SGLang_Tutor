@@ -49,10 +49,16 @@ The transfer layer understands regions and byte counts, but typically cannot ver
 
 For ordinary MHA/GQA, assume equal K/V head dimensions across layers and no quantization, padding, replication, or prefix hits:
 
-```text
-KV_bytes = 2 * L * T * H_kv * D * bytes_per_element
-L=32, T=8192, H_kv=8, D=128, BF16=2 bytes
-KV_bytes = 1,073,741,824 bytes = 1 GiB
+```math
+\mathrm{KV}_{\mathrm{bytes}}=2\cdot L\cdot T\cdot H_{\mathrm{kv}}\cdot D\cdot \mathrm{bytes\_per\_element}
+```
+
+```math
+L=32, T=8192, H_{\mathrm{kv}}=8, D=128, \mathrm{BF16}=2 \mathrm{bytes}
+```
+
+```math
+\mathrm{KV}_{\mathrm{bytes}} = 1,073,741,824 \mathrm{bytes} = 1 \mathrm{GiB}
 ```
 
 At aggregate effective bandwidth `50 GB/s`, the ideal payload-only transfer time is **21.47 ms**. GB is decimal; GiB is binary. This lower bound excludes queuing, registration, layout conversion, protocol, and synchronization. It is not TTFT: whether prefill already returns the first token and whether KV is pipelined in chunks affect user-visible latency.

@@ -369,9 +369,12 @@ cache_len = req.mamba_last_track_seqlen
 
 如果最新输出长度超过了 tracked length，尾部 KV 可能不能和 Mamba state 对齐。SGLang 会裁剪：
 
-```text
-token_ids = token_ids[:cache_len]
-kv_indices = kv_indices[:cache_len]
+```math
+\mathrm{token\_ids} = \mathrm{token\_ids}\left[:\mathrm{cache\_len}\right]
+```
+
+```math
+\mathrm{kv\_indices} = \mathrm{kv\_indices}\left[:\mathrm{cache\_len}\right]
 ```
 
 这就是 `cache_finished_req` 里看到：
@@ -503,16 +506,22 @@ sequenceDiagram
 
 假设已有缓存：
 
-```text
-prefix P = [1, 2, 3, 4]
-KV indices = [100, 101, 102, 103]
-mamba_value = slot 7
+```math
+\text{prefix P}= \left[1, 2, 3, 4\right]
+```
+
+```math
+\text{KV indices}= \left[100, 101, 102, 103\right]
+```
+
+```math
+\mathrm{mamba\_value} = \mathrm{slot} 7
 ```
 
 新请求：
 
-```text
-[1, 2, 3, 4, 9, 10]
+```math
+\left[1,2,3,4,9,10\right]
 ```
 
 命中过程：

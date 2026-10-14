@@ -162,9 +162,9 @@ config.linear_layer_ids
 | `V` | `vocab_size` | 全局词表大小 |
 | `TP` | 启动参数 | tensor parallel 并行度 |
 | `H` | `num_attention_heads` | full attention Q head 总数 |
-| `Htp` | `H / TP` | 当前 rank 的 Q head 数 |
+| `Htp` | $`\frac{H}{\mathrm{TP}}`$ | 当前 rank 的 Q head 数 |
 | `Hkv` | `num_key_value_heads` | full attention K/V head 总数 |
-| `Hkv_tp` | `max(1, Hkv / TP)` | 当前 rank 的 K/V head 数，若 `Hkv < TP` 则按实现复制 |
+| `Hkv_tp` | $`\mathrm{max}\left(1,\frac{\mathrm{Hkv}}{\mathrm{TP}}\right)`$ | 当前 rank 的 K/V head 数，若 $`\mathrm{Hkv} \lt \mathrm{TP}`$ 则按实现复制 |
 | `Dh` | `head_dim` | full attention 每个 head 的 Q/K/V 维度 |
 | `Rrot` | `int(Dh * partial_rotary_factor)` | 每个 head 中参与 RoPE 的维度 |
 | `Lk` | `linear_key_head_dim` | GDN key/query head dim |
@@ -369,10 +369,16 @@ self.qkv_proj = QKVParallelLinear(
 
 若 `attn_output_gate=True`，本地 `qkv_proj` 输出会被切成：
 
-```text
-q_gate [N, 2 * Htp * Dh]
-k      [N, Hkv_tp * Dh]
-v      [N, Hkv_tp * Dh]
+```math
+{q_{\mathrm{gate}}}_{N,2\cdot \mathrm{Htp}\cdot \mathrm{Dh}}
+```
+
+```math
+k\qquad\mathrm{shape}:\left[N,\mathrm{Hkv\_tp}\cdot \mathrm{Dh}\right]
+```
+
+```math
+v\qquad\mathrm{shape}:\left[N,\mathrm{Hkv\_tp}\cdot \mathrm{Dh}\right]
 ```
 
 随后：
@@ -418,10 +424,16 @@ a     [N, linear_num_value_heads/TP]
 
 然后：
 
-```text
-mixed_qkv = cat(query, key, value)       [N, 2*key_dim/TP + value_dim/TP]
-z         = reshape to heads             [N, Lvh/TP, Lv]
-a, b      = contiguous gate vectors      [N, Lvh/TP]
+```math
+\mathrm{mixed\_qkv} = \mathrm{cat}\left(\mathrm{query}, \mathrm{key}, \mathrm{value}\right) \left[N, 2\cdot \mathrm{key\_dim}/\mathrm{TP} + \mathrm{value\_dim}/\mathrm{TP}\right]
+```
+
+```math
+z = \mathrm{reshape} \mathrm{to} \mathrm{heads} \left[N, \mathrm{Lvh}/\mathrm{TP}, \mathrm{Lv}\right]
+```
+
+```math
+\text{a, b}= \mathrm{contiguous} \mathrm{gate} \mathrm{vectors} \left[N, \mathrm{Lvh}/\mathrm{TP}\right]
 ```
 
 `mixed_qkv` 交给 `RadixLinearAttention`，`z` 交给 `RMSNormGated` 做输出门控归一化。
@@ -439,7 +451,7 @@ expert_params_mapping = FusedMoE.make_expert_params_mapping(
 )
 ```
 
-普通 expert 权重会写入 fused MoE 参数；有些 checkpoint 可能已经把 `experts.gate_up_proj` 做成融合格式，源码用 `fused_expert_params_mapping` 拆回 `w1/w3/w2` 语义。NPU 执行阶段会把 expert 权重交给 grouped matmul，而不是 Python 循环逐 expert 调 GEMM。
+普通 expert 权重会写入 fused MoE 参数；有些 checkpoint 可能已经把 `experts.gate_up_proj` 做成融合格式，源码用 `fused_expert_params_mapping` 拆回 $`\frac{\frac{\mathrm{w1}}{\mathrm{w3}}}{\mathrm{w2}}`$ 语义。NPU 执行阶段会把 expert 权重交给 grouped matmul，而不是 Python 循环逐 expert 调 GEMM。
 
 ## 6. 顶层 forward：embedding、逐层循环、final norm
 
@@ -591,7 +603,7 @@ RadixAttention.forward
 
 | 条件 | 常见 NPU 路径 |
 |---|---|
-| `ASCEND_USE_FIA=1` 且 shape/backend 支持 | `torch_npu.npu_fused_infer_attention_score` 或 v2 |
+| $`\mathrm{ASCEND\_USE\_FIA}=1`$ 且 shape/backend 支持 | `torch_npu.npu_fused_infer_attention_score` 或 v2 |
 | 非 FIA 且满足 qlens flash attention 条件 | `torch_npu._npu_flash_attention_qlens` |
 | shape 或场景不满足 fused 条件 | `native_attn.run_sdpa_forward_extend(...)` |
 
@@ -663,10 +675,19 @@ torch_npu._npu_paged_attention(
 
 attention 输出 shape：
 
+```math
+{\mathrm{attn\_output}}_{B,\mathrm{Htp}\cdot \mathrm{Dh}}
+```
+
+```math
+\mathrm{gate}\qquad\mathrm{shape}:\left[B,\mathrm{Htp}\cdot \mathrm{Dh}\right]
+```
+
+```math
+\mathrm{sigmoid}\left(\mathrm{gate}\right)\odot \mathrm{attn\_output}
+```
+
 ```text
-attn_output [B, Htp * Dh]
-gate        [B, Htp * Dh]
-sigmoid(gate) * attn_output
 o_proj -> [B, D] 的 TP partial
 ```
 
@@ -715,19 +736,29 @@ in_proj_ba output_sizes   = [num_v_heads, num_v_heads]
 
 当前 TP rank 上：
 
-```text
-projected_states_qkvz [N, 2*key_dim/TP + 2*value_dim/TP]
-projected_states_ba   [N, 2*linear_num_value_heads/TP]
+```math
+{\mathrm{projected\_states\_qkvz}}_{N,\frac{2\cdot \mathrm{key\_dim}}{\mathrm{TP}}+\frac{2\cdot \mathrm{value\_dim}}{\mathrm{TP}}}
+```
 
+```math
+\mathrm{projected\_states\_ba}\qquad\mathrm{shape}:\left[N,\frac{2\cdot \mathrm{linear\_num\_value\_heads}}{\mathrm{TP}}\right]
+```
+
+```text
 query [N, key_dim/TP]
 key   [N, key_dim/TP]
 value [N, value_dim/TP]
 z     [N, value_dim/TP] -> [N, Lvh/TP, Lv]
 b     [N, Lvh/TP]
 a     [N, Lvh/TP]
+```
 
-mixed_qkv = cat(query, key, value)
-          [N, 2*key_dim/TP + value_dim/TP]
+```math
+\mathrm{mixed\_qkv} = \mathrm{cat}\left(\mathrm{query}, \mathrm{key}, \mathrm{value}\right)
+```
+
+```math
+\left[N,\frac{2\cdot \mathrm{key\_dim}}{\mathrm{TP}}+\frac{\mathrm{value\_dim}}{\mathrm{TP}}\right]
 ```
 
 这里的 `query/key/value` 不是普通 softmax attention 的 Q/K/V。它们会进入 Gated Delta Rule，用 recurrent state 表示历史信息。
@@ -807,13 +838,16 @@ out_proj      [N, D] TP partial
 
 decode 每个请求通常只有一个新 token。`forward_decode()` 主线：
 
+```math
+{\mathrm{mixed\_qkv}}_{B,\frac{2\cdot \mathrm{key\_dim}}{\mathrm{TP}}+\frac{\mathrm{value\_dim}}{\mathrm{TP}}}
+```
+
 ```text
-mixed_qkv [B, 2*key_dim/TP + value_dim/TP]
-  -> causal_conv1d_update_npu
-  -> split query/key/value
-  -> reshape query/key/value to [1,B,heads,dim]
-  -> kernel_dispatcher.decode(...)
-  -> 更新 conv state 与 temporal state
+-> causal_conv1d_update_npu
+-> split query/key/value
+-> reshape query/key/value to [1,B,heads,dim]
+-> kernel_dispatcher.decode(...)
+-> 更新 conv state 与 temporal state
 ```
 
 核心代码关系：
@@ -942,13 +976,13 @@ UnquantizedFusedMoEMethod.forward_npu
 
 | 步骤 | 输入 | 输出 | 作用 |
 |---|---|---|---|
-| router | `[N,D]` | router logits `[N,E]` | 每个 token 对所有 expert 打分 |
-| top-k | logits | ids/weights `[N,K]` | 选出 K 个 routed experts |
-| routing init | hidden + ids | expanded hidden `[N*K,D]` | 把 token 展开成 token-expert 对并按 expert 分组 |
+| router | $`\left[N,D\right]`$ | router logits $`\left[N,E\right]`$ | 每个 token 对所有 expert 打分 |
+| top-k | logits | ids/weights $`\left[N,K\right]`$ | 选出 K 个 routed experts |
+| routing init | hidden + ids | expanded hidden $`\left[N\cdot K,D\right]`$ | 把 token 展开成 token-expert 对并按 expert 分组 |
 | grouped matmul 1 | grouped hidden + `w13` | packed gate/up | 每个 expert 处理自己的 token 段 |
-| activation | packed gate/up | intermediate | `SiLU(gate) * up` |
+| activation | packed gate/up | intermediate | $`\mathrm{SiLU}\left(\mathrm{gate}\right)\odot \mathrm{up}`$ |
 | grouped matmul 2 | intermediate + `w2` | expert output | 回到 hidden size |
-| finalize | expert output + weights | `[N,D]` | 按原 token 聚合 K 路 expert 输出 |
+| finalize | expert output + weights | $`\left[N,D\right]`$ | 按原 token 聚合 K 路 expert 输出 |
 
 如果启用 DeepEP、FuseEP 或 shared expert fusion，MoE 的 dispatch/combine 和 shared expert 位置会变化，但 decoder layer 外层仍然通过 `Qwen2MoeSparseMoeBlock.forward()` 进入。
 
@@ -987,14 +1021,14 @@ Layer k-1 attention
 ...
 ```
 
-每一层的输入输出仍然都是 `[B,D]`，但内部读取的历史状态不同：
+每一层的输入输出仍然都是 $`\left[B,D\right]`$，但内部读取的历史状态不同：
 
 | 阶段 | full attention layer | linear attention layer |
 |---|---|---|
 | prepare | `split_qkvgate_gemma_rmsnorm_rope` 或 native prepare | `in_proj_qkvz` + `in_proj_ba` |
 | 历史状态 | paged K/V cache | conv/SSM recurrent state |
 | 核心 op | `_npu_paged_attention` / FIA | `causal_conv1d_update_npu` + GDN decode |
-| 输出门控 | `sigmoid(gate) * attn_output` | `RMSNormGated(core_attn_out, z)` |
+| 输出门控 | $`\mathrm{sigmoid}\left(\mathrm{gate}\right)\odot \mathrm{attn\_output}`$ | `RMSNormGated(core_attn_out, z)` |
 | 输出投影 | `o_proj` | `out_proj` |
 
 `LayerCommunicator` 在两类层之间维持相同的 residual 和 TP 通信语义，因此上一层是 full attention 还是 linear attention，不会改变下一层接收到的主干 shape。
@@ -1013,11 +1047,13 @@ NPUGraphRunner.replay_prepare(forward_batch)
 
 full attention replay 更新：
 
-```text
 block_tables
-seq_lens / actual_seq_lengths_kv
-out_cache_loc
+
+```math
+\frac{\mathrm{seq\_lens}}{\mathrm{actual\_seq\_lengths\_kv}}
 ```
+
+out_cache_loc
 
 GDN replay 更新：
 
@@ -1048,7 +1084,7 @@ return self.logits_processor(
 
 | 场景 | hidden rows 选择 |
 |---|---|
-| decode | 通常 `[B,D]` 全部用于 next-token logits |
+| decode | 通常 $`\left[B,D\right]`$ 全部用于 next-token logits |
 | prefill 且不返回 prompt logprobs | 每个请求最后一个有效 token |
 | prefill 且返回 prompt logprobs | 根据 `extend_seq_lens_cpu`、`extend_logprob_start_lens_cpu` 选择更多 token |
 | DP attention / graph padding | 依据 `dp_local_*`、`num_token_non_padded_cpu` 处理有效范围 |

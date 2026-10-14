@@ -54,9 +54,15 @@ strict rejection sampling commits accepted prefix
 
 适合使用场景：
 
+```math
+\mathrm{target} = 70B
+```
+
+```math
+\mathrm{draft} = 7B \text{或更小}
+```
+
 ```text
-target = 70B
-draft  = 7B 或更小
 draft latency << target latency
 draft output distribution close enough to target
 ```
@@ -177,8 +183,11 @@ target forward at position t
 
 NGRAM 方法不运行神经网络 draft，而是从已有上下文里找重复片段：
 
+```math
+\text{prefix tail}= \left[A,B,C\right]
+```
+
 ```text
-prefix tail = [A,B,C]
 context 中曾出现 [A,B,C,D,E,F]
 draft proposes [D,E,F]
 ```
@@ -294,9 +303,12 @@ small batch             -> 更深 speculation 可能更划算
 
 也可以写成更短的符号形式：
 
-```text
-EMA_accept_len = smooth(observed_accept_len)
-target_steps   = clamp(round(EMA_accept_len) + 1, allowed_tiers)
+```math
+\mathrm{EMA\_accept\_len} = \mathrm{smooth}\left(\mathrm{observed\_accept\_len}\right)
+```
+
+```math
+\mathrm{target\_steps}=\mathrm{clamp}\left(\mathrm{round}\left(\mathrm{EMA\_accept\_len}\right)+1,\mathrm{allowed\_tiers}\right)
 ```
 
 读法：

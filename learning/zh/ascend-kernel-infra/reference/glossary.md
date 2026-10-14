@@ -109,14 +109,14 @@
 | Block Index | 当前 Ascend C 实例编号，常由 `GetBlockIdx()` 获取 |
 | Tile | 从大 tensor 切下、一次在某核上处理的数据块 |
 | Logical Tile / Logical Block | 从数学输出空间切出来的一份逻辑工作单元；它说明“总共有多少块工作”，不等于“这次真的启动了多少物理核” |
-| `num_matrices` | `mega_chunk_gdn` 里表示本次 device 侧需要处理的逻辑矩阵数量，当前 Python wrapper 计算为 `num_chunks * num_value_heads`；它不是 token 数，也不是物理 core 数 |
+| `num_matrices` | `mega_chunk_gdn` 里表示本次 device 侧需要处理的逻辑矩阵数量，当前 Python wrapper 计算为 $`\mathrm{num\_chunks}\cdot \mathrm{num\_value\_heads}`$；它不是 token 数，也不是物理 core 数 |
 | `H` / NumValueHeads | 本课程在 FLA mega kernel 上下文中常用 `H` 表示 value heads 数，即 `v/g/beta` 使用的 head 数 |
 | `Hg` / NumKeyHeads | 本课程在 FLA mega kernel 上下文中常用 `Hg` 表示 query/key heads 数，即 `q/k` 使用的 head 数；GQA 场景下 `H` 和 `Hg` 可以不同 |
 | Block Tensor | Triton program 内的一块 N 维值或指针集合 |
 | `tl.tensor` | Triton Python 前端表示 IR value 的核心类，保存 IR handle、完整 type、静态 shape 与标量 dtype；它不是 `torch.Tensor` 数据容器 |
 | `tl.constexpr` | JIT 编译时已知的值，用来决定 block shape、分支、循环展开与 kernel specialization；不同取值可能产生不同缓存变体 |
 | Value Block | 元素为数值的 Triton block tensor，例如 `fp16[128]`；通常由 `tl.load`、算术或 `tl.zeros` 产生 |
-| Pointer Block | 元素为地址的 Triton block tensor，例如 `pointer<fp16>[16,32]`；表示一块地址网格，构造它不等于读取内存 |
+| Pointer Block | 元素为地址的 Triton block tensor，例如 $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[16,32\right]`$；表示一块地址网格，构造它不等于读取内存 |
 | Pointer Type | Triton 中保存 pointee `element_ty` 与 address space 的标量类型；合法 pointer arithmetic 是 pointer 加整数元素 offset，pointer 不能与 pointer 相加 |
 | Element Offset | 以元素而非字节计数的地址偏移；Triton pointer addition、PyTorch stride 与 Ascend C `GlobalTensor[index]` 常使用这种单位 |
 | Byte Size | 以字节计数的容量；Ascend C `InitBuffer`、workspace、UB budget 常使用此单位，通常需要 `elements * sizeof(T)` |
@@ -129,7 +129,7 @@
 | Indices / 索引张量 | 保存位置编号的整型张量；具体可能是 token id、batch 行号、cache slot、expert id、top-k 返回下标等，必须结合 shape 和 gather/scatter 维度判断。在 `apply_token_bitmask` 中特指 batch row indices |
 | Token ID / Vocabulary Index | token 在词表中的整数编号，范围通常是 `[0, vocab_size)`；在 logits 中常对应 vocab 维度的位置，不等于 batch 行号 |
 | Layout/Format | Tensor 元素在物理内存中的组织方式，如 ND、NZ |
-| Packed B=1 Layout | 把多条样本沿 token 维拼成一条长序列，对外保留 `B=1` 壳子，再用 `cu_seqlens` 恢复每条样本边界的布局约定 |
+| Packed B=1 Layout | 把多条样本沿 token 维拼成一条长序列，对外保留 $`B=1`$ 壳子，再用 `cu_seqlens` 恢复每条样本边界的布局约定 |
 | `cu_seqlens` | cumulative sequence lengths，记录 packed 变长输入每条样本起止位置的前缀和数组 |
 
 ## D. Ascend 硬件

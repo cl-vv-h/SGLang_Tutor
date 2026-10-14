@@ -48,9 +48,12 @@ Each new token updates the state once. Historical information is no longer a str
 
 SSM can be understood in very simplified form:
 
-```text
-state_t = A * state_{t-1} + B * x_t
-y_t     = C * state_t     + D * x_t
+```math
+\mathrm{state\_t} = A \cdot  \mathrm{state}_{t-1} + B \cdot  x_{t}
+```
+
+```math
+y_{t}=C\cdot \mathrm{state\_t}+D\cdot x_{t}
 ```
 
 Meaning:

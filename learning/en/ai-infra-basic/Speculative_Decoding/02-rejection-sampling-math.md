@@ -36,8 +36,8 @@ def accept_token(proposed_token, p_target, q_draft):
 
 When a token is rejected, we need to sample a replacement from a modified distribution:
 
-```text
-p_resample(x) = normalize(max(0, p(x) - q(x)))
+```math
+p_{\mathrm{resample}}\left(x\right) = \mathrm{normalize}\left(\mathrm{max}\left(0, p\left(x\right) - q\left(x\right)\right)\right)
 ```
 
 This "patches" the gap between target and draft distributions. The combination of accept/reject + resample ensures the final output exactly follows `p(x)`.
@@ -62,11 +62,11 @@ For i in 1..K:
 
 The probability of accepting a draft token is:
 
-```text
-P(accept) = sum_x min(q(x), p(x))
+```math
+P\left(\mathrm{accept}\right) = \sum_{x} \mathrm{min}\left(q\left(x\right), p\left(x\right)\right)
 ```
 
-This equals 1 when `q = p` (perfect draft). The closer `q` is to `p`, the more tokens are accepted per verification.
+This equals 1 when $`q=p`$ (perfect draft). The closer `q` is to `p`, the more tokens are accepted per verification.
 
 ## 7. SGLang-Specific Details
 

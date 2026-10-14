@@ -58,27 +58,52 @@ decode_backend = _get_attention_backend(backend, is_decode=True)
 
 ```text
 Input: 1 new token per request, B active requests
-Q_new: [B, Nq, D]
-K_new, V_new: [B, Nkv, D]
-
-For each request:
-  K_visible = concat(K_cache[request_history], K_new)  # [Lctx, Nkv, D]
-  V_visible = concat(V_cache[request_history], V_new)  # [Lctx, Nkv, D]
-  O = softmax(Q_new @ K_visible^T / sqrt(D)) @ V_visible
 ```
 
-The attention kernel reads `B * Lctx * Nkv * D` elements from KV Cache — the dominant memory operation in decode.
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[B,\mathrm{Nq},D\right]
+```
+
+```text
+K_new, V_new: [B, Nkv, D]
+For each request:
+```
+
+```math
+K_{\mathrm{visible}}=\mathrm{concat}\left({K_{\mathrm{cache}}}_{\mathrm{request\_history}},K_{\mathrm{new}}\right)\qquad\text{[Lctx, Nkv, D]}
+```
+
+```math
+V_{\mathrm{visible}}=\mathrm{concat}\left({V_{\mathrm{cache}}}_{\mathrm{request\_history}},V_{\mathrm{new}}\right)\qquad\text{[Lctx, Nkv, D]}
+```
+
+```math
+O=\mathrm{softmax}\left(\frac{Q_{\mathrm{new}}\,{K_{\mathrm{visible}}}^{\mathsf T}}{\sqrt{D}}\right)\,V_{\mathrm{visible}}
+```
+
+The attention kernel reads $`B\cdot \mathrm{Lctx}\cdot \mathrm{Nkv}\cdot D`$ elements from KV Cache — the dominant memory operation in decode.
 
 ## 6. Prefill Attention Dataflow
 
 ```text
 Input: S new tokens per request (S varies)
-Q: [T, Nq, D]
-K, V: [T, Nkv, D]  (T = sum of extend lengths)
+```
 
+```math
+\mathrm{shape}\left(Q\right)=\left[T,\mathrm{Nq},D\right]
+```
+
+```math
+\text{K, V}: \left[T, \mathrm{Nkv}, D\right] \left(T = \sum \mathrm{of} \mathrm{extend} \mathrm{lengths}\right)
+```
+
+```text
 For each request:
-  causal_mask: lower triangular [S, S] or [S, prefix+S]
-  O = softmax(Q @ K^T / sqrt(D) + mask) @ V
+causal_mask: lower triangular [S, S] or [S, prefix+S]
+```
+
+```math
+O=\mathrm{softmax}\left(\frac{Q\,{K}^{\mathsf T}}{\sqrt{D}}+\mathrm{mask}\right)\,V
 ```
 
 Prefill is compute-bound (O(S²) attention) rather than memory-bound.

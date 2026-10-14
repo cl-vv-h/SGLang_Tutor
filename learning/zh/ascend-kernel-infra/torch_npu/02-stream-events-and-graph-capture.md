@@ -390,7 +390,7 @@ flowchart LR
 Event 的影响不是“修改 producer 的执行速度”，而是：
 
 1. `ready.record()` 向 producer 插入一个进度标记；
-2. 该标记只有在 producer 中它前面的 `x * 2` 完成后才完成；
+2. 该标记只有在 producer 中它前面的 $`x\cdot 2`$ 完成后才完成；
 3. `consumer.wait_event(ready)` 向 consumer 插入等待任务；
 4. consumer 中位于 wait 后面的 `y + 1` 暂时不能成为可执行任务；
 5. ready 完成后，Device runtime 解除这个依赖，consumer 才能继续；

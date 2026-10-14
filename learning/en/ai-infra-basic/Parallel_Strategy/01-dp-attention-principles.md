@@ -35,11 +35,11 @@ Cross-group transfers normally carry **current hidden states or expert-routing d
 
 ## 2. Regular DP and DP Attention Use Different Process Counts
 
-Fix `pp_size=1` and compare two configurations both written as `tp_size=4, dp_size=2`:
+Fix $`\mathrm{pp\_size}=1`$ and compare two configurations both written as $`\mathrm{tp\_size}=4,\qquad \mathrm{dp\_size}=2`$:
 
 | Property | Regular DP, DP Attention disabled | DP Attention enabled |
 |---|---|---|
-| Compute devices | `4 × 2 = 8` | `4` |
+| Compute devices | $`4\cdot 2=8`$ | `4` |
 | Model-parallel worlds | two independent 4-rank worlds | one 4-rank world |
 | Attention TP | 4 in each replica | 2 in each attention-DP subgroup |
 | Request dispatch | complete model replicas | attention-DP subgroups |
@@ -56,7 +56,10 @@ Define:
 P = tp_size                   ranks in the model-parallel world
 D = attention_dp_size         enable_dp_attention ? dp_size : 1
 C = attn_cp_size              attention context parallelism
-T = attention_tp_size = P / (D*C)
+```
+
+```math
+T=\mathrm{attention\_tp\_size}=\frac{P}{D\cdot C}
 ```
 
 These sizes must divide evenly. The source orders ranks as `(DP, CP, TP)`, with TP changing fastest:
@@ -69,14 +72,14 @@ p=(dC+c)T+a
 a=p\bmod T,\qquad c=\lfloor p/T\rfloor\bmod C,\qquad d=\lfloor p/(TC)\rfloor
 ```
 
-The running example is `P=4,D=2,C=1,T=2`:
+The running example is $`P=4,\qquad D=2,\qquad C=1,\qquad T=2`$:
 
 | Model-world rank `p` | Attention DP `d` | Attention TP `a` | Attention TP group | Requests |
 |---:|---:|---:|---|---|
-| 0 | 0 | 0 | `[0,1]` | A/B |
-| 1 | 0 | 1 | `[0,1]` | A/B |
-| 2 | 1 | 0 | `[2,3]` | C/D |
-| 3 | 1 | 1 | `[2,3]` | C/D |
+| 0 | 0 | 0 | $`\left[0,1\right]`$ | A/B |
+| 1 | 0 | 1 | $`\left[0,1\right]`$ | A/B |
+| 2 | 1 | 0 | $`\left[2,3\right]`$ | C/D |
+| 3 | 1 | 1 | $`\left[2,3\right]`$ | C/D |
 
 ```mermaid
 flowchart LR
@@ -95,7 +98,7 @@ flowchart LR
     DP0 <-->|"FFN/MoE communication"| DP1
 ```
 
-For `P=8,D=2,C=2,T=2`, attention TP groups are `[0,1], [2,3], [4,5], [6,7]`; attention CP groups are `[0,2], [1,3], [4,6], [5,7]`. DP assigns separate requests; CP partitions one request's context. They act on different dimensions.
+For $`P=8,\qquad D=2,\qquad C=2,\qquad T=2`$, attention TP groups are `[0,1], [2,3], [4,5], [6,7]`; attention CP groups are `[0,2], [1,3], [4,6], [5,7]`. DP assigns separate requests; CP partitions one request's context. They act on different dimensions.
 
 ## 4. Why Requests Can Run Attention Separately
 
@@ -117,21 +120,51 @@ Consider a decode step with one Query per request. Omit the batch/head axes and 
 
 Here `Dk` is the Query/Key width, and `Dv` is the Value width:
 
-```text
 Request A:
-Q_A [1,Dk] @ K_A.T [Dk,3] -> scores_A [1,3]
-scores_A / sqrt(Dk)       -> scaled_scores_A [1,3]
-softmax (over 3 positions)-> weights_A [1,3]
-weights_A @ V_A [3,Dv]    -> O_A [1,Dv]
 
-Request B:
-Q_B [1,Dk] @ K_B.T [Dk,2] -> scores_B [1,2]
-scores_B / sqrt(Dk)       -> scaled_scores_B [1,2]
-softmax (over 2 positions)-> weights_B [1,2]
-weights_B @ V_B [2,Dv]    -> O_B [1,Dv]
+```math
+Q_A\in\mathbb{R}^{1\times D_k},\quad K_A\in\mathbb{R}^{3\times D_k},\quad V_A\in\mathbb{R}^{3\times D_v}
 ```
 
-For example, if A's three scores become `[0.2,0.5,0.3]` after softmax, A's output is `0.2*v_A1 + 0.5*v_A2 + 0.3*v_A3`. B's Values do not participate in this sum, and B's scores do not participate in A's softmax denominator.
+```math
+S_A=Q_AK_A^{\mathsf T}\in\mathbb{R}^{1\times 3}
+```
+
+```math
+\widetilde{S}_A=\frac{S_A}{\sqrt{D_k}}\in\mathbb{R}^{1\times 3}
+```
+
+```math
+P_A=\mathrm{softmax}_{\mathrm{positions}}(\widetilde{S}_A)\in\mathbb{R}^{1\times 3}
+```
+
+```math
+O_A=P_AV_A\in\mathbb{R}^{1\times D_v}
+```
+
+Request B:
+
+```math
+Q_B\in\mathbb{R}^{1\times D_k},\quad K_B\in\mathbb{R}^{2\times D_k},\quad V_B\in\mathbb{R}^{2\times D_v}
+```
+
+```math
+S_B=Q_BK_B^{\mathsf T}\in\mathbb{R}^{1\times 2}
+```
+
+```math
+\widetilde{S}_B=\frac{S_B}{\sqrt{D_k}}\in\mathbb{R}^{1\times 2}
+```
+
+```math
+P_B=\mathrm{softmax}_{\mathrm{positions}}(\widetilde{S}_B)\in\mathbb{R}^{1\times 2}
+```
+
+```math
+O_B=P_BV_B\in\mathbb{R}^{1\times D_v}
+```
+
+For example, if A's three scores become `[0.2,0.5,0.3]` after softmax, A's output is $`0.2\cdot v_{\mathrm{A1}}+0.5\cdot v_{\mathrm{A2}}+0.3\cdot v_{\mathrm{A3}}`$. B's Values do not participate in this sum, and B's scores do not participate in A's softmax denominator.
 
 Consequently, placing A in DP0 and B in DP1 preserves the mathematical outputs as long as their inputs, weights, and visible KV remain unchanged (floating-point execution may introduce rounding differences). If a DP group also uses TP, its ranks still collaborate to compute attention. Independent requests do not mean every device can perform the entire computation alone.
 
@@ -174,11 +207,24 @@ X_B [1,H] --+                                       +-- row 0 -> A
 
 Using row-vector notation, the complete shape flow through a SwiGLU FFN is:
 
-```text
-X [2,H] @ W_gate [H,I] -> G [2,I]
-X [2,H] @ W_up   [H,I] -> U [2,I]
-SiLU(G) * U            -> Z [2,I]   # elementwise; no mixing of rows
-Z [2,I] @ W_down [I,H] -> Y [2,H]
+```math
+X\in\mathbb{R}^{2\times H},\quad W_{\mathrm{gate}},W_{\mathrm{up}}\in\mathbb{R}^{H\times I},\quad W_{\mathrm{down}}\in\mathbb{R}^{I\times H}
+```
+
+```math
+G=XW_{\mathrm{gate}}\in\mathbb{R}^{2\times I}
+```
+
+```math
+U=XW_{\mathrm{up}}\in\mathbb{R}^{2\times I}
+```
+
+```math
+Z=\mathrm{SiLU}(G)\odot U\in\mathbb{R}^{2\times I}
+```
+
+```math
+Y=ZW_{\mathrm{down}}\in\mathbb{R}^{2\times H}
 ```
 
 `I` is the FFN intermediate width. Each matrix multiplication applies the same weights to each input row. A's output depends only on A's row. Combining two rows into a larger GEMM batches the computation; it does not exchange context between the requests.
@@ -196,29 +242,43 @@ o_{r,h,i}=\sum_{j\in\mathcal{V}_r(i)}
 
 This is simply the general form of the computation in Section 4.2:
 
-- $`q_{r,h,i}`$: request r's Query at position i and head h, with shape `[Dk]`.
+- $`q_{r,h,i}`$: request r's Query at position i and head h, with shape $`\left[\mathrm{Dk}\right]`$.
 - $`g(h)`$: the KV head associated with this Query head in GQA.
 - $`\mathcal{V}_r(i)`$: the set of token positions visible to request r at position i; it excludes other requests' positions.
-- $`k_{r,g(h),j}`$ and $`v_{r,g(h),j}`$: this request's Key/Value at visible position j, with shapes `[Dk]` and `[Dv]`.
-- The inner product produces a scalar score for each position. Softmax normalizes only over this request's visible positions, and the weighted sum produces a `[Dv]` output.
+- $`k_{r,g(h),j}`$ and $`v_{r,g(h),j}`$: this request's Key/Value at visible position j, with shapes $`\left[\mathrm{Dk}\right]`$ and $`\left[\mathrm{Dv}\right]`$.
+- The inner product produces a scalar score for each position. Softmax normalizes only over this request's visible positions, and the weighted sum produces a $`\left[\mathrm{Dv}\right]`$ output.
 
 The key observation for request partitioning is that **every Query, Key, and Value in this equation belongs to request r. No other request's K/V appears.**
 
 ## 5. Attention TP Shards Weights; DP Assigns Requests
 
-Use row-vector notation for GQA with `H=4096,Nq=32,Nkv=8,Dk=Dv=128`. DP0 has $`n_0=4`$ tokens this step and DP1 has $`n_1=2`$; `T=2`:
+Use row-vector notation for GQA with $`H=4096,\qquad \mathrm{Nq}=32,\qquad \mathrm{Nkv}=8,\qquad \mathrm{Dk}=\mathrm{Dv}=128`$. DP0 has $`n_0=4`$ tokens this step and DP1 has $`n_1=2`$; $`T=2`$:
 
 ```text
 Input within attention-DP subgroup: X_d [n_d,4096]
 Ranks share X_d but hold different Q/K/V weight shards
-
 Q_local: [n_d,16,128]        # 32/2 query heads
 K_local: [n_d,4,128]         # 8/2 KV heads
-V_local: [n_d,4,128]
-O_heads: [n_d,16,128]
-O_flat:  [n_d,2048]
-W_O_local: [2048,4096]
-A_partial = O_flat @ W_O_local: [n_d,4096]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{local}}\right)=\left[n_{d},4,128\right]
+```
+
+```math
+\mathrm{shape}\left(O_{\mathrm{heads}}\right)=\left[n_{d},16,128\right]
+```
+
+```math
+\mathrm{shape}\left(O_{\mathrm{flat}}\right)=\left[n_{d},2048\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{W\_O\_local}\right)=\left[2048,4096\right]
+```
+
+```math
+A_{\mathrm{partial}} = O_{\mathrm{flat}} \, \mathrm{W\_O\_local}: \left[n_{d},4096\right]
 ```
 
 Output projection on the two subgroup ranks produces **partial sums** over different input channels:
@@ -282,7 +342,7 @@ Assign non-overlapping global intervals from communication lengths $`n_d`$:
 N=\sum_dn_d,\qquad s_d=\sum_{j=0}^{d-1}n_j
 ```
 
-Each rank creates a zero `[N,H]` buffer and writes only its subgroup interval `[s_d:s_d+n_d]`. A world all-reduce sums these buffers:
+Each rank creates a zero $`\left[N,H\right]`$ buffer and writes only its subgroup interval `[s_d:s_d+n_d]`. A world all-reduce sums these buffers:
 
 ```text
 DP0 -> rows [0:n0]
@@ -293,17 +353,19 @@ all_reduce(sum) -> both intervals appear on every rank
 
 For partial data, every attention-TP rank writes its own contribution. For replicated data, only subgroup rank0 writes; otherwise identical copies are incorrectly summed.
 
-Minimal example with `H=1` and two rows per DP:
+Minimal example with $`H=1`$ and two rows per DP:
 
 ```text
 rank0 partial: [1,2]; rank1 partial: [9,18]       -> DP0 [10,20]
 rank2 partial: [3,4]; rank3 partial: [27,36]      -> DP1 [30,40]
-
 World all-reduce after writing separate intervals:
-[10,20,30,40]
 ```
 
-If rank0/1 already both hold `[10,20]` and both contribute, the result incorrectly becomes `[20,40,...]`.
+```math
+\left[10,20,30,40\right]
+```
+
+If rank0/1 already both hold $`\left[10,20\right]`$ and both contribute, the result incorrectly becomes `[20,40,...]`.
 
 ### 7.2 MAX_LEN: Subgroup Reduce-Scatter, Then World All-Gather
 
@@ -374,7 +436,7 @@ flowchart LR
     C --> S["Each source rank receives its own rows"]
 ```
 
-With `P=4,ep_size=4,moe_dp_size=1`:
+With $`P=4,\qquad \mathrm{ep\_size}=4,\qquad \mathrm{moe\_dp\_size}=1`$:
 
 ```math
 T_{\mathrm{MoE}}=\frac{P}{D_{\mathrm{MoE}}\,E_{\mathrm{MoE}}}=1
@@ -415,7 +477,7 @@ Request ownership is separate, but execution rounds remain coordinated. Throughp
 2. **Aligned communication length** $`a_d`$: padded for operations such as reduce-scatter.
 3. **Graph length** $`b`$: selected capture bucket, potentially larger than real length.
 
-In this snapshot, `ForwardBatch.prepare_mlp_sync_batch()` aligns first to `attn_tp_size`, then to `attn_cp_size*2`. For `T=2,C=1`, real `[3,1]` becomes `[4,2]`. Real token count is not automatically the collective buffer length.
+In this snapshot, `ForwardBatch.prepare_mlp_sync_batch()` aligns first to `attn_tp_size`, then to `attn_cp_size*2`. For $`T=2,\qquad C=1`$, real $`\left[3,1\right]`$ becomes $`\left[4,2\right]`$. Real token count is not automatically the collective buffer length.
 
 `DpPaddingMode` selects from aligned counts:
 
@@ -425,10 +487,10 @@ Otherwise, if 2*sum(a_d) >= D*max(a_d): MAX_LEN
 Otherwise: SUM_LEN
 ```
 
-| Aligned counts | `2*sum` | `D*max` | Eager mode |
+| Aligned counts | $`2\cdot \mathrm{sum}`$ | `D*max` | Eager mode |
 |---|---:|---:|---|
-| `[4,2,6,0]` | 24 | 24 | MAX_LEN, preferred on a tie |
-| `[12,2,0,0]` | 28 | 48 | SUM_LEN |
+| $`\left[4,2,6,0\right]`$ | 24 | 24 | MAX_LEN, preferred on a tie |
+| $`\left[12,2,0,0\right]`$ | 28 | 48 | SUM_LEN |
 
 This is a source heuristic weighing different collectives, not an exact network-byte formula. Graph execution normally defaults to `MAX_LEN`, with a ROCm exception in the source. Graph eligibility must agree across DP participants.
 
@@ -460,7 +522,7 @@ SUM_LEN: sum(a_d)*H*element_bytes
 MAX_LEN: D*max(a_d)*H*element_bytes
 ```
 
-With `H=4096,BF16`, one hidden row occupies `8 KiB`. For `a=[12,2,0,0]`, one SUM_LEN global buffer is `112 KiB`, versus `384 KiB` for MAX_LEN. Norm outputs, MLP intermediates, and collective workspace also consume memory; these are not total peak allocation or link traffic.
+With $`H=\left[4096,\mathrm{BF16}\right]`$, one hidden row occupies `8 KiB`. For $`a=\left[12,2,0,0\right]`$, one SUM_LEN global buffer is `112 KiB`, versus `384 KiB` for MAX_LEN. Norm outputs, MLP intermediates, and collective workspace also consume memory; these are not total peak allocation or link traffic.
 
 Benefits come from more suitable attention TP, KV distribution, and FFN/expert utilization. Costs include cross-group communication, padding, scheduler waits, and replicated attention parameters. Compare the same model, total devices, input/output lengths, and request load using TTFT, ITL, throughput, and per-stage timings.
 
@@ -476,10 +538,10 @@ It shows rank topology, equivalent gather results, replica deduplication, real-t
 
 ## 14. Reading Tasks and Exercises
 
-1. For `P=8,D=4,C=1`, enumerate coordinates and attention TP groups.
-2. For `P=8,D=2,C=2`, enumerate TP/CP groups and identify which requests they handle.
+1. For $`P=8,\qquad D=4,\qquad C=1`$, enumerate coordinates and attention TP groups.
+2. For $`P=8,\qquad D=2,\qquad C=2`$, enumerate TP/CP groups and identify which requests they handle.
 3. Remove replicated-input deduplication in the demo and observe the erroneous factor $`T`$.
-4. For real counts `[7,1,0,2]`, apply this snapshot's `T=2,C=1` alignment before selecting eager padding mode.
+4. For real counts $`\left[7,1,0,2\right]`$, apply this snapshot's $`T=2,\qquad C=1`$ alignment before selecting eager padding mode.
 5. Explain why `dp_scatter()` can be a local copy while `dp_reduce_scatter_tensor()` requires a collective.
 
 Continue with the [full source walkthrough](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md), mapping these principles to startup, Scheduler, ForwardBatch, LayerCommunicator, MoE, Graph, and LogitsProcessor.

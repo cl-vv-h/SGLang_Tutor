@@ -29,7 +29,7 @@ flowchart TD
     OUT --> TRIM["移除 padding；本 DP 采样与更新请求"]
 ```
 
-这条链路有两类通信：Scheduler 同步的是小型**执行元数据**；layer 通信移动或归约的是 `[tokens,H]` 激活/专家数据。前者保证各 rank 进入兼容的执行轮次，后者让不同模块获得正确张量。
+这条链路有两类通信：Scheduler 同步的是小型**执行元数据**；layer 通信移动或归约的是 $`\left[\mathrm{tokens},H\right]`$ 激活/专家数据。前者保证各 rank 进入兼容的执行轮次，后者让不同模块获得正确张量。
 
 ## 2. 源码地图与阅读顺序
 
@@ -57,12 +57,18 @@ flowchart TD
 
 ```text
 tp_size=4, dp_size=2, enable_dp_attention=True
-pp_size=1, attn_cp_size=1
+```
+
+```math
+\mathrm{pp\_size}=1,\qquad \mathrm{attn\_cp\_size}=1
+```
+
+```text
 无专用 MoE A2A backend，moe_dense_tp_size=None
 关闭本章不展开的 CP、TBO 与通信融合
 ```
 
-这表示 **4 个计算 rank**，分成两个 Attention DP 子组，各自 Attention TP 为 2。普通 DP 关闭该开关时，同样的 `tp_size=4,dp_size=2` 则需要两个完整 TP 副本、共 8 个计算 rank。
+这表示 **4 个计算 rank**，分成两个 Attention DP 子组，各自 Attention TP 为 2。普通 DP 关闭该开关时，同样的 $`\mathrm{tp\_size}=4,\qquad \mathrm{dp\_size}=2`$ 则需要两个完整 TP 副本、共 8 个计算 rank。
 
 `ServerArgs._handle_data_parallelism()` 节选：
 
@@ -203,10 +209,16 @@ return server_args.enable_dp_attention or require_gathered_buffer(server_args)
 
 `all_gather()` 的逻辑 shape：
 
-```text
-local_info: [6]
-global_info: [DP, ATTN_TP*ATTN_CP, 6]
-tp0_info = global_info[:,0,:]: [DP,6]
+```math
+\mathrm{shape}\left(\mathrm{local\_info}\right)=\left[6\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{global\_info}\right)=\left[\mathrm{DP},\mathrm{ATTN\_TP}\cdot \mathrm{ATTN\_CP},6\right]
+```
+
+```math
+\mathrm{tp0\_info} = \mathrm{global\_info}\left[:,0,:\right]: \left[\mathrm{DP},6\right]
 ```
 
 组内多个 rank 代表同一 DP workload，所以取每组的第 0 份。还会给 inactive ranks 设置 fallback。聚合规则包括：
@@ -279,18 +291,21 @@ else:
     buffer_len = sum(global_num_tokens)
 ```
 
-本例真实 decode counts `[4,2]` 已满足 `T=2,C=1` 的两次对齐。eager 选择 MAX_LEN 后，通信长度为 `[4,4]`，全局 buffer 为 `[8,H]`。真实 DP1 仍只有两条请求，后两行用于 padding。
+本例真实 decode counts $`\left[4,2\right]`$ 已满足 $`T=2,\qquad C=1`$ 的两次对齐。eager 选择 MAX_LEN 后，通信长度为 $`\left[4,4\right]`$，全局 buffer 为 $`\left[8,H\right]`$。真实 DP1 仍只有两条请求，后两行用于 padding。
 
 `_pad_inputs_to_size()` 会处理 `input_ids`、`positions`、`req_pool_indices`、`seq_lens`、`out_cache_loc` 等，填充值由 backend 契约决定。不能只补 hidden tensor，而让 KV 写入位置或请求索引仍为旧长度。
 
 `get_dp_local_info()` 使用通信长度的前缀和：
 
-```text
-start_d = sum(global_num_tokens_gpu[:d])
-length_d = global_num_tokens_gpu[d]
+```math
+\mathrm{start\_d} = \sum\left(\mathrm{global\_num\_tokens\_gpu}\left[:d\right]\right)
 ```
 
-所以 MAX_LEN `[4,4]` 的 DP1 起始行是 4，SUM_LEN `[4,2]` 的 DP1 起始行也是 4，但总长度分别是 8 和 6。真实 `[3,1]` 先对齐为 `[4,2]`，再选择模式；不能用未对齐的 `3` 算 DP1 偏移。
+```math
+\mathrm{length\_d}={\mathrm{global\_num\_tokens\_gpu}}_{d}
+```
+
+所以 MAX_LEN $`\left[4,4\right]`$ 的 DP1 起始行是 4，SUM_LEN $`\left[4,2\right]`$ 的 DP1 起始行也是 4，但总长度分别是 8 和 6。真实 $`\left[3,1\right]`$ 先对齐为 $`\left[4,2\right]`$，再选择模式；不能用未对齐的 `3` 算 DP1 偏移。
 
 ## 8. 模型投影：Attention 权重使用 Attention TP rank
 
@@ -305,17 +320,17 @@ self.num_local_heads = num_heads // attn_tp_size
 
 这使 rank0 与 rank2 持有相同编号的 Attention head shard，却处理不同 DP 的请求；rank1 与 rank3 也是如此。低秩 down projection 则包含 `ReplicatedLinear`。
 
-取教学 MLA 配置 `H=4096,N=32,Dcq=1536,Dc=512,Dh=128,Dr=64,Dv=128`、每 DP padded token 数 `m=4`：
+取教学 MLA 配置 $`H=4096,\qquad N=32,\qquad \mathrm{Dcq}=1536,\qquad \mathrm{Dc}=512,\qquad \mathrm{Dh}=128,\qquad \mathrm{Dr}=64,\qquad \mathrm{Dv}=128`$、每 DP padded token 数 $`m=4`$：
 
 | 步骤 | 每 rank 逻辑 shape | 所有权 |
 |---|---:|---|
-| Layer 输入 | `[4,4096]` | 同 DP 的两个 rank 相同 |
-| Query latent | `[4,1536]` | replicated down projection |
-| Query 上投影 | `[4,16*(128+64)] = [4,3072]` | 本 rank 16 个 heads |
-| Query reshape | `[4,16,192]` | 再拆 content 与 RoPE |
-| 内容 latent / position key | `[4,512]`、`[4,64]` | 写本 DP 的 MLA cache |
-| Head 输出 | `[4,16,128]` | 使用本请求可见历史 |
-| Output projection | `[4,4096]` | `reduce_results=False`，数值为 partial |
+| Layer 输入 | $`\left[4,4096\right]`$ | 同 DP 的两个 rank 相同 |
+| Query latent | $`\left[4,1536\right]`$ | replicated down projection |
+| Query 上投影 | $`\left[4,16\cdot \left(128+64\right)\right]=\left[4,3072\right]`$ | 本 rank 16 个 heads |
+| Query reshape | $`\left[4,16,192\right]`$ | 再拆 content 与 RoPE |
+| 内容 latent / position key | $`\left[4,512\right]`$、$`\left[4,64\right]`$ | 写本 DP 的 MLA cache |
+| Head 输出 | $`\left[4,16,128\right]`$ | 使用本请求可见历史 |
+| Output projection | $`\left[4,4096\right]`$ | `reduce_results=False`，数值为 partial |
 
 MLA 的吸收式/展开式与 backend 可能隐藏中间量，数学详见 [MLA 教程](../../ai-infra-basic/Model_Architecture/04-multi-head-latent-attention.md)。DP Attention 不改变其注意力公式，而是改变请求与 head 工作的放置。
 
@@ -347,7 +362,7 @@ if not should_allreduce_fusion:
 |---|---|---|
 | Sparse layer，无专用 A2A | `FULL` | gather 到全局 rows，执行 FFN/专家工作，再返回 DP rows |
 | Sparse layer，专用 A2A 或指定特殊 all-gather MoE 路径 | `SCATTERED` | dispatcher 在 communicator 外负责 token 交换 |
-| Dense layer，`moe_dense_tp_size=1` | `SCATTERED` | 每 rank 用本地完整 dense MLP 处理自己的 rows |
+| Dense layer，$`\mathrm{moe\_dense\_tp\_size}=1`$ | `SCATTERED` | 每 rank 用本地完整 dense MLP 处理自己的 rows |
 | Dense layer，普通配置 | `FULL` | 全局 TP MLP |
 | 特定 CP/MoE-DP 组合 | `MOE_FULL` | 额外 CP/MoE 布局，见通用通信篇 |
 
@@ -372,9 +387,9 @@ if not use_layer_norm_before_gather:
         hidden_states = layernorm(hidden_states)
 ```
 
-当 Attention TP 为 2 时，两个 rank 的 `A_partial` 必须相加。残差 `X` 只由组内 rank0 加一次，gather 后得到全局 `R=concat_d(X_d+sum_a A_da)`。再复制本 DP 的 `R` 到本地 residual，RMSNorm 后全局 hidden 送入 MLP。
+当 Attention TP 为 2 时，两个 rank 的 `A_partial` 必须相加。残差 `X` 只由组内 rank0 加一次，gather 后得到全局 $`R=\mathrm{concat\_d}\left(X_{d}+\sum_{a} A_{\mathrm{da}}\right)`$。再复制本 DP 的 `R` 到本地 residual，RMSNorm 后全局 hidden 送入 MLP。
 
-**Residual 仍为本 DP 的 `[m,H]`，MLP hidden 是全局 `[D*m,H]`。** 它们不要求此刻 shape 相同，因为 MLP 后会把 hidden 返回到本地布局。
+**Residual 仍为本 DP 的 $`\left[m,H\right]`$，MLP hidden 是全局 $`\left[D\cdot m,H\right]`$。** 它们不要求此刻 shape 相同，因为 MLP 后会把 hidden 返回到本地布局。
 
 ### 10.1 SUM_LEN 的 all-reduce
 
@@ -410,13 +425,13 @@ get_attention_tp_group().reduce_scatter_tensor(scattered_local_tokens, local_tok
 get_tp_group().all_gather_into_tensor(global_tokens, scattered_local_tokens)
 ```
 
-本例 `[4,H]` partial 经组内 reduce-scatter 后，每 rank 得到 `[2,H]` 完整数值的 token slice；全局 4-rank all-gather 得 `[8,H]`。rank 顺序恰好排列为 DP0 两个片段，接着 DP1 两个片段。
+本例 $`\left[4,H\right]`$ partial 经组内 reduce-scatter 后，每 rank 得到 $`\left[2,H\right]`$ 完整数值的 token slice；全局 4-rank all-gather 得 $`\left[8,H\right]`$。rank 顺序恰好排列为 DP0 两个片段，接着 DP1 两个片段。
 
 `local_tokens.fill_(0)` 与 reduce-scatter 的输出切片可能修改输入存储；这些函数有明确 buffer 生命周期和非 alias 假设。教学复制代码时不能额外假设所有输入都会被保留。
 
 ## 11. MLP 后：scatter 是本地 copy，reduce-scatter 是 collective
 
-无专用 A2A 的全局 TP FFN/MoE 产生 `[N,H]` 输出。若它尚为 partial，各 rank 的结果需要归约。模型层把 `use_reduce_scatter` 传给 MLP，决定是否跳过原本的输出 all-reduce。
+无专用 A2A 的全局 TP FFN/MoE 产生 $`\left[N,H\right]`$ 输出。若它尚为 partial，各 rank 的结果需要归约。模型层把 `use_reduce_scatter` 传给 MLP，决定是否跳过原本的输出 all-reduce。
 
 `CommunicateSummableTensorPairFn._scatter_hidden_states()`：
 
@@ -435,7 +450,7 @@ else:
 - **MLP 已完成 all-reduce**：全局结果在各 rank 相同，`dp_scatter()` 只需本地复制本 DP 区间，无网络 scatter。
 - **MLP 跳过 all-reduce，输出仍 partial**：`dp_reduce_scatter_tensor()` 同时求和和返回局部 rows，避免先复制完整 global result。
 
-当 `P==D` 时 Attention TP 为 1，直接 world reduce-scatter；当 `P>D` 时先 world reduce-scatter 到每 rank 一个更小 row block，再 Attention TP all-gather，使组内各 rank 恢复同一个 DP 的完整 token rows。
+当 `P==D` 时 Attention TP 为 1，直接 world reduce-scatter；当 $`P \gt D`$ 时先 world reduce-scatter 到每 rank 一个更小 row block，再 Attention TP all-gather，使组内各 rank 恢复同一个 DP 的完整 token rows。
 
 ```text
 本例 MLP partial: 每 rank [8,H]
@@ -460,7 +475,7 @@ if hidden_states.shape[0] != 0:
     hidden_states, residual = layernorm(hidden_states, residual)
 ```
 
-此时每 rank 为 `[m/T,H]`，数值完整。Residual 同步切片，Norm 在本地 rows 上完成。
+此时每 rank 为 $`\left[\frac{m}{T},H\right]`$，数值完整。Residual 同步切片，Norm 在本地 rows 上完成。
 
 `DeepseekV2MoE.forward()` 根据 `_enable_a2a_moe` 分支进入 `forward_normal()` 或名字为 `forward_deepep()` 的通用专用通信路径。后一函数名并不意味着当前 backend 必然是 DeepEP；本快照还会按配置接入其他 A2A backend。
 
@@ -479,7 +494,7 @@ SCATTERED hidden [n_source,H]
 
 后续 layer 若继续接受 `SCATTERED`，输出可保持局部。进入需要 `TP_ATTN_FULL` 的 Attention 时，`CommunicateSimpleFn._scattered_to_tp_attn_full()` 在 Attention TP group 内 all-gather。最后一层也按模型输出布局恢复。
 
-空输入时 `forward_deepep()` 会构造 empty top-k output，仍进入专家路径所需的调用。不能只因 `n_source=0` 就在外部提前返回并跳过通信。
+空输入时 `forward_deepep()` 会构造 empty top-k output，仍进入专家路径所需的调用。不能只因 $`n_{\mathrm{source}}=0`$ 就在外部提前返回并跳过通信。
 
 ## 13. LM Head：DP Attention 与 DP LM Head 是独立开关
 
@@ -530,7 +545,13 @@ if self.require_mlp_sync:
 
 ```text
 真实 counts [3,1]
-假设选中 bucket=4
+```
+
+```math
+\text{假设选中 bucket}=4
+```
+
+```text
 Graph 固定通信布局 [4,4]，全局 hidden [8,H]
 最后返回：DP0 3个真实结果，DP1 1个真实结果
 ```
@@ -552,34 +573,34 @@ Rank 公式和 token 所有权不因 NCCL/HCCL 改变，但实际 collective、c
 
 本章已静态核对源码，并用 CPU demo 验证布局和数学不变量；未执行多卡 GPU/NPU serving 或 HCCL 性能测试。硬件侧详细的 TP/EP、权重布局与 FuseEP 说明直接读 [Ascend 切分篇](./02-tp-dp-ep-sharding-and-ascend-npu.md)。
 
-## 16. 把一个 `[4,2]` decode round 从头跟到尾
+## 16. 把一个 $`\left[4,2\right]`$ decode round 从头跟到尾
 
-下面是主配置、MAX_LEN、无 A2A、无额外融合时的全张量账本，`H=4096,T=2`。真实 DP0 有 4 个请求，DP1 有 2 个请求，普通 decode 每请求一个 token。
+下面是主配置、MAX_LEN、无 A2A、无额外融合时的全张量账本，$`H=4096,\qquad T=2`$。真实 DP0 有 4 个请求，DP1 有 2 个请求，普通 decode 每请求一个 token。
 
 | 阶段 | rank0/1 | rank2/3 | 数据含义 |
 |---|---|---|---|
 | 本地 Scheduler | 4 个请求 | 2 个请求 | 组内一致，组间独立 |
-| Sync metadata | 同步得到 `[4,2]` | 同步得到 `[4,2]` | 同一个执行轮次 |
+| Sync metadata | 同步得到 $`\left[4,2\right]`$ | 同步得到 $`\left[4,2\right]`$ | 同一个执行轮次 |
 | Eager padding | `input_ids [4]` | `input_ids [4]` | DP1 后 2 行为 padding |
-| Embedding/层输入 | `[4,4096]` | `[4,4096]` | 本 DP 完整 rows，组内 replicated |
-| Attention output | `[4,4096]` partial | `[4,4096]` partial | 每 rank 不同 head 贡献 |
-| ATTN_TP reduce-scatter | 每 rank `[2,4096]` | 每 rank `[2,4096]` | 组内求和后各取一半 rows |
-| Global all-gather | 每 rank `[8,4096]` | 每 rank `[8,4096]` | DP0 4行 + DP1 4行 |
-| Post-Attention Norm | hidden `[8,4096]` | hidden `[8,4096]` | MLP 输入完整数值 |
-| 本地 residual | `[4,4096]` | `[4,4096]` | 只保留本 DP 的 residual stream |
-| TP FFN/MoE | `[8,4096]` partial 或已归约 | 同左 | 取决于 `use_reduce_scatter` |
-| 返回 DP 布局 | `[4,4096]` | `[4,4096]` | collective 归约或本地 copy |
+| Embedding/层输入 | $`\left[4,4096\right]`$ | $`\left[4,4096\right]`$ | 本 DP 完整 rows，组内 replicated |
+| Attention output | $`\left[4,4096\right]`$ partial | $`\left[4,4096\right]`$ partial | 每 rank 不同 head 贡献 |
+| ATTN_TP reduce-scatter | 每 rank $`\left[2,4096\right]`$ | 每 rank $`\left[2,4096\right]`$ | 组内求和后各取一半 rows |
+| Global all-gather | 每 rank $`\left[8,4096\right]`$ | 每 rank $`\left[8,4096\right]`$ | DP0 4行 + DP1 4行 |
+| Post-Attention Norm | hidden $`\left[8,4096\right]`$ | hidden $`\left[8,4096\right]`$ | MLP 输入完整数值 |
+| 本地 residual | $`\left[4,4096\right]`$ | $`\left[4,4096\right]`$ | 只保留本 DP 的 residual stream |
+| TP FFN/MoE | $`\left[8,4096\right]`$ partial 或已归约 | 同左 | 取决于 `use_reduce_scatter` |
+| 返回 DP 布局 | $`\left[4,4096\right]`$ | $`\left[4,4096\right]`$ | collective 归约或本地 copy |
 | 下一层 | 重复以上边界 | 重复以上边界 | KV 历史仍只属于本 DP 请求 |
 | 输出/logits | 本 DP 真实 rows | 本 DP 真实 rows | 可额外经过 LM Head 的 DP gather |
 | 去 padding 后采样 | 4 个结果 | 2 个结果 | 不生成 padding token |
 
-Attention 算子内部的 score shape 还取决于各请求可见长度。即使 packed hidden 为 `[4,H]`，也不能用它推断 4 个请求都拥有相同长度的 KV。
+Attention 算子内部的 score shape 还取决于各请求可见长度。即使 packed hidden 为 $`\left[4,H\right]`$，也不能用它推断 4 个请求都拥有相同长度的 KV。
 
 ## 17. 常见故障与应检查的不变量
 
 | 症状 | 优先追踪 |
 |---|---|
-| `dp_size=1` 正确，DP>1 输出成倍放大 | replicated 输入是否用了 partial gather；residual 是否加了多次 |
+| $`\mathrm{dp\_size}=1`$ 正确，DP>1 输出成倍放大 | replicated 输入是否用了 partial gather；residual 是否加了多次 |
 | 仅当 Attention TP>1 错误 | output projection partial 是否归约；head shard 是否使用 attn TP rank |
 | 某 DP 没请求时挂起 | IDLE batch、空 MoE source、跨 rank collective 顺序 |
 | 均衡 batch 正确，不均衡错误 | 原始/对齐/bucket 长度；SUM/MAX；前缀和偏移 |
@@ -603,9 +624,9 @@ python3 learning/zh/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
 阅读任务：
 
 1. 沿 `get_next_batch_to_run()` 解释本地 batch 为 None 时，哪一段代码让它变成 IDLE。
-2. 沿 `prepare_mlp_sync_batch()` 解释真实 `[3,1]` 为何不能直接作为 MAX_LEN collective 尺寸。
+2. 沿 `prepare_mlp_sync_batch()` 解释真实 $`\left[3,1\right]`$ 为何不能直接作为 MAX_LEN collective 尺寸。
 3. 在 `dp_gather_partial()` 与 `dp_gather_replicate()` 各找一个调用者，说明各自数据已不已归约。
-4. 对 `T=2` 解释为何 Attention Norm 不应直接分别作用于两个 partial 输出。
+4. 对 $`T=2`$ 解释为何 Attention Norm 不应直接分别作用于两个 partial 输出。
 5. 找到 `DeepseekV2MoE.forward_normal()` 中跳过 all-reduce 的条件，再找到与之配对的 communicator 分支。
 6. 对 A2A 路径画出 source-token 到 expert-owner 再返回 source-token 的映射。
 7. 用 `LogitsProcessor` 证明 DP Attention 不会自动开启 DP LM Head。

@@ -34,19 +34,34 @@ flowchart LR
 
 给定：
 
-```text
-Q: [B,Nq,Lq,D]
-K: [B,Nkv,Lkv,D]
-V: [B,Nkv,Lkv,Dv]
-group_size = Nq / Nkv
+```math
+\mathrm{shape}\left(Q\right)=\left[B,\mathrm{Nq},\mathrm{Lq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K\right)=\left[B,\mathrm{Nkv},\mathrm{Lkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V\right)=\left[B,\mathrm{Nkv},\mathrm{Lkv},\mathrm{Dv}\right]
+```
+
+```math
+\mathrm{group\_size}=\frac{\mathrm{Nq}}{\mathrm{Nkv}}
 ```
 
 将 KV head 按组广播给 query heads 后：
 
-```text
-Scores[b,h,i,j] = <Q[b,h,i,:], K[b,g(h),j,:]> / sqrt(D)
-P = softmax(Scores + Mask)                    [B,Nq,Lq,Lkv]
-O[b,h,i,:] = sum_j P[b,h,i,j] V[b,g(h),j,:] [B,Nq,Lq,Dv]
+```math
+\mathrm{Scores}\left[b,h,i,j\right] = \lt Q\left[b,h,i,:\right], K\left[b,g\left(h\right),j,:\right]\gt  / \mathrm{sqrt}\left(D\right)
+```
+
+```math
+P=\mathrm{softmax}\left(\mathrm{Scores}+\mathrm{Mask}\right)\qquad\mathrm{shape}:\left[B,\mathrm{Nq},\mathrm{Lq},\mathrm{Lkv}\right]
+```
+
+```math
+O\left[b,h,i,:\right] = \sum_{j} P\left[b,h,i,j\right] V\left[b,g\left(h\right),j,:\right] \left[B,\mathrm{Nq},\mathrm{Lq},\mathrm{Dv}\right]
 ```
 
 逻辑乘加量约为：
@@ -56,25 +71,25 @@ QK^T: 2 * B * Nq * Lq * Lkv * D FLOPs
 PV:    2 * B * Nq * Lq * Lkv * Dv FLOPs
 ```
 
-而 decode（`Lq=1`）的最低历史读取量近似为：
+而 decode（$`\mathrm{Lq}=1`$）的最低历史读取量近似为：
 
-```text
-B * Lkv * Nkv * (D + Dv) * bytes_per_element
+```math
+B\cdot \mathrm{Lkv}\cdot \mathrm{Nkv}\cdot \left(D+\mathrm{Dv}\right)\cdot \mathrm{bytes\_per\_element}
 ```
 
 因此 prefill 常由大矩阵计算和二次方逻辑工作量主导，decode 常由不断增长的历史状态读取带宽主导。优化方案必须说明自己减少的是哪一个式子里的哪一项。
 
 ### 同一个 decode 请求的逐步对照
 
-使用 `B=1, Lq=1, Lkv=32768, Nq=32, Nkv=8, D=Dv=128, BF16`：
+使用 $`B=\left[1,\mathrm{Lq}\right]=\left[1,\mathrm{Lkv}\right]=\left[32768,\mathrm{Nq}\right]=\left[32,\mathrm{Nkv}\right]=\left[8,D\right]=\mathrm{Dv}=\left[128,\mathrm{BF16}\right]`$：
 
 | 方法 | 历史持久状态 | 本次访问位置 | 近似历史载荷/层/步 | 输出前的逻辑中间量 |
 |---|---|---:|---:|---|
-| GQA | `K,V [Lkv,8,128]` | `32768` | `128 MiB` | score `[32,1,32768]` |
-| MLA，`Dc=512,Dr=64` | `[Lkv,576]` | `32768` | `36 MiB` | content + RoPE score |
-| DSA on MLA，`k=2048` | MLA cache + index key | index 全扫、主核读 `2048` | 主核约 `2.25 MiB`，另计 indexer | gathered score `[32,1,2048]` |
-| SWA，`W=4096` | token 级局部 KV | `4096` | GQA 载荷的 `1/8` | score `[32,1,4096]` |
-| KDA | recurrent matrix + conv tail | 不扫描历史 token | 与 `Lkv` 无关 | state update `[Nk,Dk,Dv]` |
+| GQA | `K,V [Lkv,8,128]` | `32768` | `128 MiB` | score $`\left[32,1,32768\right]`$ |
+| MLA，$`\mathrm{Dc}=512,\qquad \mathrm{Dr}=64`$ | $`\left[\mathrm{Lkv},576\right]`$ | `32768` | `36 MiB` | content + RoPE score |
+| DSA on MLA，$`k=2048`$ | MLA cache + index key | index 全扫、主核读 `2048` | 主核约 `2.25 MiB`，另计 indexer | gathered score $`\left[32,1,2048\right]`$ |
+| SWA，$`W=4096`$ | token 级局部 KV | `4096` | GQA 载荷的 `1/8` | score $`\left[32,1,4096\right]`$ |
+| KDA | recurrent matrix + conv tail | 不扫描历史 token | 与 `Lkv` 无关 | state update $`\left[\mathrm{Nk},\mathrm{Dk},\mathrm{Dv}\right]`$ |
 
 表中载荷只按核心缓存元素计算，未计 page 元数据、量化尺度、索引和重复读写；其目的不是给出 benchmark，而是训练读者从 shape 推导数量级。
 
@@ -115,17 +130,20 @@ GQA、MLA、DSA、CSA、KDA、FlashAttention 经常出现在同一张列表里�
 
 设序列长度为 `L`，query/key head dimension 为 `Dk`，value dimension 为 `Dv`：
 
-```text
-score[i,j] = q_i dot k_j / sqrt(Dk),  j <= i
-output[i] = sum_j softmax(score[i,:])[j] * v_j
+```math
+{\mathrm{score}}_{i,j}=\frac{\left\langle q_{i},k_{j}\right\rangle}{\sqrt{\mathrm{Dk}}},\qquad j \le i
+```
+
+```math
+\mathrm{output}\left[i\right] = \sum_{j} \mathrm{softmax}\left(\mathrm{score}\left[i,:\right]\right)\left[j\right] \cdot  v_{j}
 ```
 
 忽略投影和 head 常数后：
 
 | 阶段 | 核心 Attention 计算量 | 单步 decode 读取的历史状态 |
 |---|---:|---:|
-| 全序列 prefill/training | `O(L^2 * D)` | 不适用 |
-| 单 token decode | `O(L * D)` | `O(L * Dcache)` |
+| 全序列 prefill/training | $`O\left({L}^{2}\cdot D\right)`$ | 不适用 |
+| 单 token decode | $`O\left(L\cdot D\right)`$ | $`O\left(L\cdot \mathrm{Dcache}\right)`$ |
 
 各种高效 Attention 都是在改变这个基线中的一个或多个项。
 
@@ -200,17 +218,17 @@ KDA + chunkwise prefill kernel + fused recurrent decode kernel
 
 | 方法 | 历史表示 | 每 query 访问的 position/entry | Prefill 核心趋势 | Decode 状态增长 |
 |---|---|---:|---:|---:|
-| MHA | 逐 head 完整 K/V | `L` | `O(L^2)` | `O(L)` |
-| GQA/MQA | 分组/共享 K/V | `L` | `O(L^2)` | `O(L)`，斜率更小 |
-| MLA | latent KV + position key | `L` | `O(L^2)` | `O(L)`，斜率更小 |
-| SWA | 最近窗口 K/V | `w` | `O(L*w)` | 若淘汰旧 entry，则为 `O(w)` |
+| MHA | 逐 head 完整 K/V | `L` | $`O\left({L}^{2}\right)`$ | $`O\left(L\right)`$ |
+| GQA/MQA | 分组/共享 K/V | `L` | $`O\left({L}^{2}\right)`$ | $`O\left(L\right)`$，斜率更小 |
+| MLA | latent KV + position key | `L` | $`O\left({L}^{2}\right)`$ | $`O\left(L\right)`$，斜率更小 |
+| SWA | 最近窗口 K/V | `w` | $`O\left(L\cdot w\right)`$ | 若淘汰旧 entry，则为 $`O\left(w\right)`$ |
 | NSA | 压缩 entry + 选中 block + window | 取决于设计 | 固定预算时近似线性 | 通常仍随压缩/选择 cache 增长 |
-| DSA | MLA entry + indexer key | 主路径 `k`；indexer 扫历史 | 主路径 `O(L*k)` | cache 为 `O(L)`；主 Attention 读取有界 |
-| CSA | 压缩 entry + indexer key + 局部 raw tail | 主路径 `k+w`；indexer 扫约 `L/m` | 主路径 `O(L*(k+w))` | 约 `O(L/m)` 加有界局部状态 |
-| HCA | 重度压缩 entry + 局部 raw tail | 约 `L/m' + w` | `O(L^2/m')` | 约 `O(L/m')` 加有界局部状态 |
-| GDN/KDA | 递归矩阵 + 短卷积状态 | 固定 state | `O(L*Sstate)` | `O(Sstate)` |
+| DSA | MLA entry + indexer key | 主路径 `k`；indexer 扫历史 | 主路径 $`O\left(L\cdot k\right)`$ | cache 为 $`O\left(L\right)`$；主 Attention 读取有界 |
+| CSA | 压缩 entry + indexer key + 局部 raw tail | 主路径 `k+w`；indexer 扫约 `L/m` | 主路径 $`O\left(L\cdot \left(k+w\right)\right)`$ | 约 $`O\left(\frac{L}{m}\right)`$ 加有界局部状态 |
+| HCA | 重度压缩 entry + 局部 raw tail | 约 `L/m' + w` | $`O\left(L^{2}/m'\right)`$ | 约 $`O\left(L/m'\right)`$ 加有界局部状态 |
+| GDN/KDA | 递归矩阵 + 短卷积状态 | 固定 state | $`O\left(L\cdot \mathrm{Sstate}\right)`$ | $`O\left(\mathrm{Sstate}\right)`$ |
 
-DSA/CSA 的 indexer 仍要扫描随上下文增长的历史。“top-k 固定”不代表完整层的单 token decode 严格为 `O(1)`。
+DSA/CSA 的 indexer 仍要扫描随上下文增长的历史。“top-k 固定”不代表完整层的单 token decode 严格为 $`O\left(1\right)`$。
 
 ## 6. 三类压缩不能互换
 
@@ -297,84 +315,144 @@ NSA 与 DSA 是两种不同的研究机制。本仓库 SGLang 快照中的 backe
 
 先固定一个假想 decoder layer，让符号变成具体数字：
 
-```text
-B = 2                 # 活跃 request 数
-L = 4096              # 每个 request 已缓存 token 数
-Hmodel = 4096
-Nq = 32               # query head 数
-Nkv = 8               # GQA KV head 数
-Dk = Dv = 128
-Dc = 512, Dr = 64     # MLA latent 与 RoPE 缓存宽度
-k = 256               # 稀疏选择预算
-m = 4                 # CSA 压缩步长
-w = 128               # 局部窗口
+```math
+B=2\qquad\text{活跃 request 数}
+```
+
+```math
+L=4096\qquad\text{每个 request 已缓存 token 数}
+```
+
+```math
+\mathrm{Hmodel}=4096
+```
+
+```math
+\mathrm{Nq}=32\qquad\text{query head 数}
+```
+
+```math
+\mathrm{Nkv}=8\qquad\text{GQA KV head 数}
+```
+
+```math
+\mathrm{Dk}=\mathrm{Dv}=128
+```
+
+```math
+\mathrm{Dc}=512,\qquad \mathrm{Dr}=64\qquad\text{MLA latent 与 RoPE 缓存宽度}
+```
+
+```math
+k=256\qquad\text{稀疏选择预算}
+```
+
+```math
+m=4\qquad\text{CSA 压缩步长}
+```
+
+```math
+w=128\qquad\text{局部窗口}
 ```
 
 ### 12.1 MHA 与 GQA
 
 MHA 每个 token 保存：
 
-```text
-K: [Nq,Dk] = [32,128]
-V: [Nq,Dv] = [32,128]
-每 token 元素数 = 32 * (128 + 128) = 8192
+```math
+K: \left[\mathrm{Nq},\mathrm{Dk}\right] = \left[32,128\right]
+```
+
+```math
+V: \left[\mathrm{Nq},\mathrm{Dv}\right] = \left[32,128\right]
+```
+
+```math
+\text{每 token 元素数}= 32 \cdot  \left(128 + 128\right) = 8192
 ```
 
 GQA 则是：
 
-```text
-K/V cache: [B,L,Nkv,D] = [2,4096,8,128]
-每 token 元素数 = 8 * (128 + 128) = 2048
+```math
+\text{K/V cache}: \left[B,L,\mathrm{Nkv},D\right] = \left[2,4096,8,128\right]
 ```
 
-query 仍是 `[B,Nq,D] = [2,32,128]`。每 `Nq/Nkv = 4` 个 query head 共享一个 KV head。score 张量逻辑上仍是 `[B,Nq,1,L]`；GQA 缩小的是缓存宽度，不是 score 长度。
+```math
+\text{每 token 元素数}= 8 \cdot  \left(128 + 128\right) = 2048
+```
+
+query 仍是 $`\left[B,\mathrm{Nq},D\right]=\left[2,32,128\right]`$。每 $`\frac{\mathrm{Nq}}{\mathrm{Nkv}}=4`$ 个 query head 共享一个 KV head。score 张量逻辑上仍是 $`\left[B,\mathrm{Nq},1,L\right]`$；GQA 缩小的是缓存宽度，不是 score 长度。
 
 ### 12.2 MLA
 
 缓存状态变成：
 
-```text
-Ckv:    [B,L,Dc] = [2,4096,512]
-K_rope: [B,L,Dr] = [2,4096,64]
-每 token 元素数 = 512 + 64 = 576
+```math
+\mathrm{Ckv}: \left[B,L,\mathrm{Dc}\right] = \left[2,4096,512\right]
 ```
 
-吸收后的内容 query 逻辑上是 `[B,Nq,Dc]`，与 `Ckv` 相乘仍会产生 `[B,Nq,L]`。相比 MHA 的 8192 个元素，576 确实窄很多，但历史条目仍有 4096 个。
+```math
+K_{\mathrm{rope}}: \left[B,L,\mathrm{Dr}\right] = \left[2,4096,64\right]
+```
+
+```math
+\text{每 token 元素数}= 512 + 64 = 576
+```
+
+吸收后的内容 query 逻辑上是 $`\left[B,\mathrm{Nq},\mathrm{Dc}\right]`$，与 `Ckv` 相乘仍会产生 $`\left[B,\mathrm{Nq},L\right]`$。相比 MHA 的 8192 个元素，576 确实窄很多，但历史条目仍有 4096 个。
 
 ### 12.3 DSA
 
 DSA 保留 MLA 历史，并增加一个较小的 indexer-key 缓存：
 
-```text
-QI:       [B,HI,DI]
-KI_cache: [B,L,DI]
-scores:   [B,L]
-topk_ids: [B,k] = [2,256]
-selected latent: [B,k,Dc+Dr] = [2,256,576]
-main logits: [B,Nq,k] = [2,32,256]
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[B,\mathrm{HI},\mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{KI\_cache}\right)=\left[B,L,\mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[B,L\right]
+```
+
+```math
+\mathrm{topk\_ids}: \left[B,k\right] = \left[2,256\right]
+```
+
+```math
+\text{selected latent}: \left[B,k,\mathrm{Dc}+\mathrm{Dr}\right] = \left[2,256,576\right]
+```
+
+```math
+\text{main logits}: \left[B,\mathrm{Nq},k\right] = \left[2,32,256\right]
 ```
 
 indexer 仍看到 4096 个候选，但高维主核只看到 256 个条目，而不是 4096 个。
 
 ### 12.4 CSA 与 HCA
 
-当步长 `m=4` 时，CSA 约有：
+当步长 $`m=4`$ 时，CSA 约有：
+
+```math
+\mathrm{Nc} = \mathrm{ceil}\left(4096 / 4\right) = 1024 \text{个压缩条目}
+```
 
 ```text
-Nc = ceil(4096 / 4) = 1024 个压缩条目
 压缩 index score: [B,1024]
 选中的压缩条目: [B,256,Dcomp]
 局部条目: [B,128,Dlocal]
 ```
 
-若 HCA 使用 `m'=128`，全局压缩条目只有 `4096/128 = 32` 个，因此可以对它们做稠密注意力，同时读取局部窗口。
+若 HCA 使用 $`m'=128`$，全局压缩条目只有 $`\frac{4096}{128}=32`$ 个，因此可以对它们做稠密注意力，同时读取局部窗口。
 
 ### 12.5 KDA/GDN
 
-设 `Hstate=32` 且 `Dk=Dv=128`：
+设 $`\mathrm{Hstate}=32`$ 且 $`\mathrm{Dk}=\mathrm{Dv}=128`$：
 
-```text
-state: [B,Hstate,Dv,Dk] = [2,32,128,128]
+```math
+\mathrm{state}: \left[B,\mathrm{Hstate},\mathrm{Dv},\mathrm{Dk}\right] = \left[2,32,128,128\right]
 ```
 
 处理完第 4096 个 token 后，状态 shape 与处理完第 1 个 token 后完全相同，没有 `[L,...]` 维。代价是无法再显式 gather 第 137 个 token；它的影响已经折叠进矩阵。
@@ -383,41 +461,36 @@ state: [B,Hstate,Dv,Dk] = [2,32,128,128]
 
 每个 request 从一个新 hidden vector 开始：
 
-```text
-X_new: [B,Hmodel]
+```math
+\mathrm{shape}\left(X_{\mathrm{new}}\right)=\left[B,\mathrm{Hmodel}\right]
 ```
 
 架构决定接下来的持久化/读取 shape：
 
 | 架构 | 投影输出 | 历史读取 | 主核输出 |
 |---|---|---|---|
-| GQA | `Q [B,Nq,D]`，新 `K/V [B,Nkv,D]` | `K/V [B,L,Nkv,D]` | `[B,Nq,Dv]` |
-| MLA | 主 Q + 新 `Ckv/Krope [B,Dc+Dr]` | latent `[B,L,Dc+Dr]` | `[B,Nq,Dv]` |
-| DSA | MLA 张量 + `QI [B,HI,DI]` | indexer `[B,L,DI]`，再读 latent `[B,k,Dc+Dr]` | `[B,Nq,Dv]` |
-| CSA | 主/indexer Q + 压缩尾部更新 | 压缩 `[B,L/m,Dcomp]`，再读 top-k + local | `[B,Nq,Dv]` |
-| KDA | `q/k/v/gates [B,H,*]` | state `[B,H,Dv,Dk]` | `[B,H,Dv]` |
+| GQA | `Q [B,Nq,D]`，新 `K/V [B,Nkv,D]` | `K/V [B,L,Nkv,D]` | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| MLA | 主 Q + 新 `Ckv/Krope [B,Dc+Dr]` | latent $`\left[B,L,\mathrm{Dc}+\mathrm{Dr}\right]`$ | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| DSA | MLA 张量 + `QI [B,HI,DI]` | indexer $`\left[B,L,\mathrm{DI}\right]`$，再读 latent $`\left[B,k,\mathrm{Dc}+\mathrm{Dr}\right]`$ | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| CSA | 主/indexer Q + 压缩尾部更新 | 压缩 $`\left[B,\frac{L}{m},\mathrm{Dcomp}\right]`$，再读 top-k + local | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| KDA | `q/k/v/gates [B,H,*]` | state $`\left[B,H,\mathrm{Dv},\mathrm{Dk}\right]`$ | $`\left[B,H,\mathrm{Dv}\right]`$ |
 
-所有行在 head 合并与输出投影后都会回到 `[B,Hmodel]`。因此外围 decoder block 可以保持相似结构，但它们需要完全不同的状态管理器。
+所有行在 head 合并与输出投影后都会回到 $`\left[B,\mathrm{Hmodel}\right]`$。因此外围 decoder block 可以保持相似结构，但它们需要完全不同的状态管理器。
 
 ## 14. 更有用的性能模型
 
 相比一个渐近复杂度标签，wall-clock 延迟更适合写成各阶段成本之和：
 
-```text
-T_layer = T_projection
-        + T_state_read_or_index
-        + T_selection_or_recurrence
-        + T_attention_core
-        + T_output
-        + T_metadata_and_launch
+```math
+T_{\mathrm{layer}}=T_{\mathrm{projection}}+\mathrm{T\_state\_read\_or\_index}+\mathrm{T\_selection\_or\_recurrence}+\mathrm{T\_attention\_core}+T_{\mathrm{output}}+\mathrm{T\_metadata\_and\_launch}
 ```
 
 稠密 decode 往往由 `T_state_read` 主导；DSA/CSA 可能由 index 扫描、top-k、地址转换与不规则读取主导；KDA/GDN 可能由递归状态读写流量主导。排除这些阶段的 kernel benchmark 无法预测 serving 吞吐。
 
 还可以用算术强度作为第二视角：
 
-```text
-arithmetic_intensity = operations / bytes moved from HBM
+```math
+\mathrm{arithmetic\_intensity} = \mathrm{operations} / \mathrm{bytes} \mathrm{moved} \mathrm{from} \mathrm{HBM}
 ```
 
 - 大型 prefill 矩阵乘可能受计算能力限制；

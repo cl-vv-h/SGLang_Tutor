@@ -26,9 +26,9 @@ Error encountered:
 
 | Variable | Purpose |
 |---|---|
-| `TRITON_DUMP_IR=1` | Dump TTIR/MLIR intermediate representations |
+| $`\mathrm{TRITON\_DUMP\_IR}=1`$ | Dump TTIR/MLIR intermediate representations |
 | `TRITON_CACHE_DIR` | Override kernel cache location |
-| `ASCEND_LAUNCH_BLOCKING=1` | Synchronous kernel launch for debugging |
+| $`\mathrm{ASCEND\_LAUNCH\_BLOCKING}=1`$ | Synchronous kernel launch for debugging |
 
 ## Optimization Loop
 

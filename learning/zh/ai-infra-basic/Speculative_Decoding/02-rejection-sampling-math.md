@@ -4,14 +4,14 @@
 
 设当前前缀为 `x`。Target model 给出的目标分布是：
 
-```text
-p(v) = P_target(v | x), v in vocabulary
+```math
+p\left(v\right) = P_{\mathrm{target}}\left(v \mid  x\right), v \in \mathrm{vocabulary}
 ```
 
 Draft path 给出的提案分布是：
 
-```text
-q(v) = P_draft(v | x)
+```math
+q\left(v\right) = P_{\mathrm{draft}}\left(v \mid  x\right)
 ```
 
 目标：先从 `q` 中采样候选 `y`，但最终输出的 token 分布必须等于 `p`。
@@ -120,8 +120,8 @@ draft 提出 B 的另一部分情况拒绝；
 
 算这两类贡献的目的，是证明最终账本正好等于 target 分布：
 
-```text
-最终输出概率 = 接受贡献 + 补偿贡献 = target 概率
+```math
+\text{最终输出概率} = \text{接受贡献} + \text{补偿贡献} = \mathrm{target} \text{概率}
 ```
 
 因此，“贡献”不是额外复杂度，而是用来解释拒绝采样为什么不会改变 target model 输出分布的工具。
@@ -142,17 +142,17 @@ y ~ q
 
 然后用 target 分布检查这个候选。接受概率是：
 
-```text
-accept_prob(y) = min(1, p(y) / q(y))
+```math
+\mathrm{accept\_prob}\left(y\right) = \mathrm{min}\left(1, p\left(y\right) / q\left(y\right)\right)
 ```
 
 为了更容易读，可以展开成普通话：
 
-```text
-接受概率 =
-    target 给 y 的概率 / draft 给 y 的概率
-    但最大不能超过 1
+```math
+\text{接受概率} = \mathrm{target} \text{给} y \text{的概率} / \mathrm{draft} \text{给} y \text{的概率}
 ```
+
+但最大不能超过 1
 
 | 情况 | 比值 `p(y)/q(y)` | 接受概率 | 直观解释 |
 |---|---:|---:|---|
@@ -162,11 +162,16 @@ accept_prob(y) = min(1, p(y) / q(y))
 
 例如：
 
-```text
-target: p(B) = 0.30
-draft:  q(B) = 0.50
+```math
+\mathrm{target}: p\left(B\right) = 0.30
+```
 
-accept_prob(B) = min(1, 0.30 / 0.50) = 0.60
+```math
+\mathrm{draft}: q\left(B\right) = 0.50
+```
+
+```math
+\mathrm{accept\_prob}\left(B\right) = \mathrm{min}\left(1, 0.30 / 0.50\right) = 0.60
 ```
 
 读法：draft 提出 `B` 的频率太高了。为了最终仍然像 target 一样只给 `B` 30% 概率，draft 提出的 `B` 只能接受 60%。
@@ -182,20 +187,27 @@ else:
 
 如果拒绝，就不能随便采样，否则分布会乱。需要从 residual distribution 里采样。它表示“target 还缺的那部分概率”：
 
-```text
 先看 target 比 draft 多出来多少:
-    missing(v) = max(p(v) - q(v), 0)
+
+```math
+\mathrm{missing}\left(v\right) = \mathrm{max}\left(p\left(v\right) - q\left(v\right), 0\right)
+```
 
 再把 missing 重新归一化成概率:
-    r(v) = missing(v) / Z
+
+```math
+r\left(v\right) = \mathrm{missing}\left(v\right) / Z
+```
 
 其中:
-    Z = 所有 missing(v) 加起来
+
+```math
+Z = \text{所有} \mathrm{missing}\left(v\right) \text{加起来}
 ```
 
 同一张概率表中：
 
-| token | `p(v)` | `q(v)` | `missing(v)=max(p-q,0)` |
+| token | `p(v)` | `q(v)` | $`\mathrm{missing}\left(v\right)=\mathrm{max}\left(p-q,0\right)`$ |
 |---|---:|---:|---:|
 | `A` | 0.50 | 0.20 | 0.30 |
 | `B` | 0.30 | 0.50 | 0 |
@@ -205,8 +217,8 @@ else:
 
 这条规则的含义是：
 
-1. 如果 draft 对 token `v` 的概率不超过 target，即 `q(v) <= p(v)`，那么 draft 提出的 `v` 总是可以接受。
-2. 如果 draft 对 `v` 的概率高于 target，即 `q(v) > p(v)`，只能接受其中 `p(v)/q(v)` 的比例。
+1. 如果 draft 对 token `v` 的概率不超过 target，即 $`q\left(v\right) \le p\left(v\right)`$，那么 draft 提出的 `v` 总是可以接受。
+2. 如果 draft 对 `v` 的概率高于 target，即 $`q\left(v\right) \gt p\left(v\right)`$，只能接受其中 `p(v)/q(v)` 的比例。
 3. 被拒绝时，说明 draft 在某些 token 上分配了过多概率，需要从 target 比 draft 更偏好的 token 集合中补回来。
 
 ## 3. 完整单 token 流程
@@ -231,10 +243,16 @@ C: 20%
 
 Draft 按 `q` 抽样：
 
-```text
-抽到 A 的概率 = 0.20
-抽到 B 的概率 = 0.50
-抽到 C 的概率 = 0.30
+```math
+\text{抽到 A 的概率}= 0.20
+```
+
+```math
+\text{抽到 B 的概率}= 0.50
+```
+
+```math
+\text{抽到 C 的概率}= 0.30
 ```
 
 如果直接输出 draft 抽到的 token，最终分布就是：
@@ -251,8 +269,8 @@ C: 30%
 
 接受概率是：
 
-```text
-接受概率 = min(1, target 概率 / draft 概率)
+```math
+\text{接受概率} = \mathrm{min}\left(1, \mathrm{target} \text{概率} / \mathrm{draft} \text{概率}\right)
 ```
 
 代入这三个 token：
@@ -326,11 +344,16 @@ draft 抽到 C: 接受概率 0.6667，拒绝概率 0.3333
 
 拒绝总概率是：
 
-```text
-B 分支拒绝概率 = 0.50 × 0.40   = 0.20
-C 分支拒绝概率 = 0.30 × 0.3333 = 0.10
+```math
+\text{B 分支拒绝概率}= 0.50 \times  0.40 = 0.20
+```
 
-总拒绝概率 = 0.20 + 0.10 = 0.30
+```math
+\text{C 分支拒绝概率}= 0.30 \times  0.3333 = 0.10
+```
+
+```math
+\text{总拒绝概率}=0.2+0.1=0.3
 ```
 
 这 `0.30` 正好是 `A` 还缺的概率。拒绝后 residual 会采样 `A`，于是补偿贡献为：
@@ -362,14 +385,20 @@ A 通过拒绝补偿贡献 0.30
 ```text
 1. draft 抽到 B
 2. target 发现 B 在 draft 里概率太高
-3. 接受概率 = 0.60
+```
+
+```math
+\text{3. 接受概率}= 0.60
+```
+
+```text
 4. 抽随机数 u
 ```
 
 如果：
 
-```text
-u = 0.42 <= 0.60
+```math
+u=0.42 \le 0.6
 ```
 
 则接受：
@@ -380,8 +409,8 @@ output B
 
 如果：
 
-```text
-u = 0.91 > 0.60
+```math
+u=0.91 \gt 0.6
 ```
 
 则拒绝：
@@ -407,14 +436,12 @@ output A
 
 对每个 token，目标概率 `p(v)` 可以拆成两部分：
 
-```text
-target 概率
-  = draft 能被接受的那部分
-  + 拒绝后需要补回来的那部分
+```math
+\text{target 概率}= \mathrm{draft} \text{能被接受的那部分} + \text{拒绝后需要补回来的那部分}
+```
 
-p(v)
-  = min(p(v), q(v))
-  + max(p(v) - q(v), 0)
+```math
+p\left(v\right)=\mathrm{min}\left(p\left(v\right),q\left(v\right)\right)+\mathrm{max}\left(p\left(v\right)-q\left(v\right),0\right)
 ```
 
 其中：
@@ -430,21 +457,14 @@ p(v)
 
 对任意 token `v`，最终输出 `v` 的概率由两部分组成：
 
-```text
-最终输出 v 的概率
-  = 接受 draft 时输出 v 的概率
-  + 拒绝 draft 后补采样到 v 的概率
+```math
+\text{最终输出 v 的概率}= \text{接受} \mathrm{draft} \text{时输出} v \text{的概率} + \text{拒绝} \mathrm{draft} \text{后补采样到} v \text{的概率}
 ```
 
 第一部分：draft 采样到 `v` 且被接受：
 
-```text
-接受贡献
-  = draft 先抽到 v 的概率 × 抽到 v 后被接受的概率
-
-  = q(v) × min(1, p(v)/q(v))
-
-  = min(q(v), p(v))
+```math
+\text{接受贡献} = \mathrm{draft} \text{先抽到} v \text{的概率} \times  \text{抽到} v \text{后被接受的概率} = q\left(v\right) \times  \mathrm{min}\left(1, p\left(v\right)/q\left(v\right)\right) = \mathrm{min}\left(q\left(v\right), p\left(v\right)\right)
 ```
 
 最后一步读法：
@@ -457,55 +477,42 @@ p(v)
 
 第二部分：某个 draft token 被拒绝，然后 residual sample 采到 `v`：
 
-```text
-拒绝补偿贡献
-  = 发生拒绝的概率 × residual 采到 v 的概率
+```math
+\text{拒绝补偿贡献} = \text{发生拒绝的概率} \times  \mathrm{residual} \text{采到} v \text{的概率}
 ```
 
 先计算拒绝概率：
 
-```text
-发生拒绝的概率
-  = 1 - 所有 token 的接受贡献加起来
-
-  = 1 - sum_over_tokens min(q(token), p(token))
+```math
+\text{发生拒绝的概率} = 1 - \text{所有} \mathrm{token} \text{的接受贡献加起来} = 1 - \sum_{\mathrm{token}} \mathrm{min}\left(q\left(\mathrm{token}\right), p\left(\mathrm{token}\right)\right)
 ```
 
 因为 `p` 和 `q` 都是概率分布，所以：
 
-```text
-sum p(token) = 1
-sum q(token) = 1
+```math
+\sum p\left(\mathrm{token}\right) = 1
+```
+
+```math
+\sum q\left(\mathrm{token}\right) = 1
 ```
 
 于是“没有被接受的总概率”正好等于“target 比 draft 多出来的总概率”：
 
-```text
-发生拒绝的概率
-  = sum_over_tokens max(p(token) - q(token), 0)
-  = Z
+```math
+\text{发生拒绝的概率} = \sum_{\mathrm{token}} \mathrm{max}\left(p\left(\mathrm{token}\right) - q\left(\mathrm{token}\right), 0\right) = Z
 ```
 
 所以：
 
-```text
-拒绝补偿贡献
-  = Z × r(v)
-
-  = Z × max(p(v)-q(v),0) / Z
-
-  = max(p(v)-q(v),0)
+```math
+\text{拒绝补偿贡献}=Z\cdot r\left(v\right)=\frac{Z\cdot \mathrm{max}\left(p\left(v\right)-q\left(v\right),0\right)}{Z}=\mathrm{max}\left(p\left(v\right)-q\left(v\right),0\right)
 ```
 
 两部分相加：
 
-```text
-最终输出 v 的概率
-  = 接受贡献 + 拒绝补偿贡献
-
-  = min(q(v),p(v)) + max(p(v)-q(v),0)
-
-  = p(v)
+```math
+\text{最终输出 v 的概率}= \text{接受贡献} + \text{拒绝补偿贡献} = \mathrm{min}\left(q\left(v\right),p\left(v\right)\right) + \mathrm{max}\left(p\left(v\right)-q\left(v\right),0\right) = p\left(v\right)
 ```
 
 因此，虽然候选来自 draft 分布 `q`，最终输出分布仍然是 target 分布 `p`。
@@ -554,7 +561,7 @@ Target verify 一次算出每个位置的目标分布：
 还要假设前面的 draft token y_1...y_(i-1) 已经被接受。
 ```
 
-验证从 `i=1` 开始顺序进行：
+验证从 $`i=1`$ 开始顺序进行：
 
 ```text
 for i in 1..K:
@@ -606,9 +613,12 @@ parallel target computation
 
 当 temperature 为 0 或严格 greedy 时，目标分布退化成：
 
-```text
-p(v*) = 1, v* = argmax target_logits
-p(v)  = 0, v != v*
+```math
+v^{\star}=\underset{v}{\mathrm{argmax}}\,\mathrm{target\_logits}(v)
+```
+
+```math
+p(v^{\star})=1,\qquad p(v)=0\quad(v\ne v^{\star})
 ```
 
 这时不需要概率比值。验证规则变成：
@@ -642,8 +652,8 @@ Draft 分布 `q` 可以不同，但 verifier 必须知道候选 token 在 `q` �
 
 若 grammar 规定某个 token 非法，则：
 
-```text
-p(token) = 0
+```math
+p\left(\mathrm{token}\right)=0
 ```
 
 如果 draft 提出非法 token，它会被拒绝。工程上更好的做法是让 draft 也使用同样的 grammar mask，这样可以减少无效候选和拒绝率。
@@ -688,14 +698,14 @@ node_id -> path retrieval index
 
 ### q(y)=0
 
-若 `q(y)=0`，draft 不会采样到 `y`。如果 target 认为 `y` 有概率，它只能通过 residual distribution 在拒绝后被采样出来。
+若 $`q\left(y\right)=0`$，draft 不会采样到 `y`。如果 target 认为 `y` 有概率，它只能通过 residual distribution 在拒绝后被采样出来。
 
 ### residual normalization 很小
 
 如果 `p` 和 `q` 非常接近：
 
-```text
-Z = 所有 token 的 max(p(token)-q(token), 0) 加起来
+```math
+Z = \text{所有} \mathrm{token} \text{的} \mathrm{max}\left(p\left(\mathrm{token}\right)-q\left(\mathrm{token}\right), 0\right) \text{加起来}
 ```
 
 会很小。这代表拒绝概率很低。实现中需要注意浮点误差和归一化稳定性。
@@ -711,12 +721,16 @@ draft_logits  -> log_softmax -> draft_logprobs
 
 接受判断可以写成：
 
-```text
 原始判断:
-    u <= p(y) / q(y)
+
+```math
+u \le \frac{p\left(y\right)}{q\left(y\right)}
+```
 
 取 log 后:
-    log(u) <= log p(y) - log q(y)
+
+```math
+\mathrm{log}\left(u\right) \le  \mathrm{log} p\left(y\right) - \mathrm{log} q\left(y\right)
 ```
 
 读法：乘除法在概率很小时容易数值不稳定，把概率转成 log 后，除法变成减法，更适合 GPU kernel 和低精度计算。

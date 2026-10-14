@@ -273,24 +273,36 @@ Keep **batch size** and **bucket** distinct:
 
 - **Batch size** is the number of requests/sequences in one forward; source code abbreviates it as `bs`.
 - A **batch-size bucket** is a preselected reusable execution specification keyed by one discrete batch size.
-- `capture_bs` is the list of batch sizes to capture, such as `[1, 2, 4, 8]`.
+- `capture_bs` is the list of batch sizes to capture, such as $`\left[1,2,4,8\right]`$.
 
 Therefore, `bs` expands to **batch size**, not “bucket size.” In `for bs in capture_bs`, the same integer has two related roles:
 
-```text
-bs = 8
-  role 1: execute this graph at batch size 8
-  role 2: select the batch-size=8 bucket/ShapeKey
+```math
+\mathrm{bs}=8
+```
+
+role 1: execute this graph at batch size 8
+
+```math
+\text{role 2}: \mathrm{select} \mathrm{the} \mathrm{batch}-\mathrm{size}=8 \mathrm{bucket}/\mathrm{ShapeKey}
 ```
 
 For a live batch:
 
-```text
-raw_bs = 5
-capture_bs = [1, 2, 4, 8]
+```math
+\mathrm{raw\_bs}=5
+```
 
-selected bs = 8
-graph_key = ShapeKey(size=8)
+```math
+\mathrm{capture\_bs}=\left[1,2,4,8\right]
+```
+
+```math
+\text{selected bs}= 8
+```
+
+```math
+\mathrm{graph\_key} = \mathrm{ShapeKey}\left(\mathrm{size}=8\right)
 ```
 
 The five real requests are padded to captured batch size 8 and use the graph keyed by 8. A bucket is not a container holding eight batches; the value 8 is the batch size supported by that graph.
@@ -301,7 +313,7 @@ More buckets reduce fallback but increase capture time and graph/static-memory u
 
 ### 6.2 Warmup
 
-Use one concrete case throughout this section: SGLang is capturing an ordinary decode bucket with `bs=4`, and `4 in self.compile_bs`, so this bucket enables `torch.compile`. Before learning Dynamo, FX, or TorchAir, identify the five real objects in the call chain:
+Use one concrete case throughout this section: SGLang is capturing an ordinary decode bucket with $`\mathrm{bs}=4`$, and `4 in self.compile_bs`, so this bucket enables `torch.compile`. Before learning Dynamo, FX, or TorchAir, identify the five real objects in the call chain:
 
 | Name | Runtime type | Creator | Is it a graph? |
 |---|---|---|---|
@@ -444,12 +456,20 @@ compile_bs = (
 
 For example:
 
-```text
-capture_bs = [1, 2, 4, 8, 16]
-torch_compile_max_bs = 8
-enable_torch_compile = True
+```math
+\mathrm{capture\_bs}=\left[1,2,4,8,16\right]
+```
 
-compile_bs = [1, 2, 4, 8]
+```math
+\mathrm{torch\_compile\_max\_bs}=8
+```
+
+```text
+enable_torch_compile = True
+```
+
+```math
+\mathrm{compile\_bs}=\left[1,2,4,8\right]
 ```
 
 Buckets 1/2/4/8 therefore pass through `torch.compile`; bucket 16 calls raw `model.forward`. All five can still be captured by the outer NPUGraph. **`compile_bs` selects compiler use, while `capture_bs` selects launch-graph creation.**
@@ -1051,10 +1071,10 @@ Capture observes submissions produced by dynamic execution; it does not scan the
 |---|---|---|
 | `graph = torch.npu.NPUGraph()` | Creates a Python/runtime handle | No model execution yet |
 | enter `graph_ctx(...)` | Calls context-manager entry | Selected stream begins capture and binds the pool |
-| `out = forward_fn()` | Runs metadata preparation, Python model path, and dispatcher calls | Operator tasks are submitted and recorded |
+| $`\mathrm{out} = \mathrm{forward\_fn}\left(\right)`$ | Runs metadata preparation, Python model path, and dispatcher calls | Operator tasks are submitted and recorded |
 | exit `graph_ctx` | Calls context-manager exit | Capture finalizes into a replayable graph |
-| `_graphs[key] = graph` | Stores a handle in a Python dictionary | No Device recomputation |
-| `_outputs[key] = out` | Stores the output-storage handle | Does not copy an output-value snapshot |
+| $`{\mathrm{\_graphs}}_{\mathrm{key}}=\mathrm{graph}`$ | Stores a handle in a Python dictionary | No Device recomputation |
+| $`{\mathrm{\_outputs}}_{\mathrm{key}}=\mathrm{out}`$ | Stores the output-storage handle | Does not copy an output-value snapshot |
 
 Warmup #2 cannot “also become the graph” because its `forward_fn()` call occurs outside `graph_ctx`; the runtime was not capturing. The complete third forward must execute again.
 
@@ -1277,7 +1297,7 @@ Keep the three names at their own layers:
 
 ### 7.2 Padding to a Captured Batch Size
 
-For raw batch 5 and buckets `[1,2,4,8]`, `load_batch`:
+For raw batch 5 and buckets $`\left[1,2,4,8\right]`$, `load_batch`:
 
 1. selects captured size 8;
 2. copies five real rows into static buffers;
@@ -1340,21 +1360,26 @@ Why not keep only `replay()`? Consider one concrete decode:
 
 ```text
 at capture:
-  input_ids storage address = 0x1000
-  captured FIA Host keyword actual_seq_lengths_kv = [8, 16]
-
-before the next replay:
-  new input_ids are copied into the same 0x1000
-  the new sequence lengths should be [9, 17]
+input_ids storage address = 0x1000
 ```
 
-`copy_()` is enough for `input_ids`, because the graph rereads address `0x1000` and finds new contents. `actual_seq_lengths_kv=[8,16]`, however, may be a copied Host parameter retained in the captured FIA task rather than data in fixed Device storage. Plain:
+```math
+\text{captured FIA Host keyword actual\_seq\_lengths\_kv}= \left[8, 16\right]
+```
+
+```text
+before the next replay:
+new input_ids are copied into the same 0x1000
+the new sequence lengths should be [9, 17]
+```
+
+`copy_()` is enough for `input_ids`, because the graph rereads address `0x1000` and finds new contents. $`\mathrm{actual\_seq\_lengths\_kv}=\left[8,16\right]`$, however, may be a copied Host parameter retained in the captured FIA task rather than data in fixed Device storage. Plain:
 
 ```python
 graph.replay()
 ```
 
-may therefore run attention with stale lengths. `replay_with_input_update()` patches this supported captured Host parameter to `[9,17]` before the task executes.
+may therefore run attention with stale lengths. `replay_with_input_update()` patches this supported captured Host parameter to $`\left[9,17\right]`$ before the task executes.
 
 The complete implementation also exposes its two input contracts:
 
@@ -2030,7 +2055,7 @@ The `can_run_graph` branch returns immediately after `execute()`. Online decode 
 
 The NPU override [`execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf13996b628f8335628a691dcb3aa8400b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py#L209-L280) has five conceptual steps.
 
-1. Inherited `load_batch()` selects a bucket. With live batch 5 and `[1,2,4,8]`, `raw_bs=5` and padded `bs=8`.
+1. Inherited `load_batch()` selects a bucket. With live batch 5 and $`\left[1,2,4,8\right]`$, $`\mathrm{raw\_bs}=5`$ and padded $`\mathrm{bs}=8`$.
 2. `buffer_registry.fill_from(...)` copies live values into the captured `DecodeInputBuffers`. Values change; bound storage addresses do not.
 3. `attn_backend.init_forward_metadata_out_graph(fb_view)` prepares dynamic metadata that belongs outside the captured task sequence.
 4. The runner chooses an attribute such as `actual_seq_lengths_kv` or `context_lens`, calls `replay_with_input_update(...)`, and replays the graph.
@@ -2165,7 +2190,7 @@ Not on the standard initialization path. After model, memory-pool, and attention
 
 ### 11. Does `bs` Mean Batch Size or Bucket Size?
 
-It means batch size. A bucket is a capture specification keyed by one discrete batch size. Mapping `raw_bs=5` to `bs=8` means padding five real requests to captured batch size 8 and selecting the batch-size=8 graph, not placing eight batches in a container.
+It means batch size. A bucket is a capture specification keyed by one discrete batch size. Mapping $`\mathrm{raw\_bs}=5`$ to $`\mathrm{bs}=8`$ means padding five real requests to captured batch size 8 and selecting the batch-size=8 graph, not placing eight batches in a container.
 
 ### 12. What Is the Essential Difference Between `replay_with_input_update` and `replay`?
 

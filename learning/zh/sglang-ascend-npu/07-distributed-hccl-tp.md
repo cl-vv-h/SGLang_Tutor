@@ -141,13 +141,16 @@ npu-smi info -t topo
 
 关注：
 
-```text
 Init torch distributed begin
+
 Init torch distributed ends
-backend=hccl
-rank=
-local_rank=
-tp_rank=
+
+```math
+\mathrm{backend}=\mathrm{hccl}
+```
+
+```text
+rank= local_rank= tp_rank=
 ```
 
 ### 4. 关闭 graph 缩小变量

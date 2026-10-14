@@ -43,12 +43,12 @@ Cube:   GM -> L1 -> L0A/L0B -> Cube -> L0C -> output path -> GM
 
 Capacities, legal transfers, alignment, and some logical-to-physical mappings vary by Ascend product. Query or consult the target product instead of treating a capacity from one model as universal.
 
-## `A1/B1/C1`, `A2/B2/C2`, and `CO1/CO2`
+## $`\frac{\frac{\mathrm{A1}}{\mathrm{B1}}}{\mathrm{C1}}`$, $`\frac{\frac{\mathrm{A2}}{\mathrm{B2}}}{\mathrm{C2}}`$, and `CO1/CO2`
 
 These names are Ascend C `TPosition` logical locations for Cube computation, not chip generations or physical-core names. Start from:
 
-```text
-Output = A @ B + Bias
+```math
+\mathrm{Output}=A\,B+\mathrm{Bias}
 ```
 
 The letters describe operand roles:

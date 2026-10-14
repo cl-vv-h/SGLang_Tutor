@@ -75,14 +75,25 @@ LayerCommunicator
 
 ```text
 输入: h_l [N,D]
-
-a_l = Attention(RMSNorm_attn(h_l))      # [N,D]
-u_l = h_l + a_l                         # [N,D]
-f_l = MLP_or_MoE(RMSNorm_ffn(u_l))       # [N,D]
-h_(l+1) = u_l + f_l                     # [N,D]
 ```
 
-在 GLM-4.7-Flash 中，`D=2048`。prefill 时 `N=T`，表示本次 extend 处理的 token 数；decode 时 `N=B`，表示 batch 中每个请求的新 token 数。
+```math
+a_{l} = \mathrm{Attention}\left(\mathrm{RMSNorm\_attn}\left(h_{l}\right)\right) \qquad\text{[N,D]}
+```
+
+```math
+u_{l}=h_{l}+a_{l}\qquad\text{[N,D]}
+```
+
+```math
+f_{l} = \mathrm{MLP\_or\_MoE}\left(\mathrm{RMSNorm\_ffn}\left(u_{l}\right)\right) \qquad\text{[N,D]}
+```
+
+```math
+{h}_{l+1}=u_{l}+f_{l}\qquad\text{[N,D]}
+```
+
+在 GLM-4.7-Flash 中，$`D=2048`$。prefill 时 $`N=T`$，表示本次 extend 处理的 token 数；decode 时 $`N=B`$，表示 batch 中每个请求的新 token 数。
 
 上面的公式很干净，但真实推理服务要面对更多状态：
 
@@ -126,9 +137,12 @@ torch_npu.npu_add_rms_norm(residual, x, weight, eps)
 
 其数学语义是：
 
-```text
-residual_out = residual + x        # [N,D]
-normed       = RMSNorm(residual_out, weight)
+```math
+\mathrm{residual\_out}=\mathrm{residual}+x\qquad\text{[N,D]}
+```
+
+```math
+\mathrm{normed}=\mathrm{RMSNorm}\left(\mathrm{residual\_out},\mathrm{weight}\right)
 ```
 
 返回值中 `normed` 会作为下一段计算的输入，`residual_out` 会继续沿 residual stream 传递。这个设计解释了为什么 profiler 中经常看不到单独的 residual add kernel：它被融合进 `npu_add_rms_norm` 了。
@@ -152,7 +166,7 @@ class ScatterMode(Enum):
 | `SCATTERED` | 每个 rank 只持有一部分 token，多个 rank 合起来才是完整 batch/token 集合。 | DP attention、CP、DeepEP/FuseEP、`enable_attn_tp_input_scattered`。 |
 | `TP_ATTN_FULL` | attention TP group 内每个 rank 都拿到该 attention group 需要的完整 token。 | attention 输入通常需要这个模式，因为不同 TP rank 计算不同 heads，但 token 序列要一致。 |
 | `FULL` | 普通 TP/MLP/MoE group 视角下的完整 token 集合。 | dense MLP、普通 fused MoE。 |
-| `MOE_FULL` | MoE CP group 视角下的完整 token 集合。 | `attn_cp_size > moe_dp_size` 时，MoE 前跨 CP ranks all-gather。 |
+| `MOE_FULL` | MoE CP group 视角下的完整 token 集合。 | $`\mathrm{attn\_cp\_size} \gt \mathrm{moe\_dp\_size}`$ 时，MoE 前跨 CP ranks all-gather。 |
 
 `LayerScatterModes` 有五个字段：
 
@@ -185,7 +199,7 @@ class LayerScatterModes:
 - `moe_dense_tp_size` 是否让 dense MLP 退化成 fully-DP；
 - 当前是否是首层或末层。
 
-在 GLM-4.7-Flash 的常见基线中，假设 `TP=4`、`DP=1`、`CP=1`、不开 DeepEP/FuseEP、`moe_dense_tp_size=None`，那么多数层的模式可以理解为：
+在 GLM-4.7-Flash 的常见基线中，假设 $`\mathrm{TP}=4`$、$`\mathrm{DP}=1`$、$`\mathrm{CP}=1`$、不开 DeepEP/FuseEP、`moe_dense_tp_size=None`，那么多数层的模式可以理解为：
 
 | 层 | `layer_input_mode` | `attn_mode` | `mlp_mode` | `middle_residual_mode` | `layer_output_mode` |
 |---|---|---|---|---|---|
@@ -214,13 +228,21 @@ self._context = CommunicateContext.init_new()
 
 `CommunicateContext` 会读取当前进程的分布式状态：
 
-```text
-attn_tp_rank / attn_tp_size
-attn_dp_size
-attn_cp_rank / attn_cp_size
-tp_rank / tp_size
-moe_cp_size
+```math
+\frac{\mathrm{attn\_tp\_rank}}{\mathrm{attn\_tp\_size}}
 ```
+
+attn_dp_size
+
+```math
+\frac{\mathrm{attn\_cp\_rank}}{\mathrm{attn\_cp\_size}}
+```
+
+```math
+\frac{\mathrm{tp\_rank}}{\mathrm{tp\_size}}
+```
+
+moe_cp_size
 
 然后把不同 `ScatterMode` 映射成 group size：
 
@@ -271,16 +293,22 @@ self._communicate_summable_tensor_pair_fn = CommunicateSummableTensorPairFn.get_
 
 Layer 0 刚进入时通常是：
 
+```math
+\mathrm{hidden\_states} = \mathrm{embedding}\left(\mathrm{input\_ids}\right) \qquad\text{[N,2048]}
+```
+
 ```text
-hidden_states = embedding(input_ids)   # [N,2048]
 residual = None
 ```
 
 这时 `prepare_attn()` 会把 `residual` 设为原始 hidden，并对 hidden 做 input RMSNorm：
 
-```text
-residual = hidden_states
-hidden_states = RMSNorm(hidden_states)
+```math
+\mathrm{residual}=\mathrm{hidden\_states}
+```
+
+```math
+\mathrm{hidden\_states}=\mathrm{RMSNorm}\left(\mathrm{hidden\_states}\right)
 ```
 
 在 NPU 上，这会落到：
@@ -292,17 +320,26 @@ RMSNorm.forward_npu
 
 从 Layer 1 开始，经常是：
 
+```math
+\mathrm{hidden\_states} = \text{上一层} \mathrm{MLP}/\mathrm{MoE} \text{增量}
+```
+
 ```text
-hidden_states = 上一层 MLP/MoE 增量
 residual = 上一层 attention residual block 输出
 ```
 
 这时 `prepare_attn()` 会执行：
 
-```text
-residual_out = residual + hidden_states
-hidden_states = RMSNorm(residual_out)
-residual = residual_out
+```math
+\mathrm{residual\_out}=\mathrm{residual}+\mathrm{hidden\_states}
+```
+
+```math
+\mathrm{hidden\_states}=\mathrm{RMSNorm}\left(\mathrm{residual\_out}\right)
+```
+
+```math
+\mathrm{residual}=\mathrm{residual\_out}
 ```
 
 在 NPU 上通常落到：
@@ -314,7 +351,7 @@ RMSNorm.forward_npu
 
 ### 7.2 `SCATTERED -> TP_ATTN_FULL` 的 all-gather
 
-如果 `layer_input_mode=SCATTERED`、`attn_mode=TP_ATTN_FULL`，`CommunicateSimpleFn` 会选择 `_scattered_to_tp_attn_full()`。
+如果 $`\mathrm{layer\_input\_mode}=\mathrm{SCATTERED}`$、$`\mathrm{attn\_mode}=\mathrm{TP\_ATTN\_FULL}`$，`CommunicateSimpleFn` 会选择 `_scattered_to_tp_attn_full()`。
 
 它的典型调用链是：
 
@@ -353,15 +390,13 @@ get_attn_tp_context().fetch_qkv_latent()
 
 取回提前算好的 Q/KV latent。
 
-这对 MLA 很重要。GLM 的主 hidden 是 `[N,2048]`，但 Q/KV latent 合计宽度是：
+这对 MLA 很重要。GLM 的主 hidden 是 $`\left[N,2048\right]`$，但 Q/KV latent 合计宽度是：
 
-```text
-q_lora_rank + kv_lora_rank + qk_rope_head_dim
-= 768 + 512 + 64
-= 1344
+```math
+\mathrm{q\_lora\_rank}+\mathrm{kv\_lora\_rank}+\mathrm{qk\_rope\_head\_dim}=768+512+64=1344
 ```
 
-当启用 `enable_attn_tp_input_scattered` 且条件满足时，可以先在局部 token 上算 latent，再对 `[N,1344]` 做 all-gather，而不是对 `[N,2048]` 做 all-gather。这样减少通信字节数，但控制逻辑会更复杂。
+当启用 `enable_attn_tp_input_scattered` 且条件满足时，可以先在局部 token 上算 latent，再对 $`\left[N,1344\right]`$ 做 all-gather，而不是对 $`\left[N,2048\right]`$ 做 all-gather。这样减少通信字节数，但控制逻辑会更复杂。
 
 ## 8. 执行期第二段：`prepare_mlp()`
 
@@ -592,7 +627,7 @@ options.hccl_config = {"hccl_buffer_size": hccl_buffer_size}
 use_npu_communicator=True
 ```
 
-`GroupCoordinator.__init__()` 中，如果是 NPU 且 `world_size > 1`，就创建：
+`GroupCoordinator.__init__()` 中，如果是 NPU 且 $`\mathrm{world\_size} \gt 1`$，就创建：
 
 ```python
 self.npu_communicator = NpuCommunicator(group=self.device_group)
@@ -634,7 +669,7 @@ GroupCoordinator.all_reduce
 
 | 触发位置 | Python 调用 | NPU 绑定 | 数学或系统语义 |
 |---|---|---|---|
-| `prepare_attn()` 中 `residual is None` | `input_layernorm(hidden_states)` | `torch_npu.npu_rms_norm` | 对每个 token 的 `[D]` hidden 做 RMSNorm。 |
+| `prepare_attn()` 中 `residual is None` | `input_layernorm(hidden_states)` | `torch_npu.npu_rms_norm` | 对每个 token 的 $`\left[D\right]`$ hidden 做 RMSNorm。 |
 | `prepare_attn()` 中 `residual is not None` | `input_layernorm(hidden_states, residual)` | `torch_npu.npu_add_rms_norm` | 先 residual add，再 RMSNorm，并返回新的 residual。 |
 | `prepare_mlp()` 后 attention residual | `post_attention_layernorm(hidden_states, residual)` | `torch_npu.npu_add_rms_norm` | 把 attention 增量加回 residual，再生成 MLP/MoE 输入。 |
 | 量化通信 | `NpuCommunicator.quant_all_reduce` | `torch_npu.npu_dynamic_quant` | 通信前按 token 动态量化到 int8。 |
@@ -743,7 +778,7 @@ dp_reduce_scatter_tensor
 
 ### 13.3 MoE CP
 
-当 `attn_cp_size > moe_dp_size` 时，MoE 前可能需要 `MOE_FULL`：
+当 $`\mathrm{attn\_cp\_size} \gt \mathrm{moe\_dp\_size}`$ 时，MoE 前可能需要 `MOE_FULL`：
 
 ```text
 attention CP local tokens
@@ -758,7 +793,7 @@ attention CP local tokens
 
 ### 13.4 DeepEP / FuseEP
 
-如果启用 DeepEP、Mooncake 或 Ascend FuseEP 等 A2A MoE backend，`LayerScatterModes._compute_mlp_mode()` 会倾向于让 sparse layer 的 `mlp_mode=SCATTERED`。
+如果启用 DeepEP、Mooncake 或 Ascend FuseEP 等 A2A MoE backend，`LayerScatterModes._compute_mlp_mode()` 会倾向于让 sparse layer 的 $`\mathrm{mlp\_mode}=\mathrm{SCATTERED}`$。
 
 含义是：
 
@@ -872,7 +907,7 @@ ATen NPU copy/slice/add
 
 ### 16.4 `FULL` 不等于“hidden size 没切”
 
-`FULL` 描述 token 覆盖范围和 group 语义，不是说权重或 hidden feature 没有 TP 切分。GLM TP=4 时，许多 linear 权重仍是 TP 分片的，但 layer 边界上的 hidden tensor 可以在每个 rank 上持有完整 `[N,2048]` 语义。
+`FULL` 描述 token 覆盖范围和 group 语义，不是说权重或 hidden feature 没有 TP 切分。GLM TP=4 时，许多 linear 权重仍是 TP 分片的，但 layer 边界上的 hidden tensor 可以在每个 rank 上持有完整 $`\left[N,2048\right]`$ 语义。
 
 ### 16.5 `postprocess_layer()` no-op 不代表没有通信
 
@@ -884,7 +919,7 @@ ATen NPU copy/slice/add
 2. `SCATTERED`、`TP_ATTN_FULL`、`FULL`、`MOE_FULL` 描述的是 token 分布还是 hidden feature 分片？
 3. `npu_add_rms_norm` 同时返回哪两个对后续 layer 有意义的结果？
 4. `LayerCommunicator.prepare_mlp()` 中的 HCCL AllReduce 和 `RMSNorm.forward_npu()` 中的 `torch_npu.npu_add_rms_norm` 分别属于通信还是计算？
-5. 为什么 `enable_attn_tp_input_scattered` 可以把通信宽度从 `[N,2048]` 降到 MLA latent 的 `[N,1344]`？
+5. 为什么 `enable_attn_tp_input_scattered` 可以把通信宽度从 $`\left[N,2048\right]`$ 降到 MLA latent 的 $`\left[N,1344\right]`$？
 6. DeepEP/FuseEP 打开后，为什么不能只在 `LayerCommunicator` 里找 expert dispatch/combine？
 7. 如果 profiler 中某层 MLP 后没有立即出现 all-reduce，应该检查哪些延迟通信或替代通信分支？
 

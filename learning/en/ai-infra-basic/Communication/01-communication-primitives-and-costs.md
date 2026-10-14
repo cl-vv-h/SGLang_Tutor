@@ -42,12 +42,16 @@ AllGather concatenates in rank order without summation. Gathering the original i
 
 Let `counts[src][dst]` be the number of records sent from source to destination:
 
-```text
-counts = [[1, 2],
-          [3, 0]]
+```math
+\mathrm{counts}=\left[\left[1,2\right],\left[3,0\right]\right]
+```
 
-rank 0: input_splits=[1,2], output_splits=[1,3]
-rank 1: input_splits=[3,0], output_splits=[2,0]
+```math
+\text{rank 0}: \mathrm{input\_splits}=\left[1,2\right], \mathrm{output\_splits}=\left[1,3\right]
+```
+
+```math
+\text{rank 1}: \mathrm{input\_splits}=\left[3,0\right], \mathrm{output\_splits}=\left[2,0\right]
 ```
 
 Rank 0 has 3 input records and 4 output records; rank 1 has 3 inputs and 2 outputs. Every send direction must match the receiver's length, dtype, and record width for that source. Receive splits are columns of the counts matrix, not copies of the local send splits. A rank with zero tokens must still follow the protocol rather than independently skipping the collective.
@@ -58,7 +62,7 @@ MoE records may contain hidden vectors, expert IDs, original token indices, and 
 
 | Scenario | Dependency Created by Sharding | Typical Communication |
 |---|---|---|
-| row-parallel linear | `Y = sum_r X_r W_r` | AllReduce partial results, or ReduceScatter when downstream accepts shards |
+| row-parallel linear | $`Y = \sum_{r} X_{r} W_{r}`$ | AllReduce partial results, or ReduceScatter when downstream accepts shards |
 | column-parallel linear | `Y_r = X W_r` | AllGather if downstream needs full Y; none may be needed if sharding continues |
 | PP inference | next stage needs previous stage activations | Send/Recv |
 | EP MoE | experts reside on different ranks | dispatch → expert compute → combine |
@@ -73,8 +77,8 @@ Using multiple devices therefore does not imply an AllReduce at every layer.
 
 Begin with an interpretable approximation:
 
-```text
-t_transfer ≈ n_steps * alpha + bytes_on_critical_link / B_eff
+```math
+t_{\mathrm{transfer}}\approx n_{\mathrm{steps}}\cdot \alpha+\frac{\mathrm{bytes\_on\_critical\_link}}{B_{\mathrm{eff}}}
 ```
 
 `alpha` is per-step startup/protocol latency; `B_eff` is effective bandwidth. Do not simply add advertised NIC bandwidths. With uniform chunks, balanced communication, and additional reduction costs ignored, ring AllReduce can be estimated as:
@@ -82,21 +86,30 @@ t_transfer ≈ n_steps * alpha + bytes_on_critical_link / B_eff
 ```text
 P = participating ranks
 M = full input bytes per rank
-bytes_sent_per_rank = 2 * (P-1) / P * M
-t_ring ≈ 2 * (P-1) * alpha + bytes_sent_per_rank / B_eff
+```
+
+```math
+\mathrm{bytes\_sent\_per\_rank}=\frac{2\cdot \left(P-1\right)}{P}\cdot M
+```
+
+```math
+t_{\mathrm{ring}}\approx 2\cdot \left(P-1\right)\cdot \alpha+\frac{\mathrm{bytes\_sent\_per\_rank}}{B_{\mathrm{eff}}}
 ```
 
 This counts **bytes sent per rank**, not total network traffic or send-plus-receive traffic. Ring is one algorithm: trees, hierarchical algorithms, and in-network reduction change the model. This equation does not describe every backend implementation.
 
-Example: `P=8`, `M=16 MiB`, `alpha=3 us`, and decimal `B_eff=50 GB/s` give 28 MiB sent per rank and approximately **629 us**. For `M=4 KiB`, the estimate is **42.14 us**, dominated by startup. These are teaching estimates from chosen parameters, not hardware measurements.
+Example: $`P=8`$, $`M=16 \mathrm{MiB}`$, $`\alpha=3 \mathrm{us}`$, and decimal $`B_{\mathrm{eff}}=50 \mathrm{GB}/s`$ give 28 MiB sent per rank and approximately **629 us**. For $`M=4 \mathrm{KiB}`$, the estimate is **42.14 us**, dominated by startup. These are teaching estimates from chosen parameters, not hardware measurements.
 
 ## 5. Limits to Overlap
 
 Only independent computation and communication can overlap:
 
-```text
-serial:  t_step = t_compute + t_comm
-ideal:   t_step >= max(t_compute, t_comm)
+```math
+\mathrm{serial}: t_{\mathrm{step}} = t_{\mathrm{compute}} + t_{\mathrm{comm}}
+```
+
+```math
+\mathrm{ideal}: t_{\mathrm{step}} \ge  \mathrm{max}\left(t_{\mathrm{compute}}, t_{\mathrm{comm}}\right)
 ```
 
 A GEMM that consumes an AllReduce result has a true dependency on it; two streams do not remove that dependency. Overlap can also contend for SMs/AICores, HBM, or NIC resources, slowing either operation. Judge end-to-end TTFT, ITL, and throughput rather than just overlapping colored bars in a trace.

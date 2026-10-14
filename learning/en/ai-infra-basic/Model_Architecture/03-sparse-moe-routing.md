@@ -4,14 +4,14 @@
 
 A Dense Transformer's FFN uses the same MLP weights for every token:
 
-```text
-Y = FFN(X), X,Y: [T,H]
+```math
+Y = \mathrm{FFN}\left(X\right), X,Y: \left[T,H\right]
 ```
 
 Sparse Mixture-of-Experts prepares `E` expert MLP groups, but each token only selects `K`:
 
-```text
-Y_t = sum_(e in TopK(t)) p_(t,e) * Expert_e(X_t)
+```math
+Y_{t} = \sum_{e \in \mathrm{TopK}\left(t\right)} p_{t,e} \cdot  \mathrm{Expert\_e}\left(X_{t}\right)
 ```
 
 When `K << E`, the model can have larger total parameter count while each token only executes a few experts.
@@ -25,7 +25,13 @@ input X: [T,H]
 router logits: [T,E]
 topk ids: [T,K]
 topk weights: [T,K]
-dispatched rows: [R,H], R = T*K
+```
+
+```math
+\text{dispatched rows}: \left[R,H\right], R = T\cdot K
+```
+
+```text
 expert outputs: [R,H]
 combined output Y: [T,H]
 ```
@@ -36,16 +42,22 @@ Main path input and output are the same, but internally each token is replicated
 
 The Router is a linear layer from hidden space to expert space:
 
-```text
-Wr: [H,E]
-G = X @ Wr
-G: [T,E]
+```math
+\mathrm{shape}\left(\mathrm{Wr}\right)=\left[H,E\right]
+```
+
+```math
+G=X\,\mathrm{Wr}
+```
+
+```math
+\mathrm{shape}\left(G\right)=\left[T,E\right]
 ```
 
 `G[t,e]` is the raw score of token `t` assigned to expert `e`:
 
-```text
-router_logits = hidden_states @ router_weight
+```math
+\mathrm{router\_logits}=\mathrm{hidden\_states}\,\mathrm{router\_weight}
 ```
 
 Router parameters are typically small relative to all expert parameters; replicating across ranks avoids needing split-communication for routing scores first.
@@ -54,20 +66,20 @@ Router parameters are typically small relative to all expert parameters; replica
 
 Independently select the top `K` experts per token:
 
-```text
-topk_ids[t,:] = indices_of_top_k(G[t,:])
+```math
+\mathrm{topk\_ids}\left[t,:\right] = \mathrm{indices\_of\_top\_k}\left(G\left[t,:\right]\right)
 ```
 
 Selected scores converted to weights. Common form:
 
-```text
-p[t,e] = softmax(G[t,:])[e]
+```math
+{p}_{t,e}={\mathrm{softmax}\left({G}_{t,:}\right)}_{e}
 ```
 
 Or normalized only over the selected K items:
 
-```text
-w[t,j] = exp(g[t,j]) / sum_(u in TopK(t)) exp(g[t,u])
+```math
+w\left[t,j\right] = \mathrm{exp}\left(g\left[t,j\right]\right) / \sum_{u \in \mathrm{TopK}\left(t\right)} \mathrm{exp}\left(g\left[t,u\right]\right)
 ```
 
 Results:
@@ -81,28 +93,34 @@ topk_weights: [T,K], floating point
 
 Input is token-ordered. Expert kernels prefer expert-grouped ordering. Dispatch creates one route per `(token, selected_expert)`:
 
-```text
-route count R = T*K
+```math
+\text{route count R}= T\cdot K
 ```
 
 Typical metadata for expert `e`:
 
-```text
-r_e = expert_offsets[e+1] - expert_offsets[e]
-X_e: [r_e,H]
-sum_e r_e = R
+```math
+r_{e}={\mathrm{expert\_offsets}}_{e+1}-{\mathrm{expert\_offsets}}_{e}
+```
+
+```math
+\mathrm{shape}\left(X_{e}\right)=\left[r_{e},H\right]
+```
+
+```math
+\text{sum\_e r\_e}= R
 ```
 
 ## 6. Concrete Routing Example
 
-`T=4, E=4, K=2`:
+$`T=4,\qquad E=4,\qquad K=2`$:
 
 | token | Top-2 expert ids | weights |
 |---|---|---|
-| `x0` | `[1,3]` | `[0.7,0.3]` |
-| `x1` | `[0,1]` | `[0.6,0.4]` |
-| `x2` | `[3,1]` | `[0.8,0.2]` |
-| `x3` | `[0,2]` | `[0.55,0.45]` |
+| `x0` | $`\left[1,3\right]`$ | `[0.7,0.3]` |
+| `x1` | $`\left[0,1\right]`$ | `[0.6,0.4]` |
+| `x2` | $`\left[3,1\right]`$ | `[0.8,0.2]` |
+| `x3` | $`\left[0,2\right]`$ | `[0.55,0.45]` |
 
 After sorting by expert:
 
@@ -115,39 +133,66 @@ expert 3 <- x0, x2       r_3=2
 
 After expert computation, combine restores token order:
 
-```text
-y0 = 0.7*E1(x0) + 0.3*E3(x0)
-y1 = 0.6*E0(x1) + 0.4*E1(x1)
-y2 = 0.8*E3(x2) + 0.2*E1(x2)
-y3 = 0.55*E0(x3) + 0.45*E2(x3)
+```math
+\mathrm{y0}=0.7\cdot \mathrm{E1}\left(\mathrm{x0}\right)+0.3\cdot \mathrm{E3}\left(\mathrm{x0}\right)
 ```
 
-Final `Y=[y0,y1,y2,y3]`, shape restored to `[4,H]`.
+```math
+\mathrm{y1}=0.6\cdot \mathrm{E0}\left(\mathrm{x1}\right)+0.4\cdot \mathrm{E1}\left(\mathrm{x1}\right)
+```
+
+```math
+\mathrm{y2}=0.8\cdot \mathrm{E3}\left(\mathrm{x2}\right)+0.2\cdot \mathrm{E1}\left(\mathrm{x2}\right)
+```
+
+```math
+\mathrm{y3}=0.55\cdot \mathrm{E0}\left(\mathrm{x3}\right)+0.45\cdot \mathrm{E2}\left(\mathrm{x3}\right)
+```
+
+Final $`Y=\left[\mathrm{y0},\mathrm{y1},\mathrm{y2},\mathrm{y3}\right]`$, shape restored to $`\left[4,H\right]`$.
 
 ## 7. Single Expert SwiGLU
 
 Modern MoE typically uses gated SwiGLU experts. For `X_e [r_e,H]`:
 
-```text
-gate = X_e @ W_gate      [r_e,Ie]
-up   = X_e @ W_up        [r_e,Ie]
-mid  = SiLU(gate) * up   [r_e,Ie]
-out  = mid @ W_down      [r_e,H]
+```math
+\mathrm{gate}=X_{e}\,W_{\mathrm{gate}}\qquad\mathrm{shape}:\left[r_{e},\mathrm{Ie}\right]
+```
+
+```math
+\mathrm{up}=X_{e}\,W_{\mathrm{up}}\qquad\mathrm{shape}:\left[r_{e},\mathrm{Ie}\right]
+```
+
+```math
+\mathrm{mid}=\mathrm{SiLU}\left(\mathrm{gate}\right)\odot \mathrm{up}\qquad\mathrm{shape}:\left[r_{e},\mathrm{Ie}\right]
+```
+
+```math
+\mathrm{out}=\mathrm{mid}\,W_{\mathrm{down}}\qquad\mathrm{shape}:\left[r_{e},H\right]
 ```
 
 Weight shapes:
 
-```text
-W_gate: [H,Ie]
-W_up:   [H,Ie]
-W_down: [Ie,H]
+```math
+\mathrm{shape}\left(W_{\mathrm{gate}}\right)=\left[H,\mathrm{Ie}\right]
+```
+
+```math
+\mathrm{shape}\left(W_{\mathrm{up}}\right)=\left[H,\mathrm{Ie}\right]
+```
+
+```math
+\mathrm{shape}\left(W_{\mathrm{down}}\right)=\left[\mathrm{Ie},H\right]
 ```
 
 Production implementations often pack `gate_proj` and `up_proj`:
 
-```text
-gate_up = X_e @ W_gate_up          [r_e,2*Ie]
-gate, up = split(gate_up, 2)       [r_e,Ie], [r_e,Ie]
+```math
+\mathrm{gate\_up}=X_{e}\,\mathrm{W\_gate\_up}\qquad\mathrm{shape}:\left[r_{e},2\cdot \mathrm{Ie}\right]
+```
+
+```math
+\text{gate, up}= \mathrm{split}\left(\mathrm{gate\_up}, 2\right) \left[r_{e},\mathrm{Ie}\right], \left[r_{e},\mathrm{Ie}\right]
 ```
 
 One expert's dataflow: `[r_e,H] -> [r_e,2*Ie] -> [r_e,Ie] -> [r_e,H]`
@@ -156,9 +201,12 @@ One expert's dataflow: `[r_e,H] -> [r_e,2*Ie] -> [r_e,Ie] -> [r_e,H]`
 
 Expert output is expert/route-ordered. Combine uses `route_token_id` to restore token order and `route_weight` for weighted accumulation:
 
-```text
-Y[t,:] = sum_(r: token(r)=t) route_weight[r] * expert_output[r,:]
-Y: [T,H]
+```math
+Y\left[t,:\right] = \sum_{r: \mathrm{token}\left(r\right)=t} \mathrm{route\_weight}\left[r\right] \cdot  \mathrm{expert\_output}\left[r,:\right]
+```
+
+```math
+\mathrm{shape}\left(Y\right)=\left[T,H\right]
 ```
 
 Combine simultaneously performs inverse permutation and reduction. Each token has exactly `K` valid routes, so each output row merges `K` expert results.
@@ -167,8 +215,8 @@ Combine simultaneously performs inverse permutation and reduction. Each token ha
 
 When expert parameters can't fit on a single GPU, distribute experts across `Pep` ranks:
 
-```text
-E_local = E / Pep
+```math
+E_{\mathrm{local}}=\frac{E}{\mathrm{Pep}}
 ```
 
 After routing, each rank's tokens may select remote experts. Dataflow becomes:
@@ -198,34 +246,48 @@ Rows sent from rank `i` to rank `j` are not fixed — they depend on which token
 
 Single SwiGLU expert parameter count (ignoring bias):
 
-```text
-params_per_expert = 3*H*Ie
+```math
+\mathrm{params\_per\_expert}=3\cdot H\cdot \mathrm{Ie}
 ```
 
 All experts:
 
-```text
-expert_params = E * 3*H*Ie
+```math
+\mathrm{expert\_params}=E\cdot 3\cdot H\cdot \mathrm{Ie}
 ```
 
-Single token activates `K` experts; its expert matmul compute scales with `K * 3*H*Ie`, not `E * 3*H*Ie`. But model weight memory still scales with `E`.
+Single token activates `K` experts; its expert matmul compute scales with $`K\cdot 3\cdot H\cdot \mathrm{Ie}`$, not $`E\cdot 3\cdot H\cdot \mathrm{Ie}`$. But model weight memory still scales with `E`.
 
 ## 12. MoE in Prefill vs Decode
 
 **Prefill**: Large `T`, each expert gets many rows — good GEMM utilization but larger all-to-all volume.
 
-**Decode**: Small `T ≈ active_requests`. With small batches, `R=T*K` may be tiny and spread across many experts. Router, dispatch, communication, and kernel launch fixed overhead becomes proportionally significant.
+**Decode**: Small $`T\approx \mathrm{active\_requests}`$. With small batches, $`R=T\cdot K`$ may be tiny and spread across many experts. Router, dispatch, communication, and kernel launch fixed overhead becomes proportionally significant.
 
 ## 13. Reference MoE Implementation Order
 
-```text
-router_logits = X @ W_router                 # [T,E]
-topk_scores, topk_ids = topk(router_logits)  # [T,K], [T,K]
-topk_weights = normalize(topk_scores)        # [T,K]
+```math
+\mathrm{router\_logits}=X\,W_{\mathrm{router}}\qquad\text{[T,E]}
+```
 
-permuted_X, route_meta = dispatch(X, topk_ids)     # [R,H], R=T*K
-permuted_Y = grouped_expert_swiglu(permuted_X, route_meta)  # [R,H]
-Y = combine(permuted_Y, route_meta, topk_weights)  # [T,H]
+```math
+\left[\mathrm{topk\_scores},\mathrm{topk\_ids}\right]=\mathrm{topk}\left(\mathrm{router\_logits}\right)\qquad\text{[T,K], [T,K]}
+```
+
+```math
+\mathrm{topk\_weights} = \mathrm{normalize}\left(\mathrm{topk\_scores}\right) \qquad\text{[T,K]}
+```
+
+```math
+\text{permuted\_X, route\_meta}= \mathrm{dispatch}\left(X, \mathrm{topk\_ids}\right) \qquad\text{[R,H], R=T*K}
+```
+
+```math
+\mathrm{permuted\_Y} = \mathrm{grouped\_expert\_swiglu}\left(\mathrm{permuted\_X}, \mathrm{route\_meta}\right) \qquad\text{[R,H]}
+```
+
+```math
+Y = \mathrm{combine}\left(\mathrm{permuted\_Y}, \mathrm{route\_meta}, \mathrm{topk\_weights}\right) \qquad\text{[T,H]}
 ```
 
 ## 14. Parallelizable Stage Decomposition
@@ -240,7 +302,10 @@ Gate -> Select Experts -> Count Routes per Destination -> Dispatch All-to-All
 ```text
 E = total routed experts
 K = experts activated per token
-R = total expert routes this round, typically T*K
+```
+
+```math
+R = \mathrm{total} \mathrm{expert} \mathrm{routes} \mathrm{this} \mathrm{round}, \mathrm{typically} T\cdot K
 ```
 
 `E` determines total expert parameter scale, `K` determines per-token activation compute, `R` determines dispatch buffer and expert input row count.

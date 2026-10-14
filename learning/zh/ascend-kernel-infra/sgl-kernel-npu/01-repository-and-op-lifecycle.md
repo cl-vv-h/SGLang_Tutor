@@ -53,7 +53,7 @@ rg '@triton.jit|torch\.ops|torch_npu' python/sgl_kernel_npu/sgl_kernel_npu
 
 这里第一次集中出现几个词：
 
-- **shape**：张量每个维度的长度，例如 `[B, hidden]`。
+- **shape**：张量每个维度的长度，例如 $`\left[B,\mathrm{hidden}\right]`$。
 - **dtype**：元素类型，例如 FP16、FP32、int32。
 - **stride**：某一维索引加 1 时，底层线性内存地址跨过多少个元素。
 - **grid**：Triton 一次 launch 创建多少个 program instance 的逻辑空间。
@@ -342,7 +342,7 @@ PyTorch dispatcher 只负责把调用送到某个 C++ 函数。进入 C++ Host w
 - 为满足 32B 搬运对齐，把 vocab padding 到 256 元素倍数，见 [`#L51-L85`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L51-L85)。
 - 查询 AIV 核数和 UB 大小，计算 `blockDim/baseRows/extraCores/tileLength`，见 [`#L91-L131`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L91-L131)。
 - 记录 stream，避免异步 kernel 还没用完临时 tensor 就被 allocator 回收，见 [`#L133-L136`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L133-L136)。
-- 按 dtype 选择 `apply_token_bitmask_fp32/fp16/bf16` 三个 device kernel 变体，见 [`#L145-L155`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L145-L155)。
+- 按 dtype 选择 $`\frac{\frac{\mathrm{apply\_token\_bitmask\_fp32}}{\mathrm{fp16}}}{\mathrm{bf16}}`$ 三个 device kernel 变体，见 [`#L145-L155`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/apply_token_bitmask/op_host/apply_token_bitmask.cpp#L145-L155)。
 
 这就是 Host 侧“调度”的真实样子：不是有个调度进程在旁边跑，而是 C++ Host 函数在 launch 前把本次输入该怎么切、该用哪个 kernel、该启动多少 block 都算出来。
 
@@ -396,7 +396,7 @@ sequenceDiagram
 如果觉得 `mega_chunk_gdn` 太大，可以先看 [`helloworld.cpp`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/helloworld/op_host/helloworld.cpp)。它的 Host 函数只有几步：
 
 1. `at::empty_like(x)` 分配输出 `z`，见 [`helloworld.cpp#L19-L23`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/helloworld/op_host/helloworld.cpp#L19-L23)。
-2. 设置 `blockDim = 8`，见 [`#L24-L25`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/helloworld/op_host/helloworld.cpp#L24-L25)。
+2. 设置 $`\mathrm{blockDim}=8`$，见 [`#L24-L25`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/helloworld/op_host/helloworld.cpp#L24-L25)。
 3. 从 `x.sizes()` 算 `totalLength`，见 [`#L27-L31`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/helloworld/op_host/helloworld.cpp#L27-L31)。
 4. `EXEC_KERNEL_CMD(helloworld, blockDim, x, y, z, totalLength)` launch device kernel，见 [`#L33-L35`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/helloworld/op_host/helloworld.cpp#L33-L35)。
 
@@ -501,7 +501,7 @@ rg 'EXEC_KERNEL_CMD|__global__|__aicore__' csrc/<op>
 
 **答案：**`pytorch_extensions.cpp` 里的 `m.def/m.impl` 服务于 PyTorch dispatcher。它解决的是“这个 Python/PyTorch operator 名字，在 NPU backend 下应该调用哪个 C++ Host 函数”。例如 `mega_chunk_gdn` 会绑定到 `sglang::npu_kernel::mega_chunk_gdn`。
 
-进入 `op_host/*.cpp` 后，已经不是 PyTorch dispatcher 在选函数，而是该 Host wrapper 自己根据本次输入做实现分流。例如 `apply_token_bitmask` 会按 dtype 选择 `fp32/fp16/bf16` kernel 变体，也会按 shape 和硬件资源计算 `blockDim/tileLength`。前者是“选入口函数”，后者是“入口函数内部准备一次具体 launch”。
+进入 `op_host/*.cpp` 后，已经不是 PyTorch dispatcher 在选函数，而是该 Host wrapper 自己根据本次输入做实现分流。例如 `apply_token_bitmask` 会按 dtype 选择 $`\frac{\frac{\mathrm{fp32}}{\mathrm{fp16}}}{\mathrm{bf16}}`$ kernel 变体，也会按 shape 和硬件资源计算 `blockDim/tileLength`。前者是“选入口函数”，后者是“入口函数内部准备一次具体 launch”。
 
 ### 6. `EXEC_KERNEL_CMD` 到底把什么交给了谁？
 

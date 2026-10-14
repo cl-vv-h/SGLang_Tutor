@@ -56,11 +56,11 @@ def add_kernel(
     tl.store(output_ptr + offsets, output, mask=mask)
 ```
 
-假设 wrapper 传入 FP16 tensor、`BLOCK_SIZE=1024`，变量类型沿源码传播如下。`[]` 表示零维标量，`[1024]` 表示一个静态 block；它们都是 `tl.tensor`，不是 Python list：
+假设 wrapper 传入 FP16 tensor、$`\mathrm{BLOCK\_SIZE}=1024`$，变量类型沿源码传播如下。`[]` 表示零维标量，$`\left[1024\right]`$ 表示一个静态 block；它们都是 `tl.tensor`，不是 Python list：
 
 | 变量 | Triton 类型 | 编译时还是运行时 | 含义 |
 |---|---|---|---|
-| `x_ptr/y_ptr/output_ptr` | `pointer<fp16>[]` | 地址值在 launch/device 运行时给出，pointee dtype 参与 JIT specialization | 三个 tensor 首元素的设备指针 |
+| `x_ptr/y_ptr/output_ptr` | $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[\right]`$ | 地址值在 launch/device 运行时给出，pointee dtype 参与 JIT specialization | 三个 tensor 首元素的设备指针 |
 | `n_elements` | 整数标量 `tl.tensor` | 运行时 | 输入真实长度；具体整数位宽由实参推导 |
 | `BLOCK_SIZE` | `tl.constexpr` | 编译时 | 当前 program 的静态 lane 数 |
 | `pid` | `int32[]` | 运行时 | 逻辑 program ID |
@@ -136,7 +136,7 @@ add_kernel[grid](...)
 最常见的变体因素包括：
 
 - pointer 指向元素的 dtype，例如 FP16 输入与 BF16 输入；
-- `tl.constexpr` 的值，例如 `BLOCK_SIZE=256` 与 `BLOCK_SIZE=1024`；
+- `tl.constexpr` 的值，例如 $`\mathrm{BLOCK\_SIZE}=256`$ 与 $`\mathrm{BLOCK\_SIZE}=1024`$；
 - backend 选择的参数 specialization，例如某些整数值或对齐属性；
 - target NPU/backend、编译选项以及会使 cache 失效的环境变量；
 - kernel 源码、被捕获的编译期全局值或依赖发生变化。
@@ -183,11 +183,11 @@ x: torch.Tensor on NPU
 x_ptr: 指向 x 第一个元素的 device pointer
 ```
 
-`x_ptr + offsets` 不是立刻加载数据，而是得到一组元素地址。若 `x_ptr` 是 `pointer<fp16>[]`、`offsets` 是 `int32[1024]`，结果就是 `pointer<fp16>[1024]`。真正读取发生在 `tl.load`，其结果是 `fp16[1024]`。
+`x_ptr + offsets` 不是立刻加载数据，而是得到一组元素地址。若 `x_ptr` 是 $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[\right]`$、`offsets` 是 `int32[1024]`，结果就是 $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[1024\right]`$。真正读取发生在 `tl.load`，其结果是 `fp16[1024]`。
 
 这里的 `+` 是 `tl.tensor.__add__` 的重载。Triton 的 [`binary_op_type_checking_impl`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L171-L206) 先把标量 pointer 广播成与 offsets 相同的 block shape，[`semantic.add`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L226-L255) 再生成 `create_addptr` IR。源码明确禁止 pointer 与 pointer 相加，也不允许 pointer 加浮点数；这里合法是因为 offsets 是整数元素偏移。
 
-偏移单位是**元素**而非字节：`pointer<fp16> + 3` 指向第 3 个 FP16 元素。这个规则解释了为什么 tensor stride 可以直接出现在地址公式里。
+偏移单位是**元素**而非字节：$`\mathrm{pointer} \lt \mathrm{fp16} \gt +3`$ 指向第 3 个 FP16 元素。这个规则解释了为什么 tensor stride 可以直接出现在地址公式里。
 
 ## 5. `tl.constexpr`
 
@@ -208,15 +208,15 @@ pid = tl.program_id(axis=0)
 
 当前使用一维 grid，所以读取 axis 0。若 grid 是 `(G0, G1)`，则可以分别读取 `program_id(0)` 和 `program_id(1)`。
 
-`pid` 的 Python 前端类是 `tl.tensor`，其值类型通常是零维 `int32[]`；它不是 Python `int`，也不是物理核编号。`axis=0` 则是编译函数时就能解析的 Python/constexpr 参数。
+`pid` 的 Python 前端类是 `tl.tensor`，其值类型通常是零维 `int32[]`；它不是 Python `int`，也不是物理核编号。$`\mathrm{axis}=0`$ 则是编译函数时就能解析的 Python/constexpr 参数。
 
-Program 以 tile 为工作单位。假设 `BLOCK=4`：
+Program 以 tile 为工作单位。假设 $`\mathrm{BLOCK}=4`$：
 
 | pid | offsets |
 |---:|---|
-| 0 | `[0,1,2,3]` |
-| 1 | `[4,5,6,7]` |
-| 2 | `[8,9,10,11]` |
+| 0 | $`\left[0,1,2,3\right]`$ |
+| 1 | $`\left[4,5,6,7\right]`$ |
+| 2 | $`\left[8,9,10,11\right]`$ |
 
 ## 7. `tl.arange` 和 Block Tensor
 
@@ -224,20 +224,29 @@ Program 以 tile 为工作单位。假设 `BLOCK=4`：
 lane = tl.arange(0, BLOCK)
 ```
 
-它产生一个 Triton block tensor。若 `BLOCK=256`，其完整教学类型为 `int32[256]`。[`semantic.arange`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L625-L644) 创建 `block_type(int32, [256])` 与 `make_range` IR；它不是 Python `range`。后面的地址、mask、load 结果和加法结果也都是 block tensor：
+它产生一个 Triton block tensor。若 $`\mathrm{BLOCK}=256`$，其完整教学类型为 `int32[256]`。[`semantic.arange`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L625-L644) 创建 `block_type(int32, [256])` 与 `make_range` IR；它不是 Python `range`。后面的地址、mask、load 结果和加法结果也都是 block tensor：
 
-```text
-lane       shape=[BLOCK], integer offsets
-x_ptr+lane shape=[BLOCK], pointers
-x          shape=[BLOCK], values
-x+y        shape=[BLOCK], values
+```math
+\text{lane       shape}=\left[\mathrm{BLOCK}\right], \mathrm{integer} \mathrm{offsets}
+```
+
+```math
+x_{\mathrm{ptr}}+\mathrm{lane} \mathrm{shape}=\left[\mathrm{BLOCK}\right], \mathrm{pointers}
+```
+
+```math
+\text{x          shape}=\left[\mathrm{BLOCK}\right], \mathrm{values}
+```
+
+```math
+x+y \mathrm{shape}=\left[\mathrm{BLOCK}\right], \mathrm{values}
 ```
 
 这就是 tile-based 思维：代码写一次，作用于一整块元素。
 
 ## 8. Mask 与尾块
 
-如果 `n=10, BLOCK=4`，最后一个 program 的 offsets 是 `[8,9,10,11]`，其中 10 和 11 越界。
+如果 $`n=10,\qquad \mathrm{BLOCK}=4`$，最后一个 program 的 offsets 是 $`\left[8,9,10,11\right]`$，其中 10 和 11 越界。
 
 ```python
 mask = offsets < n
@@ -276,8 +285,11 @@ grid = \lceil n / BLOCK \rceil
 
 官方入门样例使用：
 
+```math
+\mathrm{grid}=\mathrm{num\_tiles}
+```
+
 ```text
-grid = num_tiles
 program pid -> tile pid
 ```
 
@@ -308,7 +320,7 @@ def persistent_add(
         tl.store(out_ptr + offsets, x + y, mask=mask)
 ```
 
-Host 端让 `grid=(num_vectorcore,)`。每个 program 处理 `pid, pid+num_programs, ...` 这些 tile。
+Host 端让 $`\mathrm{grid}=\left[\mathrm{num\_vectorcore}\right]`$。每个 program 处理 `pid, pid+num_programs, ...` 这些 tile。
 
 这里 `tile_id`、`num_tiles`、`num_programs` 都是运行时整数标量 `tl.tensor`；`BLOCK_SIZE` 仍是编译期值。循环体中的 `offsets` 每轮重新成为 `int32[BLOCK_SIZE]`。这段代码没有用省略号隐藏 load/store，因此可以直接看清 pointer block 的生成位置。
 
@@ -356,7 +368,7 @@ for n in [0, 1, 31, 32, 33, 1023, 1024, 1025, 98432]:
 
 **答案：**不是。`tl.program_id(axis)` 返回当前 program instance 在逻辑 launch grid 某一轴上的编号。
 
-Runtime 会把逻辑 program 调度到可用的物理 AIV/AIC 上。物理核数量少于 program 数时，一个核会先后执行多个 program；调度关系也不应被用户 kernel 当作稳定 ABI。`pid=7` 的含义是“处理第 7 份逻辑数据”，不是“我永远运行在 7 号 Vector Core”。
+Runtime 会把逻辑 program 调度到可用的物理 AIV/AIC 上。物理核数量少于 program 数时，一个核会先后执行多个 program；调度关系也不应被用户 kernel 当作稳定 ABI。$`\mathrm{pid}=7`$ 的含义是“处理第 7 份逻辑数据”，不是“我永远运行在 7 号 Vector Core”。
 
 之所以说只能近似关联，是因为当 grid 恰好按物理核数设置并采用 persistent 写法时，运行时通常可以让每个 program 占用一份核资源处理多轮任务。但这种性能策略仍不赋予 `pid` 查询物理核身份的语义。
 
@@ -372,7 +384,7 @@ Runtime 会把逻辑 program 调度到可用的物理 AIV/AIC 上。物理核数
 
 **答案：**它让参数在编译期已知，从而允许 specialization；代价是不同取值可能生成不同 kernel 变体。
 
-编译器知道 `BLOCK_SIZE=1024` 后，可以确定 `tl.arange` 形状、估算 UB/临时资源、展开循环、删除常量条件分支并选择特定 lowering。例如 `if HAS_BIAS:` 中 `HAS_BIAS` 是 constexpr 时，无 bias 版本可以完全移除该路径。
+编译器知道 $`\mathrm{BLOCK\_SIZE}=1024`$ 后，可以确定 `tl.arange` 形状、估算 UB/临时资源、展开循环、删除常量条件分支并选择特定 lowering。例如 `if HAS_BIAS:` 中 `HAS_BIAS` 是 constexpr 时，无 bias 版本可以完全移除该路径。
 
 但若把频繁变化的序列长度、batch size 等都作为 constexpr，每个新组合都可能触发 JIT 和缓存项，造成首次请求抖动、编译时间和缓存膨胀。原则是：把真正决定代码结构或 tile 的少量 meta-parameter constexpr 化；普通数据长度尽量作为运行时参数配合 mask。
 
@@ -388,9 +400,9 @@ Reduction 还要求选择正确的 `other`：sum 常用 0，max 常用 `-inf`。
 
 **答案：**入门写法优先展示一一映射的正确性，生产写法还要控制任务下发成本。
 
-`grid=ceil(N/BLOCK)` 让每个逻辑 tile 对应一个 program，容易理解、负载划分直接，并且结果完全正确。但当 N 很大、BLOCK 较小时，grid 可能远大于物理 Vector Core 数，runtime 要多轮启动和初始化 program。
+$`\mathrm{grid}=\mathrm{ceil}\left(\frac{N}{\mathrm{BLOCK}}\right)`$ 让每个逻辑 tile 对应一个 program，容易理解、负载划分直接，并且结果完全正确。但当 N 很大、BLOCK 较小时，grid 可能远大于物理 Vector Core 数，runtime 要多轮启动和初始化 program。
 
-固定 `grid=num_vectorcore` 后，每个 program 通过 `for tile_id in range(pid,num_tiles,num_programs)` 处理多块数据，可减少逻辑 program 数和下发开销。代价是 kernel 内循环更长，负载均衡和小任务行为可能不同。它是需要 benchmark 验证的 NPU 亲和优化，不是对入门实现正确性的否定。
+固定 $`\mathrm{grid}=\mathrm{num\_vectorcore}`$ 后，每个 program 通过 `for tile_id in range(pid,num_tiles,num_programs)` 处理多块数据，可减少逻辑 program 数和下发开销。代价是 kernel 内循环更长，负载均衡和小任务行为可能不同。它是需要 benchmark 验证的 NPU 亲和优化，不是对入门实现正确性的否定。
 
 ### 6. `@triton.jit` 是在装饰器执行时、第一次 launch 时，还是每次 launch 时编译？
 

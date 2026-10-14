@@ -153,8 +153,8 @@ gate_proj + up_proj      -> gate_up_proj
 
 `DeviceConfig` 接受：
 
-```text
-cuda / xpu / hpu / cpu / npu / musa / mps
+```math
+\frac{\frac{\frac{\frac{\frac{\frac{\mathrm{cuda}}{\mathrm{xpu}}}{\mathrm{hpu}}}{\mathrm{cpu}}}{\mathrm{npu}}}{\mathrm{musa}}}{\mathrm{mps}}
 ```
 
 对于 NPU：
@@ -209,9 +209,12 @@ CPU offload 场景下，`device_loading_context` 临时把参数放到目标设�
 
 `hardware_backend/npu/utils.py` 定义：
 
-```text
-ACL_FORMAT_ND = 2
-ACL_FORMAT_FRACTAL_NZ = 29
+```math
+\mathrm{ACL\_FORMAT\_ND}=2
+```
+
+```math
+\mathrm{ACL\_FORMAT\_FRACTAL\_NZ}=29
 ```
 
 `npu_format_cast()` 调用：
@@ -313,9 +316,13 @@ for name, param in model.named_parameters():
 name
 global shape / local shape
 dtype
-sum / abs max
-tp rank
 ```
+
+```math
+\sum / \mathrm{abs} \mathrm{max}
+```
+
+tp rank
 
 不要期望不同 rank shard 的 sum 完全相同；目标是验证切分维度和拼接后与 reference 一致。
 

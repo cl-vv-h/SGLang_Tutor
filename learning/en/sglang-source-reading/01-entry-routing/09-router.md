@@ -47,7 +47,7 @@ topk_weights, topk_ids = topk_softmax(router_logits)  # [T, K]
 
 When PD disaggregation starts:
 - Decode workers register with the prefill worker
-- `POST /route` establishes the connection
+- $`\frac{\mathrm{POST}}{\mathrm{route}}`$ establishes the connection
 - The prefill worker learns which decode workers are available
 
 ## 4. Recommended Reading Order

@@ -8,7 +8,7 @@ SGLang 的 cache 系统可以分成三层：
 
 - `KVCache`：真正保存每层 attention 的 K/V tensor。
 - `ReqToTokenPool`：记录“某个请求的第 i 个 token 对应哪个 KV slot”。
-- `RadixCache / tree_cache`：用 token 前缀作为 key，记录可复用的 KV slot 序列。
+- $`\frac{\mathrm{RadixCache}}{\mathrm{tree\_cache}}`$：用 token 前缀作为 key，记录可复用的 KV slot 序列。
 
 ```mermaid
 flowchart TD
@@ -27,7 +27,7 @@ flowchart TD
 
 | 文件 | 类 / 函数 | 重点代码段 |
 |---|---|---|
-| `python/sglang/srt/mem_cache/memory_pool.py` | `class ReqToTokenPool` | 保存 `req_to_token[req_pool_idx, token_position] = kv_slot_index`。 |
+| `python/sglang/srt/mem_cache/memory_pool.py` | `class ReqToTokenPool` | 保存 $`{\mathrm{req\_to\_token}}_{\mathrm{req\_pool\_idx},\mathrm{token\_position}}=\mathrm{kv\_slot\_index}`$。 |
 | `python/sglang/srt/mem_cache/memory_pool.py` | `ReqToTokenPool.alloc()` | 给一组 `Req` 分配 request slot，也就是 `req.req_pool_idx`。 |
 | `python/sglang/srt/mem_cache/memory_pool.py` | `ReqToTokenPool.write()` | 把 token position 到 KV slot 的映射写进二维表。 |
 | `python/sglang/srt/mem_cache/memory_pool.py` | `class KVCache` | KV pool 抽象基类，定义 `get_key_buffer()`、`get_value_buffer()`、`set_kv_buffer()`。 |
@@ -144,7 +144,7 @@ flowchart TD
 | 文件 | 函数 | 重点代码段 |
 |---|---|---|
 | `python/sglang/srt/managers/scheduler.py` | `Scheduler._get_new_batch_prefill_raw()` | 调 `req.init_next_round_input(self.tree_cache)`，决定每个请求还需 prefill 多少 token。 |
-| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.prepare_for_extend()` | 计算 `input_ids = fill_ids[len(prefix_indices):]`、`extend_lens`、`prefix_lens`。 |
+| `python/sglang/srt/managers/schedule_batch.py` | `ScheduleBatch.prepare_for_extend()` | 计算 $`\mathrm{input\_ids} = \mathrm{fill\_ids}\left[\mathrm{len}\left(\mathrm{prefix\_indices}\right):\right]`$、`extend_lens`、`prefix_lens`。 |
 | `python/sglang/srt/mem_cache/common.py` | `alloc_req_slots()` | 为请求分配 `req_pool_idx`。 |
 | `python/sglang/srt/mem_cache/common.py` | `alloc_for_extend()` | 为未命中 suffix 分配 KV slots，并把 prefix + suffix 写入 req table。 |
 | `python/sglang/srt/mem_cache/common.py` | `write_cache_indices()` | 写 `req_to_token_pool`：把 token 位置映射到 KV slots。 |
@@ -238,7 +238,7 @@ flowchart TD
   F --> C
 ```
 
-`lock_ref > 0` 的节点不能淘汰，因为它们正在被请求引用。
+$`\mathrm{lock\_ref} \gt 0`$ 的节点不能淘汰，因为它们正在被请求引用。
 
 ## 11. HiCache：把 RadixCache 扩展到 host/storage
 

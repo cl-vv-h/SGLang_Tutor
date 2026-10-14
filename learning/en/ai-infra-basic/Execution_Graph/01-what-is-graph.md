@@ -14,8 +14,11 @@ This means one kernel launch per operation, each requiring CPU→GPU communicati
 
 A computational graph separates **definition** from **execution**:
 
+```math
+\mathrm{Define}: c = \mathrm{matmul}\left(\left(x + y\right) \cdot  z, W\right) \qquad\text{Just record ops, don't execute}
+```
+
 ```text
-Define:     c = matmul((x + y) * z, W)    # Just record ops, don't execute
 Execute:    Run the entire graph at once    # Optimize and launch in one shot
 ```
 

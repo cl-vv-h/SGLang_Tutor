@@ -114,13 +114,28 @@ Prefill 的 token 数变化很大：有的 prompt 20 token，有的 8000 token�
 
 Decode 则很规律：每轮每个请求通常只推进一个 token。只要 batch size 落入固定 bucket，执行路径就很像：
 
-```text
-decode batch bs=1
-decode batch bs=2
-decode batch bs=4
-decode batch bs=8
-decode batch bs=16
-decode batch bs=32
+```math
+\text{decode batch bs}=1
+```
+
+```math
+\text{decode batch bs}=2
+```
+
+```math
+\text{decode batch bs}=4
+```
+
+```math
+\text{decode batch bs}=8
+```
+
+```math
+\text{decode batch bs}=16
+```
+
+```math
+\text{decode batch bs}=32
 ```
 
 所以 SGLang 会为若干 batch size 捕获 graph。真实 batch size 不一定刚好匹配，就 pad 到最近的 bucket。

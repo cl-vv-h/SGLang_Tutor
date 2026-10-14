@@ -6,13 +6,16 @@
 
 Softmax attention retains every historical `(k_s,v_s)` and compares them at query time. KDA instead writes history into a matrix `M`. For one head:
 
+```math
+\mathrm{shape}\left(M\right)=\left[\mathrm{Dv},\mathrm{Dk}\right]
+```
+
 ```text
-M: [Dv,Dk]
 write: v outer k -> [Dv,1] @ [1,Dk] = [Dv,Dk]
 read:  M @ q     -> [Dv,Dk] @ [Dk]   = [Dv]
 ```
 
-The outer product `v k^T` intuitively says, “when a query points near `k`, retrieve `v`.” Key directions from different tokens overlap, so naive addition accumulates conflicts. The delta rule first reads the old prediction `v_hat=Mk` and writes only the error `v-v_hat`. KDA additionally lets each key channel forget at its own `alpha[c]` rate before the write.
+The outer product `v k^T` intuitively says, “when a query points near `k`, retrieve `v`.” Key directions from different tokens overlap, so naive addition accumulates conflicts. The delta rule first reads the old prediction $`v_{\mathrm{hat}}=\mathrm{Mk}`$ and writes only the error `v-v_hat`. KDA additionally lets each key channel forget at its own `alpha[c]` rate before the write.
 
 ```mermaid
 flowchart LR
@@ -36,34 +39,57 @@ flowchart LR
 
 For every request, layer, and head, the order is exact:
 
-```text
-1. Forget: M_decay[:,c] = alpha[c] * M_prev[:,c]
-2. Predict: v_hat = M_decay @ k
-3. Correct: M_new = M_decay + beta * (v-v_hat) outer k
-4. Read:    o = M_new @ (q/sqrt(Dk))
+1. Forget
+
+```math
+M_{\mathrm{decay}}=M_{\mathrm{prev}}\mathrm{Diag}(\alpha)
 ```
 
-Changing the order changes the function. For example, predicting with `M_prev @ k` instead of `M_decay @ k` uses memory before forgetting to determine the correction; that is not an equivalent optimization.
+2. Predict
+
+```math
+\widehat v=M_{\mathrm{decay}}k
+```
+
+3. Correct
+
+```math
+M_{\mathrm{new}}=M_{\mathrm{decay}}+\beta(v-\widehat v)k^{\mathsf T}
+```
+
+4. Read
+
+```math
+o=M_{\mathrm{new}}\frac{q}{\sqrt{D_k}}
+```
+
+Changing the order changes the function. For example, predicting with $`M_{\mathrm{prev}}\,k`$ instead of $`M_{\mathrm{decay}}\,k`$ uses memory before forgetting to determine the correction; that is not an equivalent optimization.
 
 ### Running Shape Example
 
-```text
-B=8, and T=B=8 during decode
-Hmodel=4096, Hk=16, Dk=128, Dv=128
-short-convolution width C=4
+```math
+B=8, \mathrm{and} T=B=8 \mathrm{during} \mathrm{decode}
+```
+
+```math
+\mathrm{Hmodel}=4096,\qquad \mathrm{Hk}=16,\qquad \mathrm{Dk}=128,\qquad \mathrm{Dv}=128
+```
+
+```math
+\mathrm{short}-\mathrm{convolution} \mathrm{width} C=4
 ```
 
 | Stage | Tensor | Shape | Persists across steps? |
 |---|---|---:|---|
-| Input | `X` | `[8,4096]` | No |
-| Q/K | `q,k` | `[8,16,128]` | No |
-| V/output gate | `v,z` | `[8,16,128]` | No |
-| Forget gate | `alpha` | `[8,16,128]` | No |
-| Write gate | `beta` | `[8,16]` | No |
-| Convolution tail | `conv_state` | `[slots,16*(128+128+128),3]` | **Yes** |
-| Recurrent matrix | `M` | `[slots,16,128,128]` | **Yes** |
-| Core output | `Ocore` | `[8,16,128]` | No |
-| Layer output | `O` | `[8,4096]` | No |
+| Input | `X` | $`\left[8,4096\right]`$ | No |
+| Q/K | `q,k` | $`\left[8,16,128\right]`$ | No |
+| V/output gate | `v,z` | $`\left[8,16,128\right]`$ | No |
+| Forget gate | `alpha` | $`\left[8,16,128\right]`$ | No |
+| Write gate | `beta` | $`\left[8,16\right]`$ | No |
+| Convolution tail | `conv_state` | $`\left[\mathrm{slots},16\cdot \left(128+128+128\right),3\right]`$ | **Yes** |
+| Recurrent matrix | `M` | $`\left[\mathrm{slots},16,128,128\right]`$ | **Yes** |
+| Core output | `Ocore` | $`\left[8,16,128\right]`$ | No |
+| Layer output | `O` | $`\left[8,4096\right]`$ | No |
 
 `slots` is state-pool capacity, not batch size. `cache_indices [8]` maps row `b` of this decode step to a request slot. Batch rows change under continuous batching, while slot identity must remain stable.
 
@@ -96,15 +122,14 @@ This chapter derives the recurrence, maps it to SGLang, and explains why prefill
 
 Ordinary causal attention stores past keys and values:
 
-```text
-o_t = softmax(q_t K_{<=t}^T) V_{<=t}
+```math
+o_t=\mathrm{softmax}\left(q_tK_{\le t}^{\mathsf T}\right)V_{\le t}
 ```
 
 Its cache grows with sequence length. Linear attention instead summarizes the past in a matrix. Using an implementation-friendly orientation:
 
-```text
-M_t in R[d_v, d_k]
-o_t = M_t q_t
+```math
+M_t\in\mathbb{R}^{d_v\times d_k},\qquad o_t=M_tq_t
 ```
 
 The state size depends on head dimensions, not on the number of processed tokens.
@@ -113,16 +138,22 @@ The state size depends on head dimensions, not on the number of processed tokens
 
 A naive additive state keeps writing outer products:
 
-```text
-M_t = M_{t-1} + v_t outer k_t
+```math
+M_{t}={M}_{t-1}+v_{t}\,{k_{t}}^{\mathsf T}
 ```
 
 This can overwrite poorly because a new key may collide with content already stored at a similar direction. The delta rule first asks what the state currently predicts for `k_t`, then writes only the residual:
 
-```text
-v_hat_t = M_{t-1} k_t
-r_t = v_t - v_hat_t
-M_t = M_{t-1} + beta_t * (r_t outer k_t)
+```math
+\mathrm{v\_hat\_t} = M_{t-1} k_{t}
+```
+
+```math
+r_{t}=v_{t}-\mathrm{v\_hat\_t}
+```
+
+```math
+M_{t}={M}_{t-1}+\beta_{t}\cdot r_{t}\,{k_{t}}^{\mathsf T}
 ```
 
 `beta_t` controls the write strength.
@@ -151,30 +182,50 @@ For one token and one head, let:
 - `M_t in R[d_v, d_k]`: recurrent state;
 - `o_t in R[d_v]`: output before normalization and output gating.
 
-For a batch of tokens, the implementation normally lays tensors out as `[T, H, D]`; recurrent state is per request, layer, and KV head.
+For a batch of tokens, the implementation normally lays tensors out as $`\left[T,H,D\right]`$; recurrent state is per request, layer, and KV head.
 
 ## 5. The KDA Recurrence
 
 SGLang's storage-friendly state orientation yields the following steps:
 
-```text
-g_t       = -exp(A_log) * softplus(a_t + dt_bias)
-alpha_t   = exp(g_t)
-M_decay   = M_{t-1} * alpha_t[None, :]
-v_hat_t   = M_decay k_t
-r_t       = v_t - v_hat_t
-M_t       = M_decay + beta_t * (r_t outer k_t)
-o_t       = M_t (q_t / sqrt(d_k))
+```math
+g_{t}=-\mathrm{exp}\left(A_{\mathrm{log}}\right)\cdot \mathrm{softplus}\left(a_{t}+\mathrm{dt\_bias}\right)
 ```
 
-Because `g_t <= 0`, `alpha_t` is in `(0, 1]`. Each column of `M` receives a different retention factor.
+```math
+\alpha_{t}=\mathrm{exp}\left(g_{t}\right)
+```
+
+```math
+M_{\mathrm{decay}}=M_{t-1}\mathrm{Diag}(\alpha_t)
+```
+
+```math
+\widehat{v}_t=M_{\mathrm{decay}}k_t
+```
+
+```math
+r_{t}=v_{t}-\mathrm{v\_hat\_t}
+```
+
+```math
+M_{t}=M_{\mathrm{decay}}+\beta_{t}\cdot r_{t}\,{k_{t}}^{\mathsf T}
+```
+
+```math
+o_{t}=M_{t}\left(\frac{q_{t}}{\sqrt{d_{k}}}\right)
+```
+
+Because $`g_{t} \le 0`$, `alpha_t` is in `(0, 1]`. Each column of `M` receives a different retention factor.
 
 The KDA report writes the transpose orientation `S_t in R[d_k, d_v]`:
 
-```text
-S_t = (I - beta_t k_t k_t^T) Diag(alpha_t) S_{t-1}
-      + beta_t k_t v_t^T
-o_t = S_t^T q_t
+```math
+S_{t} = \left(I - \beta_{t} k_{t} k_{t}^{\mathsf T}\right) \mathrm{Diag}\left(\alpha_{t}\right) S_{t-1} + \beta_{t} k_{t} v_{t}^{\mathsf T}
+```
+
+```math
+o_{t} = S_{t}^{\mathsf T} q_{t}
 ```
 
 The two forms are equivalent after transposing. Always establish the state orientation before comparing code and equations.
@@ -185,28 +236,26 @@ The two forms are equivalent after transposing. Always establish the state orien
 
 Start from the report's `S[d_k,d_v]` equation:
 
-```text
-S_t = (I - beta k k^T) Diag(alpha) S_prev + beta k v^T
+```math
+S_{t} = \left(I - \beta k k^{\mathsf T}\right) \mathrm{Diag}\left(\alpha\right) S_{\mathrm{prev}} + \beta k v^{\mathsf T}
 ```
 
 Transpose every factor and reverse multiplication order:
 
-```text
-M_t = S_t^T
-    = M_prev Diag(alpha) (I - beta k k^T) + beta v k^T
+```math
+M_{t} = S_{t}^{\mathsf T} = M_{\mathrm{prev}} \mathrm{Diag}\left(\alpha\right) \left(I - \beta k k^{\mathsf T}\right) + \beta v k^{\mathsf T}
 ```
 
 Define the column-decayed state:
 
-```text
-M_decay = M_prev Diag(alpha)
+```math
+M_{\mathrm{decay}} = M_{\mathrm{prev}} \mathrm{Diag}\left(\alpha\right)
 ```
 
 Then expand:
 
-```text
-M_t = M_decay - beta (M_decay k) k^T + beta v k^T
-    = M_decay + beta (v - M_decay k) k^T
+```math
+M_{t} = M_{\mathrm{decay}} - \beta \left(M_{\mathrm{decay}} k\right) k^{\mathsf T} + \beta v k^{\mathsf T} = M_{\mathrm{decay}} + \beta \left(v - M_{\mathrm{decay}} k\right) k^{\mathsf T}
 ```
 
 This is exactly the storage-friendly sequence “decay → predict → residual → outer-product update.” No approximation was introduced by changing orientation.
@@ -215,15 +264,18 @@ This is exactly the storage-friendly sequence “decay → predict → residual 
 
 For value row `r` and key column `c`:
 
-```text
-M_decay[r,c] = M_prev[r,c] * alpha[c]
-M_t[r,c] = M_decay[r,c] + beta * residual[r] * k[c]
+```math
+{M_{\mathrm{decay}}}_{r,c}={M_{\mathrm{prev}}}_{r,c}\cdot {\alpha}_{c}
+```
+
+```math
+{M_{t}}_{r,c}={M_{\mathrm{decay}}}_{r,c}+\beta\cdot {\mathrm{residual}}_{r}\cdot {k}_{c}
 ```
 
 KDA therefore has two independent axes of control:
 
 - `alpha[c]` decides how much of historical key feature `c` survives;
-- `residual[r] * k[c]` decides how the current token changes matrix cell `(r,c)`.
+- $`{\mathrm{residual}}_{r}\cdot {k}_{c}`$ decides how the current token changes matrix cell `(r,c)`.
 
 GDN's scalar `alpha` cannot choose different lifetimes for different columns.
 
@@ -249,8 +301,8 @@ The short convolution supplies precise local order information before recurrent 
 
 Let `Hk` be the number of KDA heads, `Dk` the q/k head width, `Dv` the value width, and `C` the short-convolution kernel size. Starting from packed hidden states:
 
-```text
-X: [T,Hmodel]
+```math
+\mathrm{shape}\left(X\right)=\left[T,\mathrm{Hmodel}\right]
 ```
 
 The logical projection outputs are:
@@ -266,10 +318,16 @@ output_gate:  [T,Hk*Dv]  -> z [T,Hk,Dv]
 
 In the source, forget and output gates use factored projections. For the forget path:
 
-```text
-f_a = X @ Wfa^T:       [T,Dk]
-a_flat = f_a @ Wfb^T:  [T,Hk*Dk]
-a = reshape(a_flat):   [T,Hk,Dk]
+```math
+f_{a} = X \, \mathrm{Wfa}^{\mathsf T}: \left[T,\mathrm{Dk}\right]
+```
+
+```math
+a_{\mathrm{flat}} = f_{a} \, \mathrm{Wfb}^{\mathsf T}: \left[T,\mathrm{Hk}\cdot \mathrm{Dk}\right]
+```
+
+```math
+a = \mathrm{reshape}\left(a_{\mathrm{flat}}\right): \left[T,\mathrm{Hk},\mathrm{Dk}\right]
 ```
 
 This reduces projection cost while still producing one forget activation for every token, head, and key channel. A fused projection can produce q/k/v, `beta`, and the low-rank gate intermediates in one call; the logical tensors do not change.
@@ -296,20 +354,41 @@ After convolution and reshape:
 
 ```text
 q/k:       [1,T,Hk,Dk]
-v:         [1,T,Hk,Dv]
-a:         [1,T,Hk,Dk]
-beta:      [1,T,Hk]
+```
+
+```math
+\mathrm{shape}\left(v\right)=\left[1,T,\mathrm{Hk},\mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(a\right)=\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]
+```
+
+```math
+\mathrm{shape}\left(\beta\right)=\left[1,T,\mathrm{Hk}\right]
+```
+
+```text
 state pool:[slots,Hk,Dv,Dk]
 core out:  [1,T,Hk,Dv]
 ```
 
-The output gate and normalization preserve `[T,Hk,Dv]`. Flatten and project:
+The output gate and normalization preserve $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$. Flatten and project:
 
-```text
-gated: [T,Hk,Dv]
-flat:  [T,Hk*Dv]
-Wout:  [Hmodel,Hk*Dv]
-out:   [T,Hmodel]
+```math
+\mathrm{shape}\left(\mathrm{gated}\right)=\left[T,\mathrm{Hk},\mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{flat}\right)=\left[T,\mathrm{Hk}\cdot \mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Wout}\right)=\left[\mathrm{Hmodel},\mathrm{Hk}\cdot \mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{out}\right)=\left[T,\mathrm{Hmodel}\right]
 ```
 
 ## 7. Memory and Compute Complexity
@@ -321,7 +400,7 @@ KDA state: H_kv * d_v * d_k elements
 conv state: projected_channels * (kernel_size - 1) elements
 ```
 
-It is independent of sequence length. Per-token recurrence work is `O(H_kv * d_v * d_k)` rather than a scan over all prior tokens.
+It is independent of sequence length. Per-token recurrence work is $`O\left(H_{\mathrm{kv}}\cdot d_{v}\cdot d_{k}\right)`$ rather than a scan over all prior tokens.
 
 This does not mean KDA is automatically fast. The state matrix can be large, and performance depends on keeping it on chip long enough, fusing elementwise gates with matrix/vector operations, and avoiding tiny launches.
 
@@ -461,33 +540,42 @@ These mechanisms solve different bottlenecks and can coexist in hybrid model fam
 
 | Stage | Tensor | Logical shape | Persistent? |
 |---|---|---:|---|
-| Layer input | `X` | `[T,Hmodel]` | no |
-| Q/K projection | `q/k` | `[T,Hk,Dk]` | no |
-| V projection | `v` | `[T,Hk,Dv]` | no |
-| Write gate activation | `beta_raw` | `[T,Hk]` | no |
-| Forget activation | `a` | `[T,Hk,Dk]` | no |
-| Output-gate activation | `z` | `[T,Hk,Dv]` | no |
+| Layer input | `X` | $`\left[T,\mathrm{Hmodel}\right]`$ | no |
+| Q/K projection | `q/k` | $`\left[T,\mathrm{Hk},\mathrm{Dk}\right]`$ | no |
+| V projection | `v` | $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$ | no |
+| Write gate activation | `beta_raw` | $`\left[T,\mathrm{Hk}\right]`$ | no |
+| Forget activation | `a` | $`\left[T,\mathrm{Hk},\mathrm{Dk}\right]`$ | no |
+| Output-gate activation | `z` | $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$ | no |
 | Packed conv input | `mixed_qkv` | `[T,Hk*(2Dk+Dv)]` | no |
 | Convolution cache | `conv_state` | `[slots,Hk*(2Dk+Dv),C-1]` | yes |
-| Retention log | `g` | `[1,T,Hk,Dk]` | no; may be fused |
-| Retention | `alpha=exp(g)` | `[1,T,Hk,Dk]` | no; may be fused |
-| Delta gate | `beta` | `[1,T,Hk]` | no; may be fused |
-| Recurrent cache | `M` | `[slots,Hk,Dv,Dk]` | yes |
-| Core output | `Ocore` | `[1,T,Hk,Dv]` | no |
-| Gated/norm output | `Onorm` | `[T,Hk,Dv]` | no |
-| Layer output | `O` | `[T,Hmodel]` | no |
+| Retention log | `g` | $`\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]`$ | no; may be fused |
+| Retention | $`\alpha=\mathrm{exp}\left(g\right)`$ | $`\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]`$ | no; may be fused |
+| Delta gate | `beta` | $`\left[1,T,\mathrm{Hk}\right]`$ | no; may be fused |
+| Recurrent cache | `M` | $`\left[\mathrm{slots},\mathrm{Hk},\mathrm{Dv},\mathrm{Dk}\right]`$ | yes |
+| Core output | `Ocore` | $`\left[1,T,\mathrm{Hk},\mathrm{Dv}\right]`$ | no |
+| Gated/norm output | `Onorm` | $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$ | no |
+| Layer output | `O` | $`\left[T,\mathrm{Hmodel}\right]`$ | no |
 
-During decode, `T=B` and `cache_indices [B]` maps row `b` to its persistent slot. During packed prefill, `query_start_loc [R+1]` identifies the token interval belonging to each of `R` requests.
+During decode, $`T=B`$ and `cache_indices [B]` maps row `b` to its persistent slot. During packed prefill, `query_start_loc [R+1]` identifies the token interval belonging to each of `R` requests.
 
 ## 19. Why Prefill Needs Chunk Algebra
 
 The recurrence is causal:
 
+```math
+M_{1}=F\left(M_{0},\mathrm{token\_1}\right)
+```
+
+```math
+M_{2}=F\left(M_{1},\mathrm{token\_2}\right)
+```
+
 ```text
-M_1 = F(M_0, token_1)
-M_2 = F(M_1, token_2)
 ...
-M_L = F(M_(L-1), token_L)
+```
+
+```math
+M_{L}=F\left({M}_{L-1},\mathrm{token\_L}\right)
 ```
 
 A literal loop launches or executes `L` dependent small updates. Chunk algorithms keep the same dependency between chunks while exposing matrix work inside a chunk:
@@ -509,69 +597,87 @@ Both must be compared. Matching outputs while writing a wrong final state causes
 
 ## 20. Worked Numerical Update
 
-Let `Dk=Dv=2`:
+Let $`\mathrm{Dk}=\mathrm{Dv}=2`$:
 
-```text
-M_prev = [[ 1.0, 0.5],
-          [-0.5, 1.0]]
-alpha  = [0.8, 0.25]
-k      = [0.6, 0.8]
-v      = [1.0,-0.5]
-beta   = 0.5
-q      = [0.8, 0.6]
+```math
+M_{\mathrm{prev}}=\left[\left[1.0,0.5\right],\left[-0.5,1.0\right]\right]
+```
+
+```math
+\alpha=\left[0.8,0.25\right]
+```
+
+```math
+k=\left[0.6,0.8\right]
+```
+
+```math
+v=\left[1.0,-0.5\right]
+```
+
+```math
+\beta=0.5
+```
+
+```math
+q=\left[0.8,0.6\right]
 ```
 
 Column-wise decay:
 
-```text
-M_decay = [[ 0.8, 0.125],
-           [-0.4, 0.250]]
+```math
+M_{\mathrm{decay}}=\left[\left[0.8,0.125\right],\left[-0.4,0.25\right]\right]
 ```
 
 Prediction and residual:
 
-```text
-v_hat = M_decay @ k = [0.58,-0.04]
-r = v - v_hat       = [0.42,-0.46]
+```math
+v_{\mathrm{hat}}=M_{\mathrm{decay}}\,k=\left[0.58,-0.04\right]
+```
+
+```math
+r=v-v_{\mathrm{hat}}=\left[0.42,-0.46\right]
 ```
 
 Delta and new state:
 
-```text
-beta * (r outer k)
-  = [[ 0.126, 0.168],
-     [-0.138,-0.184]]
+```math
+\beta\cdot r\,{k}^{\mathsf T}=\left[\left[0.126,0.168\right],\left[-0.138,-0.184\right]\right]
+```
 
-M = [[ 0.926, 0.293],
-     [-0.538, 0.066]]
+```math
+M=\left[\left[0.926,0.293\right],\left[-0.538,0.066\right]\right]
 ```
 
 Readout before later output gating/norm:
 
-```text
-o = M @ (q / sqrt(2)) ≈ [0.648,-0.276]
+```math
+o=M\,\frac{q}{\sqrt{2}}\approx \left[0.648,-0.276\right]
 ```
 
 This example makes the two operations visible: old columns shrink by different factors, then one rank-one matrix writes the prediction error.
 
 ## 21. Memory and Bandwidth Example
 
-For `Hk=32`, `Dk=Dv=128`:
+For $`\mathrm{Hk}=32`$, $`\mathrm{Dk}=\mathrm{Dv}=128`$:
 
-```text
-state elements per request/layer = 32 * 128 * 128 = 524,288
-BF16 state capacity             = 1 MiB per request/layer
+```math
+\text{state elements per request/layer}= 32 \cdot  128 \cdot  128 = 524,288
 ```
 
-With `B=64`, one layer owns 64 MiB of active state capacity. A naive decode that separately reads/writes the full matrix for decay, prediction, update, and output can multiply traffic several times. A fused recurrent kernel aims to read a state tile, perform all operations, and write it once.
+```math
+\text{BF16 state capacity}= 1 \mathrm{MiB} \mathrm{per} \mathrm{request}/\mathrm{layer}
+```
+
+With $`B=64`$, one layer owns 64 MiB of active state capacity. A naive decode that separately reads/writes the full matrix for decay, prediction, update, and output can multiply traffic several times. A fused recurrent kernel aims to read a state tile, perform all operations, and write it once.
 
 The state is constant with sequence length, not necessarily small. Compare it with a KV layer by solving the crossover length:
 
-```text
-L_cross * Nkv * (Dk + Dv) = Hk * Dv * Dk
+```math
+L_{\mathrm{cross}}\cdot \mathrm{Nkv}\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)=\mathrm{Hk}\cdot \mathrm{Dv}\cdot \mathrm{Dk}
 ```
 
-For `Nkv=Hk` and `Dk=Dv=128`, `L_cross=64` tokens in element count. The advantage at long context comes from avoiding continued linear growth; actual bytes depend on KV/state dtype and hybrid layer count.
+For $`\mathrm{Nkv}=\mathrm{Hk}`$ and $`\mathrm{Dk}=\mathrm{Dv}=128`$, $`L_{\mathrm{cross}}=64`$ tokens in element count. The advantage at long context comes from avoiding continued linear growth; actual bytes depend on KV/state dtype and hybrid layer count.
 
 ## 22. Reference Recurrent Pseudocode
 
@@ -614,7 +720,7 @@ Use FP32 accumulation in the reference. Compare lower-precision kernels over lon
 Exercises:
 
 1. Starting from the report's `S[d_k,d_v]` form, reproduce every transpose step to obtain `M[d_v,d_k]`.
-2. For `Hk=16`, `Dk=128`, `Dv=128`, compute state bytes in BF16 and FP32.
+2. For $`\mathrm{Hk}=16`$, $`\mathrm{Dk}=128`$, $`\mathrm{Dv}=128`$, compute state bytes in BF16 and FP32.
 3. Unroll two KDA steps and identify exactly where token 1 influences token 2's output.
 4. Explain why saving `M` but not the convolution tail cannot reproduce the next token.
 5. Design speculative-state checkpoints for a draft length of four without copying the entire pool for unrelated requests.

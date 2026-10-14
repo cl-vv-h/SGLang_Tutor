@@ -22,18 +22,12 @@ Per request:
 
 Rough estimate:
 
-```text
-KV bytes =
-    num_layers
-  * num_tokens
-  * kv_heads
-  * head_dim
-  * 2           # K and V
-  * dtype_bytes
+```math
+\text{KV bytes}= \mathrm{num\_layers} \cdot  \mathrm{num\_tokens} \cdot  \mathrm{kv\_heads} \cdot  \mathrm{head\_dim} \cdot  2 \qquad\text{K and V * dtype\_bytes}
 ```
 
 Example: Llama-3-8B with 32 layers, 8 KV heads, 128 head dim, BF16, 4096 tokens:
-`32 * 4096 * 8 * 128 * 2 * 2 ≈ 512 MB` per request for KV Cache alone.
+$`32 \cdot  4096 \cdot  8 \cdot  128 \cdot  2 \cdot  2 \approx  512 \mathrm{MB}`$ per request for KV Cache alone.
 
 ## Key Design Points
 

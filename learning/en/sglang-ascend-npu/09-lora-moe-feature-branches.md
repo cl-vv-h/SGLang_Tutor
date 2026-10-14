@@ -10,8 +10,8 @@
 
 | Kernel | Operation | Purpose |
 |---|---|---|
-| `torch.ops.npu.sgmv_shrink` | `x @ A^T` (segmented) | LoRA down-projection per adapter |
-| `torch.ops.npu.sgmv_expand` | `delta @ B^T` (segmented) | LoRA up-projection per adapter |
+| `torch.ops.npu.sgmv_shrink` | $`x\,{A}^{\mathsf T}`$ (segmented) | LoRA down-projection per adapter |
+| `torch.ops.npu.sgmv_expand` | $`\delta\,{B}^{\mathsf T}`$ (segmented) | LoRA up-projection per adapter |
 
 ### LoRABatchInfo
 
@@ -25,10 +25,19 @@ LoRABatchInfo:
 Batched LoRA forward:
 ```text
 For each unique adapter in batch:
-    affected = tokens using this adapter
-    delta = sgmv_shrink(X[affected], A_adapter)
-    delta = sgmv_expand(delta, B_adapter)
-    Y[affected] += delta * scaling
+affected = tokens using this adapter
+```
+
+```math
+\delta = \mathrm{sgmv\_shrink}\left(X\left[\mathrm{affected}\right], A_{\mathrm{adapter}}\right)
+```
+
+```math
+\delta = \mathrm{sgmv\_expand}\left(\delta, B_{\mathrm{adapter}}\right)
+```
+
+```math
+Y\left[\mathrm{affected}\right] += \delta \cdot  \mathrm{scaling}
 ```
 
 ## 2. MoE on Ascend NPU

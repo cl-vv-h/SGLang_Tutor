@@ -30,7 +30,7 @@
 - EP 与 MoE 模型相关，会引入 token dispatch/combine 和 all-to-all 通信。
 - SP/CP 主要服务长上下文，和 KV Cache、attention backend、decode 阶段显存压力关系很强。
 - 实际 serving 通常会组合多种策略，例如 TP + DP、TP + EP 或 PD disaggregation + TP。
-- DP Attention 在同一个模型 world 内组合请求并行、Attention TP 和 FFN/MoE 并行；与普通 DP 的完整模型副本模式不同，`tp_size=4,dp_size=2` 的计算设备数也可能不同。
+- DP Attention 在同一个模型 world 内组合请求并行、Attention TP 和 FFN/MoE 并行；与普通 DP 的完整模型副本模式不同，$`\mathrm{tp\_size}=4,\qquad \mathrm{dp\_size}=2`$ 的计算设备数也可能不同。
 
 ## 通信基础延伸
 

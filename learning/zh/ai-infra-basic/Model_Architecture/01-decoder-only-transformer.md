@@ -42,60 +42,74 @@ input_ids
 
 | 阶段 | 输入 | 输出 | 说明 |
 |---|---:|---:|---|
-| Token IDs | `[B,S]` 或 packed `[T]` | 同输入 | 整数词表索引 |
-| Embedding | `[T]` | `[T,H]` | 按 token id 查询 embedding row |
-| Decoder Layers | `[T,H]` | `[T,H]` | 重复 `L` 次，不改变主路径宽度 |
-| Final RMSNorm | `[T,H]` | `[T,H]` | 对每个 token 的 hidden vector 独立归一化 |
-| LM Head | `[M,H]` | `[M,V]` | `M` 是真正需要计算 logits 的 token 行数 |
-| Sampling | `[M,V]` | `[B]` 或多个 token | 温度、Top-K、Top-P 等采样 |
+| Token IDs | $`\left[B,S\right]`$ 或 packed $`\left[T\right]`$ | 同输入 | 整数词表索引 |
+| Embedding | $`\left[T\right]`$ | $`\left[T,H\right]`$ | 按 token id 查询 embedding row |
+| Decoder Layers | $`\left[T,H\right]`$ | $`\left[T,H\right]`$ | 重复 `L` 次，不改变主路径宽度 |
+| Final RMSNorm | $`\left[T,H\right]`$ | $`\left[T,H\right]`$ | 对每个 token 的 hidden vector 独立归一化 |
+| LM Head | $`\left[M,H\right]`$ | $`\left[M,V\right]`$ | `M` 是真正需要计算 logits 的 token 行数 |
+| Sampling | $`\left[M,V\right]`$ | $`\left[B\right]`$ 或多个 token | 温度、Top-K、Top-P 等采样 |
 
-训练通常令 `M=T`。在线自回归推理通常只需要每条请求最后一个有效位置的 logits，因此常见 `M=B`，无需为 prompt 的每一行都生成完整词表 logits。
+训练通常令 $`M=T`$。在线自回归推理通常只需要每条请求最后一个有效位置的 logits，因此常见 $`M=B`$，无需为 prompt 的每一行都生成完整词表 logits。
 
 ## 3. 等长布局与 Packed Token 布局
 
-训练教材通常把 hidden states 写成 `[B,S,H]`。当 batch 中的序列长度不同时，可以补齐到统一长度，也可以只打包有效 token：
+训练教材通常把 hidden states 写成 $`\left[B,S,H\right]`$。当 batch 中的序列长度不同时，可以补齐到统一长度，也可以只打包有效 token：
 
-```text
-request 0: S_0 = 4
-request 1: S_1 = 2
-request 2: S_2 = 5
+```math
+\text{request 0}: S_{0} = 4
 ```
 
-若全部 padding 到 `S_max=5`，形状是 `[3,5,H]`，其中 4 行是无效 padding。packed 表示只保留有效 token：
-
-```text
-T = 4 + 2 + 5 = 11
-hidden_states.shape = [11,H]
+```math
+\text{request 1}: S_{1} = 2
 ```
 
-packed 表示必须额外保存每条序列的起始偏移和长度。Attention 根据这些边界限制可见范围；线性层、归一化和 MoE 则可直接处理连续的 `[T,H]`。
+```math
+\text{request 2}: S_{2} = 5
+```
+
+若全部 padding 到 $`S_{\mathrm{max}}=5`$，形状是 $`\left[3,5,H\right]`$，其中 4 行是无效 padding。packed 表示只保留有效 token：
+
+```math
+T=4+2+5=11
+```
+
+```math
+\mathrm{hidden\_states}.\mathrm{shape} = \left[11,H\right]
+```
+
+packed 表示必须额外保存每条序列的起始偏移和长度。Attention 根据这些边界限制可见范围；线性层、归一化和 MoE 则可直接处理连续的 $`\left[T,H\right]`$。
 
 两种表示的数学含义相同：
 
-```text
-dense training view: [B,S,H]
-packed serving view: [T,H], T = sum_i S_i
+```math
+\mathrm{shape}(X_{\mathrm{dense}})=[B,S,H],\quad\mathrm{shape}(X_{\mathrm{packed}})=[T,H],\quad T=\sum_iS_i
 ```
 
 ## 4. Token Embedding
 
 设 embedding 权重：
 
-```text
-W_embed: [V,H]
-input_ids: [T]
+```math
+\mathrm{shape}\left(W_{\mathrm{embed}}\right)=\left[V,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[T\right]
 ```
 
 embedding lookup 为每个 id 选择一行：
 
-```text
-X_0[t,:] = W_embed[input_ids[t],:]
-X_0: [T,H]
+```math
+{X_{0}}_{t,:}={W_{\mathrm{embed}}}_{{\mathrm{input\_ids}}_{t},:}
+```
+
+```math
+\mathrm{shape}\left(X_{0}\right)=\left[T,H\right]
 ```
 
 这不是普通矩阵乘法，而是稀疏的行索引。每个 token 从一个整数变成长度为 `H` 的连续向量。
 
-位置不直接加成一个 `[T,H]` 的绝对位置向量。Qwen3-MoE 在 Attention 内部通过 RoPE 把位置信息作用到 Q 和 K。
+位置不直接加成一个 $`\left[T,H\right]`$ 的绝对位置向量。Qwen3-MoE 在 Attention 内部通过 RoPE 把位置信息作用到 Q 和 K。
 
 ## 5. 一个 Decoder Layer
 
@@ -103,40 +117,64 @@ X_0: [T,H]
 
 多数现代 Decoder-only 模型使用 pre-norm 残差结构。设该层输入为 `x_l [T,H]`：
 
-```text
-n_l = RMSNorm(x_l)                  [T,H]
-a_l = CausalGQA(n_l)                [T,H]
-r_l = x_l + a_l                     [T,H]
-m_l = RMSNorm(r_l)                  [T,H]
-f_l = SparseMoE(m_l)                [T,H]
-x_(l+1) = r_l + f_l                 [T,H]
+```math
+n_{l}=\mathrm{RMSNorm}\left(x_{l}\right)\qquad\mathrm{shape}:\left[T,H\right]
 ```
 
-主路径始终是 `[T,H]`，使残差加法成立。Attention 和 MoE 内部可以改变维度，但返回前必须恢复 `[T,H]`。
+```math
+a_{l} = \mathrm{CausalGQA}\left(n_{l}\right) \left[T,H\right]
+```
+
+```math
+r_{l}=x_{l}+a_{l}\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+```math
+m_{l}=\mathrm{RMSNorm}\left(r_{l}\right)\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+```math
+f_{l}=\mathrm{SparseMoE}\left(m_{l}\right)\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+```math
+{x}_{l+1}=r_{l}+f_{l}\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+主路径始终是 $`\left[T,H\right]`$，使残差加法成立。Attention 和 MoE 内部可以改变维度，但返回前必须恢复 $`\left[T,H\right]`$。
 
 ### 5.1 RMSNorm
 
 对单个 token vector `x in R^H`：
 
-```text
-rms(x) = sqrt(mean(x_i^2) + epsilon)
-y_i = gamma_i * x_i / rms(x)
+```math
+\mathrm{rms}\left(x\right) = \mathrm{sqrt}\left(\mathrm{mean}\left(x_{i}^{2}\right) + \epsilon\right)
+```
+
+```math
+y_{i} = \gamma_{i} \cdot  x_{i} / \mathrm{rms}\left(x\right)
 ```
 
 其中 `gamma [H]` 是可学习权重。RMSNorm 不混合不同 token，也不混合 hidden 维度的位置，只按每个 token 的 `H` 个元素计算尺度。
 
-```text
-input:  [T,H]
-gamma:  [H]
-output: [T,H]
+```math
+\mathrm{shape}\left(\mathrm{input}\right)=\left[T,H\right]
+```
+
+```math
+\mathrm{shape}\left(\gamma\right)=\left[H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{output}\right)=\left[T,H\right]
 ```
 
 ### 5.2 残差连接
 
 残差连接把子层输出加回主路径：
 
-```text
-r = x + sublayer(norm(x))
+```math
+r = x + \mathrm{sublayer}\left(\mathrm{norm}\left(x\right)\right)
 ```
 
 它要求两项形状完全一致。其作用是保留原始表示，并为深层网络提供短梯度路径。推理中它也决定了 kernel fusion 和临时 buffer 的组织方式。
@@ -147,8 +185,8 @@ r = x + sublayer(norm(x))
 
 第 `t` 个 token 的 Attention 输出依赖可见历史 token：
 
-```text
-a_t = sum_j alpha_(t,j) * v_j, j <= t
+```math
+a_{t} = \sum_{j} \alpha_{t,j} \cdot  v_{j}, j \le  t
 ```
 
 因此 Attention 沿序列维度交换信息。它需要位置、因果 mask 和历史 KV Cache。
@@ -157,8 +195,8 @@ a_t = sum_j alpha_(t,j) * v_j, j <= t
 
 MoE router 根据每个 token 的 hidden vector 选择 expert。每个 expert 内部的 MLP 不读取其他 token：
 
-```text
-f_t = sum_(e in TopK(t)) p_(t,e) * Expert_e(m_t)
+```math
+f_{t} = \sum_{e \in \mathrm{TopK}\left(t\right)} p_{t,e} \cdot  \mathrm{Expert\_e}\left(m_{t}\right)
 ```
 
 MoE 沿特征维度做非线性变换；token 之间的耦合主要来自路由后的并行调度和通信，而不是数学上的 token attention。
@@ -167,29 +205,38 @@ MoE 沿特征维度做非线性变换；token 之间的耦合主要来自路由�
 
 经过 `L` 层后：
 
-```text
-X_L: [T,H]
-X_final = RMSNorm(X_L): [T,H]
+```math
+\mathrm{shape}\left(X_{L}\right)=\left[T,H\right]
+```
+
+```math
+X_{\mathrm{final}} = \mathrm{RMSNorm}\left(X_{L}\right): \left[T,H\right]
 ```
 
 LM Head 权重：
 
-```text
-W_lm: [V,H]
+```math
+\mathrm{shape}\left(W_{\mathrm{lm}}\right)=\left[V,H\right]
 ```
 
 若选出 `M` 行 hidden states：
 
-```text
-H_selected: [M,H]
-logits = H_selected @ W_lm^T
-logits: [M,V]
+```math
+\mathrm{shape}\left(H_{\mathrm{selected}}\right)=\left[M,H\right]
+```
+
+```math
+\mathrm{logits}=H_{\mathrm{selected}}\,{W_{\mathrm{lm}}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[M,V\right]
 ```
 
 每个 `logits[m,v]` 是第 `m` 个待预测位置对词表 token `v` 的未归一化分数。概率为：
 
-```text
-P(v) = softmax(logits / temperature)[v]
+```math
+P\left(v\right)={\mathrm{softmax}\left(\frac{\mathrm{logits}}{\mathrm{temperature}}\right)}_{v}
 ```
 
 `argmax` 是 greedy decoding；Top-K、Top-P 在候选子集上重新归一化后采样。
@@ -198,12 +245,24 @@ P(v) = softmax(logits / temperature)[v]
 
 设两条请求的新输入长度分别为 3 和 2：
 
-```text
-B = 2
-extend lengths = [3,2]
-T = 5
-input_ids: [5]
-positions: [5]
+```math
+B=2
+```
+
+```math
+\text{extend lengths}= \left[3,2\right]
+```
+
+```math
+T=5
+```
+
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[5\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[5\right]
 ```
 
 每层执行：
@@ -224,20 +283,38 @@ MoE output                    [5,H]
 
 普通 decode 每条活跃请求本轮输入一个 token：
 
-```text
-B_active = B
-T = B
-input_ids: [B]
-positions: [B]
-hidden_states: [B,H]
+```math
+B_{\mathrm{active}}=B
+```
+
+```math
+T=B
+```
+
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[B\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[B\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[B,H\right]
 ```
 
 每层只计算新的 Q/K/V：
 
-```text
-Q_new: [B,Nq,D]
-K_new: [B,Nkv,D]
-V_new: [B,Nkv,D]
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[B,\mathrm{Nq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{new}}\right)=\left[B,\mathrm{Nkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{new}}\right)=\left[B,\mathrm{Nkv},D\right]
 ```
 
 但每个 Query 需要读取该请求长度为 `L_ctx` 的历史 KV Cache：
@@ -253,32 +330,44 @@ logical V_history: [L_ctx,Nkv,D]
 
 以下数值用于展示形状关系，不代表某个特定 checkpoint：
 
-```text
-B=2, extend lengths=[3,2], T=5
-H=4096, Nq=32, Nkv=8, D=128
-E=64, K=4, Ie=1536, V=150000
+```math
+B=2, \mathrm{extend} \mathrm{lengths}=\left[3,2\right], T=5
+```
+
+```math
+H=4096,\qquad \mathrm{Nq}=32,\qquad \mathrm{Nkv}=8,\qquad D=128
+```
+
+```math
+E=64,\qquad K=4,\qquad \mathrm{Ie}=1536,\qquad V=150000
 ```
 
 单层主路径：
 
 | 变量 | 形状 |
 |---|---:|
-| `input_ids` | `[5]` |
-| `hidden_states` | `[5,4096]` |
-| `q` | `[5,32,128]` |
-| `k`, `v` | `[5,8,128]` |
-| `attention_output` | `[5,4096]` |
-| `router_logits` | `[5,64]` |
-| `topk_ids`, `topk_weights` | `[5,4]` |
-| dispatched expert rows | 最多 `5*4=20` 行，每行宽度 `4096` |
-| `moe_output` | `[5,4096]` |
+| `input_ids` | $`\left[5\right]`$ |
+| `hidden_states` | $`\left[5,4096\right]`$ |
+| `q` | $`\left[5,32,128\right]`$ |
+| `k`, `v` | $`\left[5,8,128\right]`$ |
+| `attention_output` | $`\left[5,4096\right]`$ |
+| `router_logits` | $`\left[5,64\right]`$ |
+| `topk_ids`, `topk_weights` | $`\left[5,4\right]`$ |
+| dispatched expert rows | 最多 $`5\cdot 4=20`$ 行，每行宽度 `4096` |
+| `moe_output` | $`\left[5,4096\right]`$ |
 
 若只对每条请求最后一个位置计算 logits：
 
-```text
-selected_hidden: [2,4096]
-logits: [2,150000]
-sampled_ids: [2]
+```math
+\mathrm{shape}\left(\mathrm{selected\_hidden}\right)=\left[2,4096\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[2,150000\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{sampled\_ids}\right)=\left[2\right]
 ```
 
 ## 11. 参数、激活与运行时状态
@@ -295,7 +384,7 @@ Decoder Layer 的输出不会作为独立历史永久保存；decode 重用的�
 
 ## 12. 关键结构约束
 
-1. 残差主路径必须保持 `[T,H]`。
+1. 残差主路径必须保持 $`\left[T,H\right]`$。
 2. `Nq*D` 通常等于 `H`，而 `Nkv*D` 可以显著小于 `H`。
 3. 因果 Attention 不能读取未来 token，也不能跨请求读取 token。
 4. MoE 的参数量可随 expert 数量增长，但单 token 只激活 Top-K experts。

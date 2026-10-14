@@ -110,14 +110,23 @@ python -m sglang.launch_server \
 
 `_handle_dspark()` does more than pass arguments through. It creates invariants used by all later memory and shape accounting:
 
-```text
-speculative_num_steps = 1
-speculative_eagle_topk = 1
-gamma = checkpoint block_size or --speculative-dspark-block-size
-speculative_num_draft_tokens = gamma + 1
+```math
+\mathrm{speculative\_num\_steps}=1
 ```
 
-`topk=1` means a linear chain rather than an EAGLE candidate tree. `num_steps=1` reuses generic speculative-accounting fields; it does not mean DSpark proposes only one token.
+```math
+\mathrm{speculative\_eagle\_topk}=1
+```
+
+```text
+gamma = checkpoint block_size or --speculative-dspark-block-size
+```
+
+```math
+\mathrm{speculative\_num\_draft\_tokens}=\gamma+1
+```
+
+$`\mathrm{topk}=1`$ means a linear chain rather than an EAGLE candidate tree. $`\mathrm{num\_steps}=1`$ reuses generic speculative-accounting fields; it does not mean DSpark proposes only one token.
 
 `resolve_runtime_config()` performs checkpoint-level validation:
 
@@ -132,12 +141,12 @@ return DSparkRuntimeConfig(
 
 It also requires:
 
-- `markov_rank > 0`;
+- $`\mathrm{markov\_rank} \gt 0`$;
 - a valid `mask_token_id` smaller than the target vocabulary;
 - an explicit `γ` consistent with the checkpoint block size;
 - supported PP, DP-attention, and CP combinations.
 
-Failing early matters. Once a worker has allocated KV slots, graph buffers, and `[B,W]` acceptance buffers for the wrong `W`, correcting `γ` is too late.
+Failing early matters. Once a worker has allocated KV slots, graph buffers, and $`\left[B,W\right]`$ acceptance buffers for the wrong `W`, correcting `γ` is too late.
 
 ## 3. Worker initialization: an object graph, not one model
 
@@ -202,7 +211,7 @@ The Markov head and exact sampling need the complete vocabulary distribution, so
 |---|---|---|
 | persistent target cache | across rounds | target attention KV, request-token mapping, KDA/Mamba state |
 | persistent draft cache | across rounds | injected target-context K/V, draft attention cache |
-| per-step workspace | one round | `[B,W]` slots, draft block, confidence, compact mapping, accept buffers |
+| per-step workspace | one round | $`\left[B,W\right]`$ slots, draft block, confidence, compact mapping, accept buffers |
 
 CUDA/NPU graphs additionally require stable addresses allocated by capture tier. Folded proposal and epilogue paths move sampling, scatter, and commit into those captured regions.
 
@@ -237,16 +246,16 @@ Deferring injection to the next decode round would use stale locations.
 
 ### 4.2 Prefill shapes
 
-Let `T=Σ extend_len_r` and let captured target feature width be `D_t`:
+Let $`T=\sum  \mathrm{extend\_len\_r}`$ and let captured target feature width be `D_t`:
 
 | Tensor | Shape | Meaning |
 |---|---:|---|
-| `batch.out_cache_loc` | `[T]` | target prompt-token cache slots |
+| `batch.out_cache_loc` | $`\left[T\right]`$ | target prompt-token cache slots |
 | captured hidden | `[T',D_t]` | selected/projected rows; indexed to align with cache locations |
 | absolute positions | `[T']` | derived from prefix and extend lengths |
 | projected context K/V | model-specific | written into each draft layer's KV pool |
-| `next_token_ids` | `[B]` | next anchor/bonus |
-| `new_seq_lens` | `[B]` | formal target lengths after prefill |
+| `next_token_ids` | $`\left[B\right]`$ | next anchor/bonus |
+| `new_seq_lens` | $`\left[B\right]`$ | formal target lengths after prefill |
 
 `TargetHiddenKvInjector` has branches for ordinary attention, MLA, and unified-KV/SWA. Unified KV also threads request state slots and final positions so old prompt tokens sharing a ring slot cannot race with the final valid write.
 
@@ -284,18 +293,18 @@ next_draft_input = make_next_draft_input(
 
 | Point | Tensor | Shape |
 |---|---|---:|
-| decode entry | `prefix_lens` | `[B]` |
-| temporary slots | `positions_2d`, `verify_cache_loc_2d` | `[B,W]` |
-| draft input | `draft_block_ids` | commonly `[B,γ]` |
-| draft hidden | `draft_hidden` | `[B,γ,D]` |
-| draft candidates | `draft_tokens` | `[B,γ]` |
-| confidence | `confidence` | `[B,γ]` or `None` |
-| per-request verify length | `verify_lens` | `[B]` |
-| logical target input | `verify_ids_2d` | `[B,W]`, `W=γ+1` |
-| compact target input | compact ids | `[T_v]` |
+| decode entry | `prefix_lens` | $`\left[B\right]`$ |
+| temporary slots | `positions_2d`, `verify_cache_loc_2d` | $`\left[B,W\right]`$ |
+| draft input | `draft_block_ids` | commonly $`\left[B,\gamma\right]`$ |
+| draft hidden | `draft_hidden` | $`\left[B,\gamma,D\right]`$ |
+| draft candidates | `draft_tokens` | $`\left[B,\gamma\right]`$ |
+| confidence | `confidence` | $`\left[B,\gamma\right]`$ or `None` |
+| per-request verify length | `verify_lens` | $`\left[B\right]`$ |
+| logical target input | `verify_ids_2d` | $`\left[B,W\right]`$, $`W=\gamma+1`$ |
+| compact target input | compact ids | $`\left[T_{v}\right]`$ |
 | common accept logits | strided logits | `[B·W,V]` |
-| committed length | `commit_lens` | `[B]` |
-| next anchor | `bonus` | `[B]` |
+| committed length | `commit_lens` | $`\left[B\right]`$ |
+| next anchor | `bonus` | $`\left[B\right]`$ |
 
 ## 6. Allocate the verify window: written slots are not committed history
 
@@ -319,7 +328,7 @@ These slots allow draft and target forward passes to write candidate state, but 
 
 ## 7. Draft proposal: one anchor-plus-mask backbone pass
 
-`DraftBlockProposer._run_forward()` reuses a persistent `[capacity,query_token_num]` buffer:
+`DraftBlockProposer._run_forward()` reuses a persistent $`\left[\mathrm{capacity},\mathrm{query\_token\_num}\right]`$ buffer:
 
 ```python
 draft_block_ids[:, 0].copy_(draft_input.bonus_tokens.view(-1))
@@ -358,7 +367,7 @@ hidden_by_query = hidden_states.view(B, gamma + 1, ...)
 selected = hidden_by_query[:, 1:]
 ```
 
-Sampling hidden is normalized back to `[B,γ,D]`. Seeing `B(γ+1)` draft rows in a profile is not automatically an off-by-one bug; inspect `sample_from_anchor` first.
+Sampling hidden is normalized back to $`\left[B,\gamma,D\right]`$. Seeing `B(γ+1)` draft rows in a profile is not automatically an off-by-one bug; inspect `sample_from_anchor` first.
 
 ### 7.2 Base logits and semi-AR sampling
 
@@ -402,12 +411,18 @@ If the checkpoint has a confidence head, the planner calls `compute_confidence()
 
 ```text
 position 0 previous = anchor
-position 1 previous = draft_token[0]
+```
+
+```math
+\text{position 1 previous}= \mathrm{draft\_token}\left[0\right]
+```
+
+```text
 ...
 position γ-1 previous = draft_token[γ-2]
 ```
 
-Previous ids and embeddings therefore have shapes `[B,γ]` and `[B,γ,r]` and are concatenated with hidden `[B,γ,D]`.
+Previous ids and embeddings therefore have shapes $`\left[B,\gamma\right]`$ and $`\left[B,\gamma,r\right]`$ and are concatenated with hidden $`\left[B,\gamma,D\right]`$.
 
 `DSparkConfidenceHead.apply_sts()` implements
 
@@ -415,7 +430,7 @@ Previous ids and embeddings therefore have shapes `[B,γ]` and `[B,γ,r]` and ar
 c_{r,k}=\sigma(z_{r,k}/T_k),
 ```
 
-returning `[B,γ]`; an invariant checks values remain in `[0,1]`. Without a confidence head:
+returning $`\left[B,\gamma\right]`$; an invariant checks values remain in $`\left[0,1\right]`$. Without a confidence head:
 
 - static or verify-all mode can still run;
 - a confidence-dependent dynamic mode fails at initialization instead of silently inventing a budget.
@@ -448,24 +463,27 @@ The device path starts with:
 sort_survival = torch.cumprod(confidence.float(), dim=1)  # [B,γ]
 ```
 
-`ScheduleVerifyLensTopk` then produces `[B]` under constraints:
+`ScheduleVerifyLensTopk` then produces $`\left[B\right]`$ under constraints:
 
-```text
-min_verify_len <= verify_lens[r] <= W
-Σ(verify_lens[r] - floor) <= budget
+```math
+\mathrm{min\_verify\_len} \le {\mathrm{verify\_lens}}_{r} \le W
 ```
 
-Lengths include the anchor. With `γ=4,W=5`, `verify_lens=3` computes
+```math
+\sum \left(\mathrm{verify\_lens}\left[r\right] - \mathrm{floor}\right) \le  \mathrm{budget}
+```
 
-```text
-[anchor, draft_1, draft_2]
+Lengths include the anchor. With $`\gamma=4,\qquad W=5`$, $`\mathrm{verify\_lens}=3`$ computes
+
+```math
+\left[\mathrm{anchor},\mathrm{draft\_1},\mathrm{draft\_2}\right]
 ```
 
 not three drafts plus an anchor.
 
 ### 9.3 Layout contents
 
-`RaggedVerifyLayout` maps logical `[B,W]` to compact `[T_v]`. Conceptually it contains:
+`RaggedVerifyLayout` maps logical $`\left[B,W\right]`$ to compact $`\left[T_{v}\right]`$. Conceptually it contains:
 
 ```text
 verify_lens [B]
@@ -475,7 +493,7 @@ graph-tier token count
 scatter/gather mapping
 ```
 
-`T_v=Σ verify_lens`, but graph replay can use `round_up_grid(T_v)`. If the layout exceeds captured grids, the planner must fall back or use another layout rather than replaying an incompatible shape.
+$`T_{v}=\sum  \mathrm{verify\_lens}`$, but graph replay can use `round_up_grid(T_v)`. If the layout exceeds captured grids, the planner must fall back or use another layout rather than replaying an incompatible shape.
 
 ## 10. Build target verification input
 
@@ -487,17 +505,19 @@ verify_ids_2d = torch.cat(
 ).contiguous()
 ```
 
-The result is `[B,W]`. Example:
+The result is $`\left[B,W\right]`$. Example:
 
-```text
-B=2, γ=3, W=4
-anchor       [[10],       [20]]          [2,1]
-draft_tokens [[11,12,13], [21,22,23]]   [2,3]
-verify_ids   [[10,11,12,13],
-              [20,21,22,23]]            [2,4]
+```math
+B=2,\qquad \gamma=3,\qquad W=4
 ```
 
-For grammar requests, `GrammarTree.from_linear_chain(verify_ids_2d)` builds the logical chain. The grammar mask is applied after target logits return. Because compact output is scattered to `[B,W,V]`, one mask path works for static and compact verification.
+```text
+anchor       [[10],       [20]]          [2,1]
+draft_tokens [[11,12,13], [21,22,23]]   [2,3]
+verify_ids   [[10,11,12,13], [20,21,22,23]]            [2,4]
+```
+
+For grammar requests, `GrammarTree.from_linear_chain(verify_ids_2d)` builds the logical chain. The grammar mask is applied after target logits return. Because compact output is scattered to $`\left[B,W,V\right]`$, one mask path works for static and compact verification.
 
 ## 11. Compact target verification: pack, forward, scatter
 
@@ -520,11 +540,17 @@ strided_logits = ScatterCompactToStrided.execute(
 
 ### 11.1 Shape changes
 
-For `verify_lens=[3,1,4]`:
+For $`\mathrm{verify\_lens}=\left[3,1,4\right]`$:
 
 ```text
 logical ids          [3,4]
-valid rows           3+1+4 = 8
+```
+
+```math
+\mathrm{valid} \mathrm{rows} 3+1+4 = 8
+```
+
+```text
 compact ids          [8]
 target logits        [8,V]
 target hidden        [8,D_t]
@@ -538,11 +564,11 @@ Uncomputed tail rows receive a fill value, while `cutoff_verify_lens` prevents t
 
 Downstream logic can use one indexing rule:
 
-```text
-row = request_id * W + position_in_chain
+```math
+\mathrm{row}=\mathrm{request\_id}\cdot W+\mathrm{position\_in\_chain}
 ```
 
-Greedy acceptance, rejection sampling, grammar, logprob, observers, and hidden commit share one interface. Compact is a physical execution layout; `[B,W]` is the logical protocol.
+Greedy acceptance, rejection sampling, grammar, logprob, observers, and hidden commit share one interface. Compact is a physical execution layout; $`\left[B,W\right]`$ is the logical protocol.
 
 ### 11.3 Graph epilogue
 
@@ -654,17 +680,24 @@ next_draft_input = make_next_draft_input(
 
 The bonus is target-approved and sits at the committed end of this round. It is both streamed to the user and placed in column zero of the next draft block.
 
-## 14. Complete numerical trace: `B=2, γ=3`
+## 14. Complete numerical trace: $`B=2,\qquad \gamma=3`$
 
 Suppose:
 
-```text
-prefix_lens = [100, 40]
-anchor      = [10, 20]
-draft       = [[11,12,13],
-               [21,22,23]]
-confidence  = [[0.90,0.70,0.20],
-               [0.95,0.90,0.80]]
+```math
+\mathrm{prefix\_lens}=\left[100,40\right]
+```
+
+```math
+\mathrm{anchor}=\left[10,20\right]
+```
+
+```math
+\mathrm{draft}=\left[\left[11,12,13\right],\left[21,22,23\right]\right]
+```
+
+```math
+\mathrm{confidence}=\left[\left[0.9,0.7,0.2\right],\left[0.95,0.9,0.8\right]\right]
 ```
 
 ### 14.1 Scheduler
@@ -678,16 +711,22 @@ R1 [0.95, 0.855, 0.684]
 
 Assume the selected lengths are:
 
-```text
-verify_lens = [2,4]      # includes anchors
+```math
+\mathrm{verify\_lens}=\left[2,4\right]\qquad\text{includes anchors}
 ```
 
 Compact target input is:
 
-```text
-R0: [10,11]
-R1: [20,21,22,23]
-T_v = 6 versus fixed B*W = 8
+```math
+\mathrm{shape}\left(\mathrm{R0}\right)=\left[10,11\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{R1}\right)=\left[20,21,22,23\right]
+```
+
+```math
+T_{v} = 6 \mathrm{versus} \mathrm{fixed} B\cdot W = 8
 ```
 
 ### 14.2 Target and acceptance
@@ -701,22 +740,34 @@ R1: 21 and 22 match; 23 mismatches and target correction is 88
 
 Results:
 
-```text
-correct_len = [1,2]
-bonus       = [99,88]
-commit_lens = [2,3]
-out tokens  = [[11,99], [21,22,88]] (possibly physically flattened)
-new_seq_lens= [102,43]
+```math
+\mathrm{correct\_len}=\left[1,2\right]
 ```
 
-R0 candidates 2 and 3 were not verified and must not appear in committed logits, hidden state, or cache visibility. R1 candidate 23 was computed but replaced by correction 88. The next anchors are `[99,88]`.
+```math
+\mathrm{bonus}=\left[99,88\right]
+```
+
+```math
+\mathrm{commit\_lens}=\left[2,3\right]
+```
+
+```math
+\text{out tokens}= \left[\left[11,99\right], \left[21,22,88\right]\right] \left(\mathrm{possibly} \mathrm{physically} \mathrm{flattened}\right)
+```
+
+```math
+\mathrm{new\_seq\_lens}=\left[102,43\right]
+```
+
+R0 candidates 2 and 3 were not verified and must not appear in committed logits, hidden state, or cache visibility. R1 candidate 23 was computed but replaced by correction 88. The next anchors are $`\left[99,88\right]`$.
 
 ## 15. Real branches for static, compact, and cap-accept
 
 | Branch | `layout` | Target forward | Acceptance cutoff | Hidden commit |
 |---|---|---|---|---|
 | static | `None` | `[B·W]` | no dynamic cap | by `commit_lens` |
-| compact | `RaggedVerifyLayout` | `[T_v]`, then scatter | `verify_lens` | computed prefix only |
+| compact | `RaggedVerifyLayout` | $`\left[T_{v}\right]`$, then scatter | `verify_lens` | computed prefix only |
 | cap-accept | layout exists but full verify | `[B·W]` | `verify_lens` | gated commit |
 
 For debugging, first compare static and compact under greedy decoding and an identical seed. Then add sampling, grammar, DP attention, and graph folding one feature at a time.
@@ -769,8 +820,17 @@ Every round should satisfy:
 ```text
 draft_tokens.shape             == [B,γ]
 verify_ids_2d.shape            == [B,γ+1]
-1 <= verify_lens[r]            <= γ+1
-commit_lens[r]                 <= verify_lens[r]
+```
+
+```math
+1 \le {\mathrm{verify\_lens}}_{r} \le \gamma+1
+```
+
+```math
+{\mathrm{commit\_lens}}_{r} \le {\mathrm{verify\_lens}}_{r}
+```
+
+```text
 new_seq_lens[r]                == prefix_lens[r] + commit_lens[r]
 next_anchor[r]                 == bonus[r]
 compact valid rows             == sum(verify_lens)
@@ -811,7 +871,7 @@ _handle_dspark
   -> make_next_draft_input
 ```
 
-At each breakpoint print only dtype, device, shape, lengths for two requests, and a few token ids. Never dump full `[B,γ,V]` logits.
+At each breakpoint print only dtype, device, shape, lengths for two requests, and a few token ids. Never dump full $`\left[B,\gamma,V\right]`$ logits.
 
 Then enable, one at a time:
 
@@ -844,7 +904,7 @@ After this chapter, answer without looking at the diagrams:
 2. What do `draft_block_ids`, `draft_tokens`, and `verify_ids_2d` each contain?
 3. Why must sampling retain corrected draft logits while greedy can retain only tokens?
 4. Why might current confidence not determine the current verification budget?
-5. If compact target computes `[T_v]` rows, why does the acceptor still see `[B·W,V]`?
+5. If compact target computes $`\left[T_{v}\right]`$ rows, why does the acceptor still see `[B·W,V]`?
 6. Why does `commit_lens` contain one more token than `correct_len`?
 7. Why do temporary KV rows for a rejected tail not become next-round state?
 8. Why does KDA/Mamba use `commit_lens-1` to select recurrent state?

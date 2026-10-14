@@ -22,10 +22,15 @@
 
 均匀一维切分：
 
-```text
-base = total // blockDim
-extra = total % blockDim
+```math
+\mathrm{base}=\left\lfloor\frac{\mathrm{total}}{\mathrm{blockDim}}\right\rfloor
+```
 
+```math
+\mathrm{extra}=\mathrm{total}\bmod \mathrm{blockDim}
+```
+
+```text
 前 extra 个核：base + 1
 其余核：base
 ```

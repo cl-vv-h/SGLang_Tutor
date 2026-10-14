@@ -30,14 +30,14 @@ flowchart LR
 |---|---|
 | `B` | 当前 decode batch 的请求数 |
 | `γ` | 每个请求最多提出的 draft token 数，也称 block size |
-| `W=γ+1` | target 的逻辑验证窗口宽度；多出的 1 行是 anchor/current token |
+| $`W=\gamma+1`$ | target 的逻辑验证窗口宽度；多出的 1 行是 anchor/current token |
 | `S_r` | 请求 `r` 在本轮前已经提交的序列长度 |
 | `D` | draft backbone hidden size |
 | `D_t` | target hidden/context feature 的宽度 |
 | `V` | 词表大小 |
-| `r` | Markov 低秩空间宽度，论文常用 `r=256` |
-| `h_{r,k}` | 请求 `r` 的第 `k` 个 draft 位置 hidden，形状 `[D]` |
-| `U_{r,k}` | 并行 backbone 给出的 base logits，形状 `[V]` |
+| `r` | Markov 低秩空间宽度，论文常用 $`r=256`$ |
+| `h_{r,k}` | 请求 `r` 的第 `k` 个 draft 位置 hidden，形状 $`\left[D\right]`$ |
+| `U_{r,k}` | 并行 backbone 给出的 base logits，形状 $`\left[V\right]`$ |
 | `x_{r,k}` | 第 `k` 个实际采样出的 draft token id |
 | `c_{r,k}` | 第 `k` 个候选在此前候选已接受条件下继续被接受的概率估计 |
 | `a_{r,k}` | draft 前缀长度至少达到 `k` 的生存概率 |
@@ -108,7 +108,7 @@ DSpark 复用 DFlash 风格的 block drafter。给定每个请求本轮的 ancho
 [x_0, MASK, MASK, ..., MASK]
 ```
 
-逻辑 shape 为 `[B, γ]`。某些 checkpoint 采用“不从 anchor 采样”的布局，会多保留一行查询，运行时再去掉 anchor hidden；不要仅凭某个中间 tensor 的行数推断 `γ`。
+逻辑 shape 为 $`\left[B,\gamma\right]`$。某些 checkpoint 采用“不从 anchor 采样”的布局，会多保留一行查询，运行时再去掉 anchor hidden；不要仅凭某个中间 tensor 的行数推断 `γ`。
 
 并行 draft block 允许块内位置彼此交互，并把 target 的上下文特征注入 draft attention。若从 target 的若干层取出特征：
 
@@ -127,12 +127,12 @@ V_i=[W_i^V H_{ctx}; W_i^V H_d].
 
 | 阶段 | Tensor | Shape |
 |---|---|---|
-| block token id | `draft_block_ids` | `[B, γ]` |
+| block token id | `draft_block_ids` | $`\left[B,\gamma\right]`$ |
 | 展平后的 token id | `input_ids` | `[B·γ]` |
 | token embedding | `E` | `[B·γ, D]` |
-| draft hidden | `H_d` | `[B, γ, D]` |
-| 共享 target LM head 权重 | `W_lm` | `[V, D]`，TP 下按词表切分 |
-| base logits | `U=H_d W_lm^T` | `[B, γ, V]` |
+| draft hidden | `H_d` | $`\left[B,\gamma,D\right]`$ |
+| 共享 target LM head 权重 | `W_lm` | $`\left[V,D\right]`$，TP 下按词表切分 |
+| base logits | $`U=H_{d} W_{\mathrm{lm}}^{\mathsf T}`$ | $`\left[B,\gamma,V\right]`$ |
 
 ```mermaid
 flowchart TB
@@ -183,12 +183,12 @@ z_k=U_k+b_k,\qquad x_k\sim\mathrm{softmax}(z_k/T).
 
 | 对象 | 单请求单步 | Batch 单步 | 整块 |
 |---|---:|---:|---:|
-| previous token id | `[]` | `[B]` | `[B,γ]` |
-| Markov embedding | `[r]` | `[B,r]` | 按步产生 |
-| base logits | `[V]` | `[B,V]` | `[B,γ,V]` |
-| transition bias | `[V]` | `[B,V]` | 可不持久化 |
-| corrected logits | `[V]` | `[B,V]` | 采样模式可能保存 `[B,γ,V]` |
-| sampled token | `[]` | `[B]` | `[B,γ]` |
+| previous token id | `[]` | $`\left[B\right]`$ | $`\left[B,\gamma\right]`$ |
+| Markov embedding | $`\left[r\right]`$ | $`\left[B,r\right]`$ | 按步产生 |
+| base logits | $`\left[V\right]`$ | $`\left[B,V\right]`$ | $`\left[B,\gamma,V\right]`$ |
+| transition bias | $`\left[V\right]`$ | $`\left[B,V\right]`$ | 可不持久化 |
+| corrected logits | $`\left[V\right]`$ | $`\left[B,V\right]`$ | 采样模式可能保存 $`\left[B,\gamma,V\right]`$ |
+| sampled token | `[]` | $`\left[B\right]`$ | $`\left[B,\gamma\right]`$ |
 
 计算依赖是串行的，但串行部分只有 lookup、低秩投影与 sampling；昂贵的 transformer 层仍只运行一次：
 
@@ -245,7 +245,7 @@ DSpark confidence head 对每个位置输出：
 c_k\approx P(A_k=1\mid A_1=\cdots=A_{k-1}=1,\text{draft state}),
 ```
 
-其中 `A_k=1` 表示第 `k` 个候选通过验证。典型输入是 draft hidden 与前一 token 的 Markov embedding：
+其中 $`A_{k}=1`$ 表示第 `k` 个候选通过验证。典型输入是 draft hidden 与前一 token 的 Markov embedding：
 
 ```math
 c_k=\sigma\left(w^T[h_k;W_1[x_{k-1}]]\right).
@@ -279,9 +279,12 @@ a_j=P(A_1=\cdots=A_j=1)\approx\prod_{i=1}^{j}c_i.
 
 例如：
 
-```text
-c = [0.90, 0.80, 0.50, 0.20]
-a = [0.90, 0.72, 0.36, 0.072]
+```math
+c=\left[0.9,0.8,0.5,0.2\right]
+```
+
+```math
+a=\left[0.9,0.72,0.36,0.072\right]
 ```
 
 直接按 `c_k` 排序会错，因为后面的 token 不能越过前面的 token 单独验证；scheduler 应按 prefix survival `a_k` 考虑边际收益。
@@ -322,7 +325,7 @@ E\leftarrow E+a_{r,j}.
 
 调度器把所有可追加的 `(request, prefix-position)` 按 `a_{r,j}` 排序，逐个扩充预算并寻找 `Θ` 最大点。最终每个请求得到一个前缀长度 `ℓ_r`，绝不能得到中间有洞的集合。
 
-### 6.1 具体例子：`B=3, γ=4`
+### 6.1 具体例子：$`B=3,\qquad \gamma=4`$
 
 假设三个请求的条件 confidence 为：
 
@@ -340,12 +343,18 @@ R1: [0.700, 0.420, 0.210, 0.084]
 R2: [0.990, 0.941, 0.847, 0.678]
 ```
 
-初始每请求只含 anchor：`ℓ=[1,1,1]`、`N=3`、`E=3`。若硬件曲线显示预算 9 最优，则按边际收益加入 6 个候选，可能得到：
+初始每请求只含 anchor：$`l=\left[1,1,1\right]`$、$`N=3`$、$`E=3`$。若硬件曲线显示预算 9 最优，则按边际收益加入 6 个候选，可能得到：
 
 ```text
 选中 R2 的前 4 个、R0 的前 2 个
-ℓ = [3, 1, 5]        # 长度含 anchor
-N = 3 + 1 + 5 = 9
+```
+
+```math
+l=\left[3,1,5\right]\qquad\text{长度含 anchor}
+```
+
+```math
+N=3+1+5=9
 ```
 
 不能仅取全局 top-6 后留下 `R0` 第 2 个却丢掉第 1 个；实现必须强制 prefix closure。
@@ -374,7 +383,7 @@ SGLang 的 production 路径可维护 request generation 与 confidence ring，�
 
 ## 7. Ragged verify：把不同长度压成一批
 
-若 `ℓ=[3,1,5]`，固定窗口计算量是 `B·W=3·5=15` 行，compact verify 只需 `T_v=9` 行：
+若 $`l=\left[3,1,5\right]`$，固定窗口计算量是 $`B\cdot W=3\cdot 5=15`$ 行，compact verify 只需 $`T_{v}=9`$ 行：
 
 ```text
 fixed-stride:
@@ -390,12 +399,12 @@ front-packed compact:
 
 | Metadata | Shape | 用途 |
 |---|---:|---|
-| `verify_lens` | `[B]` | 每请求实际验证的行数 |
-| `cu_seqlens` / offsets | `[B+1]` | 每请求在 compact buffer 中的起止位置 |
-| compact token ids | `[T_v]` | target 的实际输入 |
-| positions | `[T_v]` | 每行的绝对位置 |
-| cache locations | `[T_v]` | 临时 target KV slot |
-| scatter index | `[T_v]` | 将 compact 结果映射回逻辑 `[B,W]` |
+| `verify_lens` | $`\left[B\right]`$ | 每请求实际验证的行数 |
+| `cu_seqlens` / offsets | $`\left[B+1\right]`$ | 每请求在 compact buffer 中的起止位置 |
+| compact token ids | $`\left[T_{v}\right]`$ | target 的实际输入 |
+| positions | $`\left[T_{v}\right]`$ | 每行的绝对位置 |
+| cache locations | $`\left[T_{v}\right]`$ | 临时 target KV slot |
+| scatter index | $`\left[T_{v}\right]`$ | 将 compact 结果映射回逻辑 $`\left[B,W\right]`$ |
 
 target forward 后常把 logits/hidden scatter 回固定 stride `[B,W,...]`，这样 greedy/rejection sampling、logprob、grammar 等公共逻辑不必全部理解 ragged layout。
 
@@ -444,8 +453,14 @@ p'_k(x)=\frac{\max(p_k(x)-q_k(x),0)}
 
 ```text
 correct_len_r = 通过验证的 draft token 数
-commit_len_r  = correct_len_r + 1 个 bonus/correction
-new_seq_len_r = S_r + commit_len_r
+```
+
+```math
+\mathrm{commit\_len\_r} = \mathrm{correct\_len\_r} + 1 \text{个} \mathrm{bonus}/\mathrm{correction}
+```
+
+```math
+\mathrm{new\_seq\_len\_r}=S_{r}+\mathrm{commit\_len\_r}
 ```
 
 若预算把窗口裁到 `ℓ_r`，实现还必须把 commit 限制在已计算的行内，并只提交对应 KV/hidden state。
@@ -493,17 +508,17 @@ TV 权重较高体现了目标：draft 不只是猜中训练 label，而要让�
 
 | 顺序 | 阶段 | 输入 shape | 输出 shape |
 |---:|---|---|---|
-| 1 | 准备 block | bonus/anchor `[B]` | ids `[B,γ]` |
-| 2 | draft backbone | ids `[B,γ]`、context cache | hidden `[B,γ,D]` |
-| 3 | shared LM head | hidden `[B,γ,D]` | base logits `[B,γ,V]` |
-| 4 | Markov sampling | base logits + previous ids | tokens `[B,γ]`；sampling 时可保留 corrected logits `[B,γ,V]` |
-| 5 | confidence | hidden + previous embeddings | confidence `[B,γ]` |
-| 6 | schedule | confidence `[B,γ]` + SPS table | verify lengths `[B]` |
-| 7 | build logical verify | anchor `[B,1]` + tokens `[B,γ]` | ids `[B,γ+1]` |
-| 8 | compact | ids + lengths | compact ids `[T_v]` |
-| 9 | target verify | compact ids `[T_v]` | logits `[T_v,V]`、hidden `[T_v,D_t]` |
-| 10 | scatter/accept | logical logits `[B,γ+1,V]` | commit lengths `[B]`、bonus `[B]`、out tokens |
-| 11 | commit state | accepted prefix metadata | new seq lens `[B]`、持久 target/draft KV |
+| 1 | 准备 block | bonus/anchor $`\left[B\right]`$ | ids $`\left[B,\gamma\right]`$ |
+| 2 | draft backbone | ids $`\left[B,\gamma\right]`$、context cache | hidden $`\left[B,\gamma,D\right]`$ |
+| 3 | shared LM head | hidden $`\left[B,\gamma,D\right]`$ | base logits $`\left[B,\gamma,V\right]`$ |
+| 4 | Markov sampling | base logits + previous ids | tokens $`\left[B,\gamma\right]`$；sampling 时可保留 corrected logits $`\left[B,\gamma,V\right]`$ |
+| 5 | confidence | hidden + previous embeddings | confidence $`\left[B,\gamma\right]`$ |
+| 6 | schedule | confidence $`\left[B,\gamma\right]`$ + SPS table | verify lengths $`\left[B\right]`$ |
+| 7 | build logical verify | anchor $`\left[B,1\right]`$ + tokens $`\left[B,\gamma\right]`$ | ids $`\left[B,\gamma+1\right]`$ |
+| 8 | compact | ids + lengths | compact ids $`\left[T_{v}\right]`$ |
+| 9 | target verify | compact ids $`\left[T_{v}\right]`$ | logits $`\left[T_{v},V\right]`$、hidden $`\left[T_{v},D_{t}\right]`$ |
+| 10 | scatter/accept | logical logits $`\left[B,\gamma+1,V\right]`$ | commit lengths $`\left[B\right]`$、bonus $`\left[B\right]`$、out tokens |
+| 11 | commit state | accepted prefix metadata | new seq lens $`\left[B\right]`$、持久 target/draft KV |
 
 ## 12. 性能边界与常见误解
 
@@ -545,10 +560,10 @@ DSpark 不是“DFlash 加一个阈值”，而是把半自回归头、可校准
 
 ## 14. 自测题
 
-1. 为什么 `γ=7` 时 target 逻辑窗口是 8，而不是 7？
+1. 为什么 $`\gamma=7`$ 时 target 逻辑窗口是 8，而不是 7？
 2. 为什么低秩 Markov head 串行执行，却仍能比自回归小模型便宜？
-3. 给定 `c=[0.8,0.7,0.5]`，三个 prefix survival 分别是多少？
-4. 为什么 scheduler 应优化 `expected commits × SPS`，而不是简单设置 `c_k>0.5`？
+3. 给定 $`c=\left[0.8,0.7,0.5\right]`$，三个 prefix survival 分别是多少？
+4. 为什么 scheduler 应优化 `expected commits × SPS`，而不是简单设置 $`c_{k} \gt 0.5`$？
 5. `compact` 和 `cap-accept` 的 target 计算量有什么本质区别？
 6. confidence 预测错误为什么不应改变最终 token 分布？哪些实现 bug 会破坏这个结论？
 7. ragged verify 后为什么还要 scatter 回 `[B,W,...]`？

@@ -19,16 +19,31 @@ Request with lora_id → Scheduler → ScheduleBatch → ForwardBatch
 
 ## 3. Key Operations
 
-```text
 Standard LoRA forward:
-  y = W_base @ x + (B @ A) @ x * scaling
 
+```math
+y=W_{\mathrm{base}}\,x+B\,A\,x\cdot \mathrm{scaling}
+```
+
+```text
 SGLang optimized (segment-based):
-  For each unique LoRA adapter in batch:
-    affected_tokens = find_tokens_with_lora(adapter_id)
-    delta = sgmv_shrink(affected_x, A)  # x @ A^T, segmented
-    delta = sgmv_expand(delta, B)        # delta @ B^T, segmented
-    y[affected_tokens] += delta * scaling
+For each unique LoRA adapter in batch:
+```
+
+```math
+\mathrm{affected\_tokens} = \mathrm{find\_tokens\_with\_lora}\left(\mathrm{adapter\_id}\right)
+```
+
+```math
+\delta = \mathrm{sgmv\_shrink}\left(\mathrm{affected\_x}, A\right) \qquad\text{x @ A^T, segmented}
+```
+
+```math
+\delta = \mathrm{sgmv\_expand}\left(\delta, B\right) \qquad\text{delta @ B^T, segmented}
+```
+
+```math
+y\left[\mathrm{affected\_tokens}\right] += \delta \cdot  \mathrm{scaling}
 ```
 
 ## 4. LoRABatchInfo

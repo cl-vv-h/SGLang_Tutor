@@ -10,10 +10,16 @@ x = [x_0, x_1, ..., x_(S-1)]
 
 普通 decode 每一轮只得到一个新 token：
 
+```math
+p\left(. \mid  x\right) = \mathrm{TargetModel}\left(x\right)
+```
+
 ```text
-p(. | x) = TargetModel(x)
 y ~ p(. | x)
-x <- concat(x, y)
+```
+
+```math
+x \lt -\mathrm{concat}\left(x,y\right)
 ```
 
 这意味着生成 `N` 个 token 至少需要 `N` 次 target model forward。即使每次 decode 的输入只有一个 token，大模型仍然要经历 embedding、所有 decoder layers、attention、MLP/MoE、LM head、sampling、KV 写入和调度开销。
@@ -88,8 +94,8 @@ y_i ~ q_i: 真正提出的候选 y_i 是从 q_i 这个分布里采样出来的
 
 如果是 greedy draft，也可以把 `y_i ~ q_i` 理解成：
 
-```text
-y_i = argmax_v q_i(v)
+```math
+y_{i} = \mathrm{argmax\_v} q_{i}\left(v\right)
 ```
 
 Draft path 的来源很多：
@@ -133,8 +139,11 @@ V = vocab size
 
 线性 speculative decoding 中，draft token 通常可以整理为：
 
+```math
+\mathrm{shape}\left(\mathrm{draft\_tokens}\right)=\left[B,K\right]
+```
+
 ```text
-draft_tokens: [B,K]
 draft_probs:  [B,K,V]    # 如果需要严格拒绝采样
 target_probs: [B,K+1,V]  # K 个候选位置 + 末尾 bonus/correction 位置
 ```
@@ -146,11 +155,17 @@ y_i ~ q_i(. | prefix, y_1, ..., y_(i-1))
 p_i(. | prefix, y_1, ..., y_(i-1)) = target 用来验证 y_i 的分布
 ```
 
-target verify 的输入不是普通 decode 的 `[B]` 个新 token，而是每条请求多个候选 token：
+target verify 的输入不是普通 decode 的 $`\left[B\right]`$ 个新 token，而是每条请求多个候选 token：
 
 ```text
 verify_input_ids: [B*K]        # packed linear layout
-positions:        [B*K]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[B\cdot K\right]
+```
+
+```text
 custom_mask:      允许每个候选位置只看 prefix + earlier draft tokens
 ```
 
@@ -168,29 +183,44 @@ custom_mask:      允许每个候选位置只看 prefix + earlier draft tokens
 
 假设当前正式前缀是 `x`，draft 猜了 3 个 token：
 
-```text
-draft tokens = [A, B, C]
+```math
+\text{draft tokens}= \left[A, B, C\right]
 ```
 
 target 需要验证的是：
 
-```text
 第 1 个 draft token A 是否合理:
-    p_1 = P_target(next token | x)
-    用 p_1 检查 A
+
+```math
+p_{1} = P_{\mathrm{target}}\left(\mathrm{next} \mathrm{token} \mid  x\right)
+```
+
+用 p_1 检查 A
 
 第 2 个 draft token B 是否合理:
-    p_2 = P_target(next token | x, A)
-    用 p_2 检查 B
+
+```math
+p_{2} = P_{\mathrm{target}}\left(\mathrm{next} \mathrm{token} \mid  x, A\right)
+```
+
+用 p_2 检查 B
 
 第 3 个 draft token C 是否合理:
-    p_3 = P_target(next token | x, A, B)
-    用 p_3 检查 C
 
-如果 A、B、C 全部接受，还需要额外生成一个 bonus token:
-    p_4 = P_target(next token | x, A, B, C)
-    从 p_4 采样 bonus token
+```math
+p_{3} = P_{\mathrm{target}}\left(\mathrm{next} \mathrm{token} \mid  x, A, B\right)
 ```
+
+```text
+用 p_3 检查 C
+如果 A、B、C 全部接受，还需要额外生成一个 bonus token:
+```
+
+```math
+p_{4} = P_{\mathrm{target}}\left(\mathrm{next} \mathrm{token} \mid  x, A, B, C\right)
+```
+
+从 p_4 采样 bonus token
 
 所以 target verify 需要的是 `K+1` 组分布：
 
@@ -257,7 +287,7 @@ logits at C      -> P(next | x,A,B,C)    -> 用来采样 bonus token
 |---|---|
 | 复用上一轮已经得到的 prefix 末尾 logits | 如果系统已经保存了 `P(next | x)`，可直接用它验证 `y_1` |
 | 在 verify block 中加入 anchor/root token | 让同一次 verify forward 直接产出 `p_1...p_(K+1)` |
-| 在 metadata 中把 root logits 和 draft logits 对齐 | 对外仍表现为 `target_probs: [B,K+1,V]` |
+| 在 metadata 中把 root logits 和 draft logits 对齐 | 对外仍表现为 $`\mathrm{shape}\left(\mathrm{target\_probs}\right)=\left[B,K+1,V\right]`$ |
 
 这些实现细节可以不同，但语义必须一致：
 
@@ -285,7 +315,7 @@ target forward on x,A,B   -> 检查 C
 验证决策是顺序的，但 target 计算可以并行。
 ```
 
-也就是说，接受时要从 `A` 开始逐个判断；但 target model 的大部分计算可以在一次 short prefill/extend forward 中把 `[A,B,C]` 这段候选一起算完。
+也就是说，接受时要从 `A` 开始逐个判断；但 target model 的大部分计算可以在一次 short prefill/extend forward 中把 $`\left[A,B,C\right]`$ 这段候选一起算完。
 
 ## 5. Tree verification 的形状
 
@@ -326,14 +356,14 @@ Tree verification 的优势是候选更丰富，target 可能接受更长路径�
 
 ### 6.1 普通 decode 成本
 
-```text
-普通 decode 总成本 ≈ 生成 token 数 × 每次 target decode 成本
+```math
+\text{普通} \mathrm{decode} \text{总成本} \approx  \text{生成} \mathrm{token} \text{数} \times  \text{每次} \mathrm{target} \mathrm{decode} \text{成本}
 ```
 
 写成符号是：
 
-```text
-cost_normal ≈ N × C_T
+```math
+\mathrm{cost\_normal}\approx N\cdot C_{T}
 ```
 
 | 符号 | 含义 |
@@ -356,10 +386,12 @@ cost_normal ≈ N × C_T
 
 所以单轮成本可以写成：
 
-```text
-投机单轮成本 ≈ draft 成本 + target verify 成本 + 系统额外成本
+```math
+\text{投机单轮成本} \approx  \mathrm{draft} \text{成本} + \mathrm{target} \mathrm{verify} \text{成本} + \text{系统额外成本}
+```
 
-cost_spec_round ≈ K × C_D + C_V(K) + C_overhead
+```math
+\mathrm{cost\_spec\_round}\approx K\cdot C_{D}+C_{V}\left(K\right)+C_{\mathrm{overhead}}
 ```
 
 | 符号 | 含义 |
@@ -375,14 +407,14 @@ cost_spec_round ≈ K × C_D + C_V(K) + C_overhead
 
 一轮投机解码提交的 token 数通常是：
 
-```text
-本轮提交 token 数 = 接受的 draft token 数 + 1
+```math
+\text{本轮提交 token 数}= \text{接受的} \mathrm{draft} \mathrm{token} \text{数} + 1
 ```
 
 写成符号是：
 
-```text
-tokens_committed = A + 1
+```math
+\mathrm{tokens\_committed}=A+1
 ```
 
 其中：
@@ -394,15 +426,25 @@ tokens_committed = A + 1
 
 例子：
 
-```text
-K = 4
-draft = [a,b,c,d]
+```math
+K=4
+```
 
+```math
+\mathrm{draft}=\left[a,b,c,d\right]
+```
+
+```text
 接受 [a,b]，拒绝 c，target 修正为 x
 本轮提交 [a,b,x]
+```
 
-A = 2
-tokens_committed = A + 1 = 3
+```math
+A=2
+```
+
+```math
+\mathrm{tokens\_committed}=A+1=3
 ```
 
 ### 6.4 粗略 speedup 怎么读
@@ -417,14 +459,22 @@ tokens_committed = A + 1 = 3
 
 写成符号是：
 
-```text
-speedup ≈ ((平均接受 draft token 数 + 1) × target 单步成本)
-          ------------------------------------------------------
-          (draft 成本 + target verify 成本 + 系统额外成本)
+```math
+\mathrm{speedup} \approx  \left(\left(\text{平均接受} \mathrm{draft} \mathrm{token} \text{数} + 1\right) \times  \mathrm{target} \text{单步成本}\right)
+```
 
-speedup ≈ ((E[A] + 1) × C_T)
-          ---------------------------
-          (K × C_D + C_V(K) + C_overhead)
+```text
+------------------------------------------------------
+(draft 成本 + target verify 成本 + 系统额外成本)
+```
+
+```math
+\mathrm{speedup}\approx \left({E}_{A}+1\right)\cdot C_{T}
+```
+
+```text
+---------------------------
+(K × C_D + C_V(K) + C_overhead)
 ```
 
 这条公式告诉我们四件事：
@@ -436,22 +486,44 @@ speedup ≈ ((E[A] + 1) × C_T)
 
 一个数字例子：
 
-```text
 假设:
-  C_T = 10 ms
-  K × C_D = 3 ms
-  C_V(K) = 13 ms
-  C_overhead = 2 ms
-  平均 A = 3
+
+```math
+C_{T} = 10 \mathrm{ms}
+```
+
+```math
+\text{K × C\_D}= 3 \mathrm{ms}
+```
+
+```math
+C_{V}\left(K\right) = 13 \mathrm{ms}
+```
+
+```math
+C_{\mathrm{overhead}} = 2 \mathrm{ms}
+```
+
+```math
+\text{平均 A}= 3
+```
 
 不用投机生成 4 个 token 大约需要:
-  (3 + 1) × 10 = 40 ms
+
+```math
+\left(3 + 1\right) \times  10 = 40 \mathrm{ms}
+```
 
 投机一轮成本:
-  3 + 13 + 2 = 18 ms
+
+```math
+3 + 13 + 2 = 18 \mathrm{ms}
+```
 
 粗略 speedup:
-  40 / 18 ≈ 2.2x
+
+```math
+40 / 18 \approx  2.2x
 ```
 
 如果平均 `A` 只有 0，那么投机一轮只提交 1 个 token，却仍然付出了 draft 和 verify 成本，就很可能变慢。
@@ -498,11 +570,12 @@ Attention 和 MLP/MoE 可以在更大的 token 维度上并行执行，launch �
 
 严格投机采样的数学核心是：
 
-```text
-接受概率 = min(1, target 认为 y 的概率 / draft 认为 y 的概率)
+```math
+\text{接受概率} = \mathrm{min}\left(1, \mathrm{target} \text{认为} y \text{的概率} / \mathrm{draft} \text{认为} y \text{的概率}\right)
+```
 
 如果拒绝:
-    从 target 比 draft 更偏好的剩余概率里重新采样一个 token
-```
+
+从 target 比 draft 更偏好的剩余概率里重新采样一个 token
 
 下一讲会证明这条规则为什么能恢复目标分布。

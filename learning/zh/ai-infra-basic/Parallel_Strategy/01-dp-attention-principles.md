@@ -35,11 +35,11 @@ flowchart TD
 
 ## 2. 普通 DP 与 DP Attention 的进程数不同
 
-固定 `pp_size=1`，比较同样写成 `tp_size=4, dp_size=2` 的两种配置：
+固定 $`\mathrm{pp\_size}=1`$，比较同样写成 $`\mathrm{tp\_size}=4,\qquad \mathrm{dp\_size}=2`$ 的两种配置：
 
 | 项目 | 普通 DP，关闭 DP Attention | 开启 DP Attention |
 |---|---|---|
-| 计算设备数 | `4 × 2 = 8` | `4` |
+| 计算设备数 | $`4\cdot 2=8`$ | `4` |
 | 模型并行 world | 两个独立的 4-rank world | 一个 4-rank world |
 | Attention TP | 每副本为 4 | 每 Attention DP 子组为 2 |
 | 请求分发 | 分到完整模型副本 | 分到 Attention DP 子组 |
@@ -56,7 +56,10 @@ flowchart TD
 P = tp_size                   当前模型并行 world 的 rank 数
 D = attention_dp_size         enable_dp_attention ? dp_size : 1
 C = attn_cp_size              Attention context parallel 数
-T = attention_tp_size = P / (D*C)
+```
+
+```math
+T=\mathrm{attention\_tp\_size}=\frac{P}{D\cdot C}
 ```
 
 必须满足整除关系。在源码中，rank 的排列顺序是 `(DP, CP, TP)`，TP 变化最快：
@@ -69,14 +72,14 @@ p=(dC+c)T+a
 a=p\bmod T,\qquad c=\lfloor p/T\rfloor\bmod C,\qquad d=\lfloor p/(TC)\rfloor
 ```
 
-本章主例子取 `P=4,D=2,C=1,T=2`：
+本章主例子取 $`P=4,\qquad D=2,\qquad C=1,\qquad T=2`$：
 
 | 模型 world rank `p` | Attention DP `d` | Attention TP `a` | Attention TP group | 负责请求 |
 |---:|---:|---:|---|---|
-| 0 | 0 | 0 | `[0,1]` | A/B |
-| 1 | 0 | 1 | `[0,1]` | A/B |
-| 2 | 1 | 0 | `[2,3]` | C/D |
-| 3 | 1 | 1 | `[2,3]` | C/D |
+| 0 | 0 | 0 | $`\left[0,1\right]`$ | A/B |
+| 1 | 0 | 1 | $`\left[0,1\right]`$ | A/B |
+| 2 | 1 | 0 | $`\left[2,3\right]`$ | C/D |
+| 3 | 1 | 1 | $`\left[2,3\right]`$ | C/D |
 
 ```mermaid
 flowchart LR
@@ -95,7 +98,7 @@ flowchart LR
     DP0 <-->|"FFN/MoE 所需通信"| DP1
 ```
 
-若增加 CP，例如 `P=8,D=2,C=2,T=2`：Attention TP groups 是 `[0,1]、[2,3]、[4,5]、[6,7]`；Attention CP groups 是 `[0,2]、[1,3]、[4,6]、[5,7]`。DP 分不同请求，CP 分同一请求的上下文，二者解决的维度不同。
+若增加 CP，例如 $`P=8,\qquad D=2,\qquad C=2,\qquad T=2`$：Attention TP groups 是 `[0,1]、[2,3]、[4,5]、[6,7]`；Attention CP groups 是 `[0,2]、[1,3]、[4,6]、[5,7]`。DP 分不同请求，CP 分同一请求的上下文，二者解决的维度不同。
 
 ## 4. 为什么请求可以分开做 Attention
 
@@ -117,21 +120,51 @@ flowchart LR
 
 其中 `Dk` 是 Query/Key 的向量宽度，`Dv` 是 Value 的向量宽度：
 
-```text
 请求 A：
-Q_A [1,Dk] @ K_A.T [Dk,3] -> scores_A [1,3]
-scores_A / sqrt(Dk)       -> scaled_scores_A [1,3]
-softmax（沿 3 个位置）    -> weights_A [1,3]
-weights_A @ V_A [3,Dv]    -> O_A [1,Dv]
 
-请求 B：
-Q_B [1,Dk] @ K_B.T [Dk,2] -> scores_B [1,2]
-scores_B / sqrt(Dk)       -> scaled_scores_B [1,2]
-softmax（沿 2 个位置）    -> weights_B [1,2]
-weights_B @ V_B [2,Dv]    -> O_B [1,Dv]
+```math
+Q_A\in\mathbb{R}^{1\times D_k},\quad K_A\in\mathbb{R}^{3\times D_k},\quad V_A\in\mathbb{R}^{3\times D_v}
 ```
 
-例如，A 的三个分数经过 softmax 得到 `[0.2,0.5,0.3]`，那么 A 的输出就是 `0.2*v_A1 + 0.5*v_A2 + 0.3*v_A3`。B 的 Value 完全没有参与这个加权和，B 的分数也没有参与 A 的 softmax 分母。
+```math
+S_A=Q_AK_A^{\mathsf T}\in\mathbb{R}^{1\times 3}
+```
+
+```math
+\widetilde{S}_A=\frac{S_A}{\sqrt{D_k}}\in\mathbb{R}^{1\times 3}
+```
+
+```math
+P_A=\mathrm{softmax}_{\mathrm{positions}}(\widetilde{S}_A)\in\mathbb{R}^{1\times 3}
+```
+
+```math
+O_A=P_AV_A\in\mathbb{R}^{1\times D_v}
+```
+
+请求 B：
+
+```math
+Q_B\in\mathbb{R}^{1\times D_k},\quad K_B\in\mathbb{R}^{2\times D_k},\quad V_B\in\mathbb{R}^{2\times D_v}
+```
+
+```math
+S_B=Q_BK_B^{\mathsf T}\in\mathbb{R}^{1\times 2}
+```
+
+```math
+\widetilde{S}_B=\frac{S_B}{\sqrt{D_k}}\in\mathbb{R}^{1\times 2}
+```
+
+```math
+P_B=\mathrm{softmax}_{\mathrm{positions}}(\widetilde{S}_B)\in\mathbb{R}^{1\times 2}
+```
+
+```math
+O_B=P_BV_B\in\mathbb{R}^{1\times D_v}
+```
+
+例如，A 的三个分数经过 softmax 得到 `[0.2,0.5,0.3]`，那么 A 的输出就是 $`0.2\cdot v_{\mathrm{A1}}+0.5\cdot v_{\mathrm{A2}}+0.3\cdot v_{\mathrm{A3}}`$。B 的 Value 完全没有参与这个加权和，B 的分数也没有参与 A 的 softmax 分母。
 
 因此，只要保持各自的输入、权重和可见 KV 不变，把 A 放在 DP0、B 放在 DP1，在数学上仍然得到相同的输出（实际浮点执行可能有舍入差异）。DP 组内部若还有 TP，各 rank 仍需要协作完成该组的 Attention；“请求独立”不等于“每张卡都能独自完成全部计算”。
 
@@ -174,11 +207,24 @@ X_B [1,H] ─┘                              ├─ 第 0 行 -> A
 
 用 row-vector 记法，SwiGLU FFN 的完整形状变化为：
 
-```text
-X [2,H] @ W_gate [H,I] -> G [2,I]
-X [2,H] @ W_up   [H,I] -> U [2,I]
-SiLU(G) * U            -> Z [2,I]   # 逐元素乘；不混合两行
-Z [2,I] @ W_down [I,H] -> Y [2,H]
+```math
+X\in\mathbb{R}^{2\times H},\quad W_{\mathrm{gate}},W_{\mathrm{up}}\in\mathbb{R}^{H\times I},\quad W_{\mathrm{down}}\in\mathbb{R}^{I\times H}
+```
+
+```math
+G=XW_{\mathrm{gate}}\in\mathbb{R}^{2\times I}
+```
+
+```math
+U=XW_{\mathrm{up}}\in\mathbb{R}^{2\times I}
+```
+
+```math
+Z=\mathrm{SiLU}(G)\odot U\in\mathbb{R}^{2\times I}
+```
+
+```math
+Y=ZW_{\mathrm{down}}\in\mathbb{R}^{2\times H}
 ```
 
 `I` 是 FFN 的中间维度。每个矩阵乘法都对输入的每一行应用相同权重，A 的结果只由 A 那一行决定；把两行合成一个更大的 GEMM，是合批执行，不是让两个请求交换上下文。
@@ -196,29 +242,43 @@ o_{r,h,i}=\sum_{j\in\mathcal{V}_r(i)}
 
 这只是把 4.2 的过程写成通用形式：
 
-- $`q_{r,h,i}`$：请求 r 在位置 i、head h 上的 Query，shape 为 `[Dk]`。
+- $`q_{r,h,i}`$：请求 r 在位置 i、head h 上的 Query，shape 为 $`\left[\mathrm{Dk}\right]`$。
 - $`g(h)`$：GQA 中该 Query head 对应的 KV head。
 - $`\mathcal{V}_r(i)`$：请求 r 在位置 i 可以看到的 token 位置集合，不包含其他请求的位置。
-- $`k_{r,g(h),j}`$、$`v_{r,g(h),j}`$：这个请求在可见位置 j 上的 Key/Value，shape 分别为 `[Dk]`、`[Dv]`。
-- 内积得到每个位置的标量分数，softmax 只沿该请求的可见位置归一化；最终加权求和得到 `[Dv]` 输出。
+- $`k_{r,g(h),j}`$、$`v_{r,g(h),j}`$：这个请求在可见位置 j 上的 Key/Value，shape 分别为 $`\left[\mathrm{Dk}\right]`$、$`\left[\mathrm{Dv}\right]`$。
+- 内积得到每个位置的标量分数，softmax 只沿该请求的可见位置归一化；最终加权求和得到 $`\left[\mathrm{Dv}\right]`$ 输出。
 
 判断能否按请求拆分时，最关键的是：**整个公式只出现请求 r 的 Query、Key、Value，没有另一个请求的 K/V。**
 
 ## 5. Attention TP 切权重，DP 切请求
 
-以 row-vector 记法描述 GQA。令 `H=4096,Nq=32,Nkv=8,Dk=Dv=128`，DP0 本轮有 $`n_0=4`$ 个 token，DP1 有 $`n_1=2`$ 个 token；`T=2`：
+以 row-vector 记法描述 GQA。令 $`H=4096,\qquad \mathrm{Nq}=32,\qquad \mathrm{Nkv}=8,\qquad \mathrm{Dk}=\mathrm{Dv}=128`$，DP0 本轮有 $`n_0=4`$ 个 token，DP1 有 $`n_1=2`$ 个 token；$`T=2`$：
 
 ```text
 每 Attention DP 子组输入 X_d: [n_d,4096]
 每组内 rank 输入相同 X_d，但持有不同 Q/K/V 权重切片
-
 Q_local: [n_d,16,128]        # 32/2 query heads
 K_local: [n_d,4,128]         # 8/2 KV heads
-V_local: [n_d,4,128]
-O_heads: [n_d,16,128]
-O_flat:  [n_d,2048]
-W_O_local: [2048,4096]
-A_partial = O_flat @ W_O_local: [n_d,4096]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{local}}\right)=\left[n_{d},4,128\right]
+```
+
+```math
+\mathrm{shape}\left(O_{\mathrm{heads}}\right)=\left[n_{d},16,128\right]
+```
+
+```math
+\mathrm{shape}\left(O_{\mathrm{flat}}\right)=\left[n_{d},2048\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{W\_O\_local}\right)=\left[2048,4096\right]
+```
+
+```math
+A_{\mathrm{partial}} = O_{\mathrm{flat}} \, \mathrm{W\_O\_local}: \left[n_{d},4096\right]
 ```
 
 两个组内 rank 的输出投影给出的是不同输入通道的**部分和**：
@@ -282,7 +342,7 @@ U=\mathrm{concat}_{d}\mathrm{RMSNorm}(X_d+A_d)
 N=\sum_dn_d,\qquad s_d=\sum_{j=0}^{d-1}n_j
 ```
 
-每 rank 建 `[N,H]` 的零 buffer，只在本 DP 的区间 `[s_d:s_d+n_d]` 放数据，然后对全 world 求和。
+每 rank 建 $`\left[N,H\right]`$ 的零 buffer，只在本 DP 的区间 `[s_d:s_d+n_d]` 放数据，然后对全 world 求和。
 
 ```text
 DP0 -> rows [0:n0]
@@ -293,17 +353,19 @@ all_reduce(sum) -> 两段都出现在每个 rank 上
 
 partial 数据允许每个 Attention TP rank 填自己的贡献；replicated 数据只让组内 rank0 填一份，否则组内重复副本会被相加。
 
-一个最小例子，`H=1`、每 DP 两行：
+一个最小例子，$`H=1`$、每 DP 两行：
 
 ```text
 rank0 partial: [1,2]；rank1 partial: [9,18]       -> DP0 [10,20]
 rank2 partial: [3,4]；rank3 partial: [27,36]      -> DP1 [30,40]
-
 各自放入不重叠区间后，全 world all-reduce:
-[10,20,30,40]
 ```
 
-若 rank0/1 都已经持有 `[10,20]`，却同时写入再求和，就会错误地得到 `[20,40,...]`。
+```math
+\left[10,20,30,40\right]
+```
+
+若 rank0/1 都已经持有 $`\left[10,20\right]`$，却同时写入再求和，就会错误地得到 `[20,40,...]`。
 
 ### 7.2 MAX_LEN：组内 reduce-scatter，再全局 all-gather
 
@@ -374,7 +436,7 @@ flowchart LR
     C --> S["各 source rank 收回自己的 rows"]
 ```
 
-若 world 有 $`P=4`$、`ep_size=4`、`moe_dp_size=1`，则：
+若 world 有 $`P=4`$、$`\mathrm{ep\_size}=4`$、$`\mathrm{moe\_dp\_size}=1`$，则：
 
 ```math
 T_{\mathrm{MoE}}=\frac{P}{D_{\mathrm{MoE}}\,E_{\mathrm{MoE}}}=1
@@ -415,7 +477,7 @@ sequenceDiagram
 2. **通信对齐长度** $`a_d`$：为了 reduce-scatter 等要求进行对齐。
 3. **图捕获长度** $`b`$：选中的 capture bucket，可能比真实长度更大。
 
-本快照 `ForwardBatch.prepare_mlp_sync_batch()` 先按 `attn_tp_size` 对齐，再按 `attn_cp_size*2` 对齐。主例子 `T=2,C=1` 下，真实 `[3,1]` 会先变为 `[4,2]`。不能把真实 token 数直接当 collective buffer 长度。
+本快照 `ForwardBatch.prepare_mlp_sync_batch()` 先按 `attn_tp_size` 对齐，再按 `attn_cp_size*2` 对齐。主例子 $`T=2,\qquad C=1`$ 下，真实 $`\left[3,1\right]`$ 会先变为 $`\left[4,2\right]`$。不能把真实 token 数直接当 collective buffer 长度。
 
 `DpPaddingMode` 对对齐后的长度选择：
 
@@ -425,10 +487,10 @@ sequenceDiagram
 否则：SUM_LEN
 ```
 
-| 对齐后长度 | `2*sum` | `D*max` | eager 模式 |
+| 对齐后长度 | $`2\cdot \mathrm{sum}`$ | `D*max` | eager 模式 |
 |---|---:|---:|---|
-| `[4,2,6,0]` | 24 | 24 | MAX_LEN；同成本优先该模式 |
-| `[12,2,0,0]` | 28 | 48 | SUM_LEN |
+| $`\left[4,2,6,0\right]`$ | 24 | 24 | MAX_LEN；同成本优先该模式 |
+| $`\left[12,2,0,0\right]`$ | 28 | 48 | SUM_LEN |
 
 这个条件是源码启发式，包含不同 collective 的成本权衡；它不是实际网络流量的精确计数。图路径默认通常使用 `MAX_LEN`，并有源码中的 ROCm 特例。图能否运行需要跨 DP 一致，不能由各 rank 独自决定。
 
@@ -450,17 +512,22 @@ sequenceDiagram
 
 设单层全模型的 Attention 权重为 $`W_A`$、FFN/专家权重为 $`W_F`$，只是数量级估算：
 
-```text
-Attention 每 rank 权重份额 ≈ W_A/T       # replicated 子投影另计
-FFN 每 rank 权重份额 ≈ W_F/P            # 全局 TP 路径
-专家每 rank 份额取决于 EP/专家 TP
+```math
+\mathrm{Attention} \text{每} \mathrm{rank} \text{权重份额} \approx  W_{A}/T \qquad\text{replicated 子投影另计}
+```
 
+```math
+\mathrm{FFN} \text{每} \mathrm{rank} \text{权重份额} \approx  W_{F}/P \qquad\text{全局 TP 路径}
+```
+
+```text
+专家每 rank 份额取决于 EP/专家 TP
 FULL 模式全局 hidden buffer:
 SUM_LEN: sum(a_d)*H*element_bytes
 MAX_LEN: D*max(a_d)*H*element_bytes
 ```
 
-例：`H=4096,BF16`，每行 hidden 为 `8 KiB`。`a=[12,2,0,0]` 时 SUM_LEN 一个全局 buffer 为 `112 KiB`，MAX_LEN 为 `384 KiB`。还有 Norm 输出、MLP 中间激活、collective workspace 等，因此它们不是峰值显存或链路流量的总数。
+例：$`H=\left[4096,\mathrm{BF16}\right]`$，每行 hidden 为 `8 KiB`。$`a=\left[12,2,0,0\right]`$ 时 SUM_LEN 一个全局 buffer 为 `112 KiB`，MAX_LEN 为 `384 KiB`。还有 Norm 输出、MLP 中间激活、collective workspace 等，因此它们不是峰值显存或链路流量的总数。
 
 DP Attention 的收益来自更合适的 Attention TP、KV 分布和 FFN/专家利用率；成本来自跨组通信、padding、调度等待和 Attention 参数复制。应比较同一模型、总设备数、输入输出长度和请求负载下的 TTFT、ITL、吞吐及每阶段耗时。
 
@@ -476,10 +543,10 @@ python3 learning/zh/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
 
 ## 14. 继续学习与练习
 
-1. 对 `P=8,D=4,C=1` 写出全部 rank 坐标与 Attention TP groups。
-2. 对 `P=8,D=2,C=2` 写出 Attention TP 与 CP groups，说明它们传递的是哪些请求的数据。
+1. 对 $`P=8,\qquad D=4,\qquad C=1`$ 写出全部 rank 坐标与 Attention TP groups。
+2. 对 $`P=8,\qquad D=2,\qquad C=2`$ 写出 Attention TP 与 CP groups，说明它们传递的是哪些请求的数据。
 3. 把 demo 中 replicated 的去重去掉，观察为何输出被乘以 $`T`$。
-4. 对真实 token counts `[7,1,0,2]`，依本快照先做 `T=2,C=1` 的对齐，再判断 eager padding mode。
+4. 对真实 token counts $`\left[7,1,0,2\right]`$，依本快照先做 $`T=2,\qquad C=1`$ 的对齐，再判断 eager padding mode。
 5. 解释为什么 `dp_scatter()` 可以只是一次本地 copy，而 `dp_reduce_scatter_tensor()` 必须执行 collective。
 
 接下来读 [完整源码走读](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md)。它把本章每个原理映射到启动、Scheduler、ForwardBatch、LayerCommunicator、MoE、Graph 和 LogitsProcessor 的具体函数。

@@ -33,7 +33,7 @@ flowchart TD
 |---|---|---|
 | Startup | `is_npu()` detection, `init_npu_backend()` | `utils.py` |
 | Config | `set_default_server_args()` overrides | `utils.py` |
-| Scheduling | `page_size=128`, adjusted chunk sizes | `scheduler.py` |
+| Scheduling | $`\mathrm{page\_size}=128`$, adjusted chunk sizes | `scheduler.py` |
 | Attention | `AscendAttnBackend`, FRACTAL_NZ | `layers/attention/ascend/` |
 | Graph | `NPUGraph` instead of `CUDAGraph` | `npu_piecewise_backend.py` |
 | Communication | `hccl` instead of `nccl` | `parallel_state.py` |

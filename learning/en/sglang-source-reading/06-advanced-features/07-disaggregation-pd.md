@@ -32,7 +32,7 @@ flowchart LR
 
 1. Client sends request to prefill worker
 2. Prefill worker selects a decode worker
-3. `POST /route` — register connection
+3. $`\frac{\mathrm{POST}}{\mathrm{route}}`$ — register connection
 4. Decode worker pre-allocates KV Cache slots (`prealloc_queue`)
 5. Prefill worker computes prompt KV
 6. KV Cache transferred to decode worker

@@ -34,36 +34,51 @@ flowchart LR
     OABSORB --> Y["层输出<br/>[B,Lq,H]"]
 ```
 
-上图同时包含两条时间线：`X -> CKV/KR -> Cache` 是**写入当前 token**；`Cache -> Score/LatOut` 是**读取历史 token**。Prefill 时 `Lq=Lkv=S`，decode 时通常 `Lq=1`、`Lkv=S_past+1`。
+上图同时包含两条时间线：`X -> CKV/KR -> Cache` 是**写入当前 token**；`Cache -> Score/LatOut` 是**读取历史 token**。Prefill 时 $`\mathrm{Lq}=\mathrm{Lkv}=S`$，decode 时通常 $`\mathrm{Lq}=1`$、$`\mathrm{Lkv}=S_{\mathrm{past}}+1`$。
 
 ### 贯穿全文的 Shape 例子
 
 后文默认使用下面这组“教学尺寸”；它们用于算清 shape，不代表所有模型配置：
 
+```math
+B=2,\qquad S=4096,\qquad H=4096
+```
+
+```math
+N=32,\qquad \mathrm{Dc}=512,\qquad \mathrm{Dcq}=1536
+```
+
+```math
+\mathrm{Dh}=128,\qquad \mathrm{Dr}=64,\qquad \mathrm{Dv}=128
+```
+
 ```text
-B=2, S=4096, H=4096
-N=32, Dc=512, Dcq=1536
-Dh=128, Dr=64, Dv=128
 dtype=BF16/FP16（每元素 2 bytes）
 ```
 
-轴的含义固定为：`B` 批大小，`S/Lkv` 历史长度，`Lq` 本次查询长度，`N` query head 数，`H` hidden size。文中 `[B,S,N,D]` 和内核常见的 `[B,N,S,D]` 只是转置，数学语义相同。
+轴的含义固定为：`B` 批大小，`S/Lkv` 历史长度，`Lq` 本次查询长度，`N` query head 数，`H` hidden size。文中 $`\left[B,S,N,D\right]`$ 和内核常见的 $`\left[B,N,S,D\right]`$ 只是转置，数学语义相同。
 
 标准 MHA 每 token、每层缓存：
 
-```text
-N × (Dh + Dv) = 32 × (128 + 128) = 8192 elements
-8192 × 2 bytes = 16384 bytes = 16 KiB
+```math
+N \times  \left(\mathrm{Dh} + \mathrm{Dv}\right) = 32 \times  \left(128 + 128\right) = 8192 \mathrm{elements}
+```
+
+```math
+\text{8192 × 2 bytes}= 16384 \mathrm{bytes} = 16 \mathrm{KiB}
 ```
 
 MLA 每 token、每层缓存：
 
-```text
-Dc + Dr = 512 + 64 = 576 elements
-576 × 2 bytes = 1152 bytes = 1.125 KiB
+```math
+\mathrm{Dc} + \mathrm{Dr} = 512 + 64 = 576 \mathrm{elements}
 ```
 
-因此这个例子的**逻辑 KV 容量**缩小约 `8192 / 576 = 14.22×`。这只是单层单 token 的载荷；真实显存还包括 page 对齐、block table、量化尺度和 allocator 元数据。
+```math
+\text{576 × 2 bytes}= 1152 \mathrm{bytes} = 1.125 \mathrm{KiB}
+```
+
+因此这个例子的**逻辑 KV 容量**缩小约 $`\text{8192 / 576}= 14.22\times`$。这只是单层单 token 的载荷；真实显存还包括 page 对齐、block table、量化尺度和 allocator 元数据。
 
 ### 一次 decode 的全张量旅程
 
@@ -71,16 +86,16 @@ Dc + Dr = 512 + 64 = 576 elements
 
 | 阶段 | 输入 shape | 运算 | 输出 shape | 是否持久化 |
 |---|---:|---|---:|---|
-| 层输入 | `[2,1,4096]` | 上一子层输出/RMSNorm | `[2,1,4096]` | 否 |
-| KV 写入 | `[2,1,4096]` | `W_DKV_R` | `Ckv [2,1,512]`、`Krope [2,1,64]` | 是 |
-| Q 压缩 | `[2,1,4096]` | `W_DQ` | `Cq [2,1,1536]` | 否 |
-| Q 展开 | `[2,1,1536]` | `W_UQ` + split | `Qc [2,1,32,128]`、`Qr [2,1,32,64]` | 否 |
+| 层输入 | $`\left[2,1,4096\right]`$ | 上一子层输出/RMSNorm | $`\left[2,1,4096\right]`$ | 否 |
+| KV 写入 | $`\left[2,1,4096\right]`$ | `W_DKV_R` | `Ckv [2,1,512]`、`Krope [2,1,64]` | 是 |
+| Q 压缩 | $`\left[2,1,4096\right]`$ | `W_DQ` | `Cq [2,1,1536]` | 否 |
+| Q 展开 | $`\left[2,1,1536\right]`$ | `W_UQ` + split | `Qc [2,1,32,128]`、`Qr [2,1,32,64]` | 否 |
 | 历史视图 | block table | gather/page view | `Ckv_hist [2,4096,512]`、`Kr_hist [2,4096,64]` | 已缓存 |
-| 内容打分 | `Qc,Ckv_hist` | 吸收式 latent 点积 | `[2,32,1,4096]` | 否 |
-| 位置打分 | `RoPE(Qr),RoPE(Kr)` | 广播到 heads 后点积 | `[2,32,1,4096]` | 否 |
-| 概率 | 两部分 score | scale + causal mask + softmax | `[2,32,1,4096]` | 否 |
-| latent 聚合 | 概率、`Ckv_hist` | 对历史轴加权求和 | `[2,1,32,512]` | 否 |
-| 输出 | latent 聚合 | 吸收后的 V/O 变换并合并 heads | `[2,1,4096]` | 否 |
+| 内容打分 | `Qc,Ckv_hist` | 吸收式 latent 点积 | $`\left[2,32,1,4096\right]`$ | 否 |
+| 位置打分 | `RoPE(Qr),RoPE(Kr)` | 广播到 heads 后点积 | $`\left[2,32,1,4096\right]`$ | 否 |
+| 概率 | 两部分 score | scale + causal mask + softmax | $`\left[2,32,1,4096\right]`$ | 否 |
+| latent 聚合 | 概率、`Ckv_hist` | 对历史轴加权求和 | $`\left[2,1,32,512\right]`$ | 否 |
+| 输出 | latent 聚合 | 吸收后的 V/O 变换并合并 heads | $`\left[2,1,4096\right]`$ | 否 |
 
 这个表是后文所有公式的“总账”。如果实现里的某一步无法映射到其中一行，通常意味着 layout 转换、矩阵吸收或融合 kernel 隐藏了该逻辑步骤，而不是数学步骤消失了。
 
@@ -88,15 +103,18 @@ Dc + Dr = 512 + 64 = 576 elements
 
 标准 Multi-Head Attention 为每个历史 token、每一层保存完整 K 和 V：
 
-```text
-K_cache: [B,S,N,Dk]
-V_cache: [B,S,N,Dv]
+```math
+\mathrm{shape}\left(K_{\mathrm{cache}}\right)=\left[B,S,N,\mathrm{Dk}\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{cache}}\right)=\left[B,S,N,\mathrm{Dv}\right]
 ```
 
 每个 token 的缓存元素数为：
 
-```text
-N * (Dk + Dv)
+```math
+N\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)
 ```
 
 长上下文生成时，KV Cache 会成为显存容量和读取带宽的主要开销。Multi-head Latent Attention（MLA）的核心思想是：
@@ -109,15 +127,15 @@ N * (Dk + Dv)
 
 | 符号 | 含义 |
 |---|---|
-| `X` | 输入 hidden states，`[B,S,H]` |
+| `X` | 输入 hidden states，$`\left[B,S,H\right]`$ |
 | `N` | Attention head 数量 |
 | `Dc` | KV latent compression dimension |
 | `Dcq` | Query latent compression dimension |
 | `Dh` | 每个 head 的 content key/query dimension |
 | `Dr` | 每个 head 的 RoPE dimension |
 | `Dv` | 每个 head 的 value dimension |
-| `Ckv` | 压缩后的 KV latent，`[B,S,Dc]` |
-| `Cq` | 压缩后的 Query latent，`[B,S,Dcq]` |
+| `Ckv` | 压缩后的 KV latent，$`\left[B,S,\mathrm{Dc}\right]`$ |
+| `Cq` | 压缩后的 Query latent，$`\left[B,S,\mathrm{Dcq}\right]`$ |
 
 MLA 通常满足：
 
@@ -131,18 +149,30 @@ Dc << N * (Dh + Dv)
 
 对每个 token 的 hidden vector `x in R^H`，内容 latent 与位置 key 可以由一次联合投影产生：
 
-```text
-[c_kv, k_rope_raw] = x @ W_DKV_R
+```math
+\left[c_{\mathrm{kv}},\mathrm{k\_rope\_raw}\right]=x\,\mathrm{W\_DKV\_R}
 ```
 
 批量形状：
 
-```text
-X:          [B,S,H]
-W_DKV_R:    [H,Dc+Dr]
-projected:  [B,S,Dc+Dr]
-Ckv:        [B,S,Dc]
-K_rope_raw: [B,S,Dr]
+```math
+\mathrm{shape}\left(X\right)=\left[B,S,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{W\_DKV\_R}\right)=\left[H,\mathrm{Dc}+\mathrm{Dr}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{projected}\right)=\left[B,S,\mathrm{Dc}+\mathrm{Dr}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Ckv}\right)=\left[B,S,\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{K\_rope\_raw}\right)=\left[B,S,\mathrm{Dr}\right]
 ```
 
 也可以使用两个独立但等价的逻辑投影分别生成 `Ckv` 和 `K_rope_raw`。`Ckv` 是从 `H` 维压缩到 `Dc` 维的内容表示；`K_rope_raw` 保留给位置编码路径。内容压缩不是无损复制，而是训练得到的低秩表示。
@@ -151,22 +181,38 @@ K_rope_raw: [B,S,Dr]
 
 使用两个逻辑上独立的 up projection：
 
-```text
-K_content = Ckv @ W_UK
-V         = Ckv @ W_UV
+```math
+K_{\mathrm{content}}=\mathrm{Ckv}\,W_{\mathrm{UK}}
+```
+
+```math
+V=\mathrm{Ckv}\,W_{\mathrm{UV}}
 ```
 
 形状：
 
-```text
-W_UK: [Dc,N*Dh]
-W_UV: [Dc,N*Dv]
+```math
+\mathrm{shape}\left(W_{\mathrm{UK}}\right)=\left[\mathrm{Dc},N\cdot \mathrm{Dh}\right]
+```
 
-K_content_flat: [B,S,N*Dh]
-V_flat:         [B,S,N*Dv]
+```math
+\mathrm{shape}\left(W_{\mathrm{UV}}\right)=\left[\mathrm{Dc},N\cdot \mathrm{Dv}\right]
+```
 
-K_content: [B,S,N,Dh]
-V:         [B,S,N,Dv]
+```math
+\mathrm{shape}\left(\mathrm{K\_content\_flat}\right)=\left[B,S,N\cdot \mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{flat}}\right)=\left[B,S,N\cdot \mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(V\right)=\left[B,S,N,\mathrm{Dv}\right]
 ```
 
 各 head 的 K/V 不再由 `X` 直接独立投影，而是共享同一个 `Ckv`，再用不同的 up-projection 参数恢复。
@@ -175,38 +221,53 @@ V:         [B,S,N,Dv]
 
 Query 也可以采用低秩分解：
 
-```text
-Cq = X @ W_DQ
-Q_full = RMSNorm(Cq) @ W_UQ
+```math
+\mathrm{Cq}=X\,W_{\mathrm{DQ}}
+```
+
+```math
+Q_{\mathrm{full}}=\mathrm{RMSNorm}\left(\mathrm{Cq}\right)\,W_{\mathrm{UQ}}
 ```
 
 形状：
 
+```math
+\mathrm{shape}\left(W_{\mathrm{DQ}}\right)=\left[H,\mathrm{Dcq}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Cq}\right)=\left[B,S,\mathrm{Dcq}\right]
+```
+
 ```text
-W_DQ: [H,Dcq]
-Cq:   [B,S,Dcq]
 W_UQ: [Dcq,N*(Dh+Dr)]
 Q_full: [B,S,N*(Dh+Dr)]
 ```
 
 拆分：
 
-```text
-Q_content: [B,S,N,Dh]
-Q_rope:    [B,S,N,Dr]
+```math
+\mathrm{shape}\left(Q_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{rope}}\right)=\left[B,S,N,\mathrm{Dr}\right]
 ```
 
 Query 不需要跨生成步缓存，因此 Query 压缩主要用于减少参数结构或改变投影计算，并不直接决定 KV Cache 容量。
 
 ## 6. 为什么 RoPE 需要解耦
 
-若把 RoPE 直接施加到由 `Ckv @ W_UK` 恢复出的完整 K 上，位置相关旋转会阻碍矩阵吸收：旋转矩阵依赖 token position，不能简单并入固定的 `W_UK`。
+若把 RoPE 直接施加到由 $`\mathrm{Ckv}\,W_{\mathrm{UK}}`$ 恢复出的完整 K 上，位置相关旋转会阻碍矩阵吸收：旋转矩阵依赖 token position，不能简单并入固定的 `W_UK`。
 
 MLA 因此把每个 Q/K head 分为两部分：
 
-```text
-Q_head = concat(Q_content, Q_rope)
-K_head = concat(K_content, K_rope)
+```math
+Q_{\mathrm{head}}=\mathrm{concat}\left(Q_{\mathrm{content}},Q_{\mathrm{rope}}\right)
+```
+
+```math
+K_{\mathrm{head}}=\mathrm{concat}\left(K_{\mathrm{content}},K_{\mathrm{rope}}\right)
 ```
 
 其中：
@@ -217,63 +278,86 @@ K_head = concat(K_content, K_rope)
 
 形状：
 
+```math
+\mathrm{shape}\left(Q_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{rope}}\right)=\left[B,S,N,\mathrm{Dr}\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
 ```text
-Q_content: [B,S,N,Dh]
-Q_rope:    [B,S,N,Dr]
-K_content: [B,S,N,Dh]
 K_rope:    [B,S,1,Dr] -> broadcast [B,S,N,Dr]
 ```
 
 最终每个 head 的 Query/Key dimension 为：
 
-```text
-Dqk = Dh + Dr
+```math
+\mathrm{Dqk}=\mathrm{Dh}+\mathrm{Dr}
 ```
 
 ## 7. MLA Attention 分数
 
 对 head `n`、query position `i`、key position `j`：
 
-```text
-score[n,i,j]
-  = Q_content[n,i] dot K_content[n,j]
-  + Q_rope[n,i] dot K_rope[j]
+```math
+\mathrm{score}\left[n,i,j\right] = Q_{\mathrm{content}}\left[n,i\right] \cdot K_{\mathrm{content}}\left[n,j\right] + Q_{\mathrm{rope}}\left[n,i\right] \cdot K_{\mathrm{rope}}\left[j\right]
 ```
 
 缩放后：
 
-```text
-score = score / sqrt(Dh + Dr)
+```math
+\mathrm{score}=\frac{\mathrm{score}}{\sqrt{\mathrm{Dh}+\mathrm{Dr}}}
 ```
 
 再加因果 mask 并执行 softmax：
 
-```text
-alpha[n,i,:] = softmax(masked_score[n,i,:])
+```math
+{\alpha}_{n,i,:}=\mathrm{softmax}\left({\mathrm{masked\_score}}_{n,i,:}\right)
 ```
 
 输出：
 
-```text
-O[n,i,:] = sum_j alpha[n,i,j] * V[n,j,:]
-O: [B,S,N,Dv]
+```math
+O\left[n,i,:\right] = \sum_{j} \alpha\left[n,i,j\right] \cdot  V\left[n,j,:\right]
 ```
 
-合并 heads 后通过输出投影恢复 `[B,S,H]`。
+```math
+\mathrm{shape}\left(O\right)=\left[B,S,N,\mathrm{Dv}\right]
+```
+
+合并 heads 后通过输出投影恢复 $`\left[B,S,H\right]`$。
 
 ## 8. 朴素实现：先恢复 K/V 再做 Attention
 
 最直接的实现：
 
-```text
-Ckv = X @ W_DKV                         [B,S,Dc]
-Kc = reshape(Ckv @ W_UK)                [B,S,N,Dh]
-V  = reshape(Ckv @ W_UV)                [B,S,N,Dv]
+```math
+\mathrm{Ckv}=X\,W_{\mathrm{DKV}}\qquad\mathrm{shape}:\left[B,S,\mathrm{Dc}\right]
+```
 
-Q  = build_query(X)                     [B,S,N,Dh+Dr]
-K  = concat(Kc, broadcast(K_rope))      [B,S,N,Dh+Dr]
+```math
+\mathrm{Kc}=\mathrm{reshape}\left(\mathrm{Ckv}\,W_{\mathrm{UK}}\right)\qquad\mathrm{shape}:\left[B,S,N,\mathrm{Dh}\right]
+```
 
-O = softmax(Q @ K^T + mask) @ V
+```math
+V=\mathrm{reshape}\left(\mathrm{Ckv}\,W_{\mathrm{UV}}\right)\qquad\mathrm{shape}:\left[B,S,N,\mathrm{Dv}\right]
+```
+
+```math
+Q = \mathrm{build\_query}\left(X\right) \left[B,S,N,\mathrm{Dh}+\mathrm{Dr}\right]
+```
+
+```math
+K = \mathrm{concat}\left(\mathrm{Kc}, \mathrm{broadcast}\left(K_{\mathrm{rope}}\right)\right) \left[B,S,N,\mathrm{Dh}+\mathrm{Dr}\right]
+```
+
+```math
+O=\mathrm{softmax}\left(Q\,{K}^{\mathsf T}+\mathrm{mask}\right)\,V
 ```
 
 该实现数学清晰，但 decode 时如果每轮都为全部历史 latent 恢复完整 K/V，就会失去压缩缓存带来的带宽优势。
@@ -282,29 +366,30 @@ O = softmax(Q @ K^T + mask) @ V
 
 对单个 head，内容分数为：
 
-```text
-q_c dot k_c
-= q_c dot (c_kv @ W_UK)
+```math
+q_{c} \cdot k_{c} = q_{c} \cdot \left(c_{\mathrm{kv}} \, W_{\mathrm{UK}}\right)
 ```
 
 利用结合律：
 
-```text
-q_c dot (c_kv @ W_UK)
-= (q_c @ W_UK^T) dot c_kv
+```math
+q_{c} \cdot \left(c_{\mathrm{kv}} \, W_{\mathrm{UK}}\right) = \left(q_{c} \, W_{\mathrm{UK}}^{\mathsf T}\right) \cdot c_{\mathrm{kv}}
 ```
 
 定义 latent query：
 
-```text
-q_latent = q_c @ W_UK^T
-q_latent: [B,Lq,N,Dc]
+```math
+q_{\mathrm{latent}}=q_{c}\,{W_{\mathrm{UK}}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(q_{\mathrm{latent}}\right)=\left[B,\mathrm{Lq},N,\mathrm{Dc}\right]
 ```
 
 内容分数可以直接与缓存的 `Ckv [B,Lkv,Dc]` 点积：
 
-```text
-content_score: [B,N,Lq,Lkv]
+```math
+\mathrm{shape}\left(\mathrm{content\_score}\right)=\left[B,N,\mathrm{Lq},\mathrm{Lkv}\right]
 ```
 
 这样无需为历史 token 物化 `K_content [B,Lkv,N,Dh]`。
@@ -313,23 +398,28 @@ content_score: [B,N,Lq,Lkv]
 
 朴素 value 聚合：
 
-```text
-o = sum_j alpha_j * v_j
-v_j = c_j @ W_UV
+```math
+o = \sum_{j} \alpha_{j} \cdot  v_{j}
+```
+
+```math
+v_{j}=c_{j}\,W_{\mathrm{UV}}
 ```
 
 利用线性性：
 
-```text
-o = sum_j alpha_j * (c_j @ W_UV)
-  = (sum_j alpha_j * c_j) @ W_UV
+```math
+o = \sum_{j} \alpha_{j} \cdot  \left(c_{j} \, W_{\mathrm{UV}}\right) = \left(\sum_{j} \alpha_{j} \cdot  c_{j}\right) \, W_{\mathrm{UV}}
 ```
 
 因此可先在 latent space 聚合：
 
-```text
-o_latent = alpha @ Ckv       [B,Lq,N,Dc]
-o_head = o_latent @ W_UV     [B,Lq,N,Dv]
+```math
+o_{\mathrm{latent}}=\alpha\,\mathrm{Ckv}\qquad\mathrm{shape}:\left[B,\mathrm{Lq},N,\mathrm{Dc}\right]
+```
+
+```math
+o_{\mathrm{head}}=o_{\mathrm{latent}}\,W_{\mathrm{UV}}\qquad\mathrm{shape}:\left[B,\mathrm{Lq},N,\mathrm{Dv}\right]
 ```
 
 历史 Value heads 无需完整展开。实际实现还可以把 `W_UV` 与后续输出投影进一步组合，以减少中间张量。
@@ -338,33 +428,36 @@ o_head = o_latent @ W_UV     [B,Lq,N,Dv]
 
 解耦 RoPE 后，每个历史 token 需要保留：
 
-```text
-Ckv:    [Dc]
-K_rope: [Dr]
+```math
+\mathrm{shape}\left(\mathrm{Ckv}\right)=\left[\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{rope}}\right)=\left[\mathrm{Dr}\right]
 ```
 
 单 token、单层缓存元素数：
 
-```text
-MLA cache elements = Dc + Dr
+```math
+\text{MLA cache elements}= \mathrm{Dc} + \mathrm{Dr}
 ```
 
 而标准 MHA 为：
 
-```text
-MHA cache elements = N * (Dk + Dv)
+```math
+\text{MHA cache elements}= N \cdot  \left(\mathrm{Dk} + \mathrm{Dv}\right)
 ```
 
 GQA 为：
 
-```text
-GQA cache elements = Nkv * (Dk + Dv)
+```math
+\text{GQA cache elements}= \mathrm{Nkv} \cdot  \left(\mathrm{Dk} + \mathrm{Dv}\right)
 ```
 
 MLA 的压缩比例近似为：
 
-```text
-(Dc + Dr) / (N * (Dk + Dv))
+```math
+\frac{\mathrm{Dc}+\mathrm{Dr}}{N\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)}
 ```
 
 具体收益由 latent dimension、RoPE dimension、dtype、内存对齐和实现策略共同决定。
@@ -373,29 +466,38 @@ MLA 的压缩比例近似为：
 
 设本轮每条序列只有一个新 token：
 
-```text
-X_new: [B,1,H]
+```math
+\mathrm{shape}\left(X_{\mathrm{new}}\right)=\left[B,1,H\right]
 ```
 
 生成并写入新状态：
 
-```text
-Ckv_new:    [B,1,Dc]
-K_rope_new: [B,1,Dr]
+```math
+\mathrm{shape}\left(\mathrm{Ckv\_new}\right)=\left[B,1,\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{K\_rope\_new}\right)=\left[B,1,\mathrm{Dr}\right]
 ```
 
 缓存增长为：
 
-```text
-Ckv_cache:    [B,Sctx,Dc]
-K_rope_cache: [B,Sctx,Dr]
+```math
+\mathrm{shape}\left(\mathrm{Ckv\_cache}\right)=\left[B,\mathrm{Sctx},\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{K\_rope\_cache}\right)=\left[B,\mathrm{Sctx},\mathrm{Dr}\right]
 ```
 
 当前 Query：
 
-```text
-Q_content: [B,1,N,Dh]
-Q_rope:    [B,1,N,Dr]
+```math
+\mathrm{shape}\left(Q_{\mathrm{content}}\right)=\left[B,1,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{rope}}\right)=\left[B,1,N,\mathrm{Dr}\right]
 ```
 
 吸收后的内容路径：
@@ -417,11 +519,20 @@ Q_rope x K_rope_cache -> position scores [B,N,1,Sctx]
 
 prefill 对 `S` 个 token 并行计算：
 
-```text
-Ckv: [B,S,Dc]
-Q_content: [B,S,N,Dh]
-Q_rope: [B,S,N,Dr]
-K_rope: [B,S,Dr]
+```math
+\mathrm{shape}\left(\mathrm{Ckv}\right)=\left[B,S,\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{rope}}\right)=\left[B,S,N,\mathrm{Dr}\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{rope}}\right)=\left[B,S,\mathrm{Dr}\right]
 ```
 
 prefill 的计算密度较高，可以选择：
@@ -442,8 +553,8 @@ X [H] -> Ckv [Dc] -> K/V heads [N*(Dh+Dv)]
 
 等价权重矩阵具有分解形式：
 
-```text
-W_KV_effective = W_DKV @ W_UKV
+```math
+\mathrm{W\_KV\_effective}=W_{\mathrm{DKV}}\,W_{\mathrm{UKV}}
 ```
 
 其秩上界不超过 `Dc`。这给模型加入了结构性低秩约束。`Dc` 越小，缓存和计算越省，但表达瓶颈越强；`Dc` 越大，表达能力更接近完整投影，但压缩收益下降。

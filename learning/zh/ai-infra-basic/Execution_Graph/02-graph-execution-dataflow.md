@@ -10,28 +10,36 @@
 
 SGLang 中最常见的 graph 路径是 decode graph。它大致覆盖：
 
+```math
+\frac{\mathrm{input\_ids}}{\mathrm{input\_embeds}}
+```
+
 ```text
-input_ids / input_embeds
-  -> embedding 或输入 embedding 处理
-  -> 多层 Transformer block
-       -> attention
-          -> 读取/写入 KV Cache
-       -> MLP
-       -> norm / residual
-  -> logits processor / lm_head
-  -> next_token_logits_buffer
+-> embedding 或输入 embedding 处理
+-> 多层 Transformer block
+-> attention
+-> 读取/写入 KV Cache
+-> MLP
+-> norm / residual
+-> logits processor / lm_head
+-> next_token_logits_buffer
 ```
 
 它通常不覆盖：
 
-```text
 HTTP 收发
-tokenizer / detokenizer
-Scheduler 排队决策
-请求对象状态机
-采样策略中的复杂 CPU 逻辑
-真实 batch 到 static buffer 的 copy
+
+```math
+\frac{\mathrm{tokenizer}}{\mathrm{detokenizer}}
 ```
+
+Scheduler 排队决策
+
+请求对象状态机
+
+采样策略中的复杂 CPU 逻辑
+
+真实 batch 到 static buffer 的 copy
 
 可以这样分层：
 
@@ -88,13 +96,13 @@ python/sglang/srt/model_executor/cuda_graph_runner.py
 
 | 数据 | 形状直觉 | 作用 |
 |---|---|---|
-| `input_ids` | `[max_num_token]` | 本轮 decode 输入 token，普通 decode 通常每个请求 1 个 |
-| `input_embeds` | `[max_num_token, hidden_size]` | 某些路径直接传 embedding，而不是 token id |
-| `req_pool_indices` | `[max_bs]` | 每个 batch row 对应 request pool 中哪一行 |
-| `seq_lens` | `[max_bs]` | 每个请求当前上下文长度 |
-| `seq_lens_cpu` | `[max_bs]` CPU mirror | 某些 metadata 需要 CPU 侧长度 |
-| `positions` | `[max_num_token]` | 当前 token 的 position id |
-| `mrope_positions` | `[3, max_num_token]` | 多模态/rope 变体使用的位置编码 |
+| `input_ids` | $`\left[\mathrm{max\_num\_token}\right]`$ | 本轮 decode 输入 token，普通 decode 通常每个请求 1 个 |
+| `input_embeds` | $`\left[\mathrm{max\_num\_token},\mathrm{hidden\_size}\right]`$ | 某些路径直接传 embedding，而不是 token id |
+| `req_pool_indices` | $`\left[\mathrm{max\_bs}\right]`$ | 每个 batch row 对应 request pool 中哪一行 |
+| `seq_lens` | $`\left[\mathrm{max\_bs}\right]`$ | 每个请求当前上下文长度 |
+| `seq_lens_cpu` | $`\left[\mathrm{max\_bs}\right]`$ CPU mirror | 某些 metadata 需要 CPU 侧长度 |
+| `positions` | $`\left[\mathrm{max\_num\_token}\right]`$ | 当前 token 的 position id |
+| `mrope_positions` | $`\left[3,\mathrm{max\_num\_token}\right]`$ | 多模态/rope 变体使用的位置编码 |
 
 这些数据决定了“本轮 graph replay 在给哪些请求算下一个 token”。
 
@@ -102,9 +110,9 @@ python/sglang/srt/model_executor/cuda_graph_runner.py
 
 | 数据 | 形状直觉 | 作用 |
 |---|---|---|
-| `out_cache_loc` | `[max_num_token]` | 本轮新 K/V 应写入 token_to_kv_pool 的哪个位置 |
-| `req_pool_indices` | `[max_bs]` | 配合 req_to_token_pool 找历史 token 的 KV 位置 |
-| `seq_lens` | `[max_bs]` | attention kernel 知道每个请求要看多长历史 |
+| `out_cache_loc` | $`\left[\mathrm{max\_num\_token}\right]`$ | 本轮新 K/V 应写入 token_to_kv_pool 的哪个位置 |
+| `req_pool_indices` | $`\left[\mathrm{max\_bs}\right]`$ | 配合 req_to_token_pool 找历史 token 的 KV 位置 |
+| `seq_lens` | $`\left[\mathrm{max\_bs}\right]`$ | attention kernel 知道每个请求要看多长历史 |
 
 直觉上：
 
@@ -238,21 +246,42 @@ flowchart TD
 
 假设真实 batch size 是 3，但捕获的 graph bucket 是 4。
 
-```text
-raw_bs = 3
-bs = 4
-raw_num_token = 3
-max_num_token = 4
+```math
+\mathrm{raw\_bs}=3
+```
+
+```math
+\mathrm{bs}=4
+```
+
+```math
+\mathrm{raw\_num\_token}=3
+```
+
+```math
+\mathrm{max\_num\_token}=4
 ```
 
 静态 buffer 会这样填：
 
-```text
-input_ids:        [tokA, tokB, tokC, pad]
-req_pool_indices: [reqA, reqB, reqC, 0]
-seq_lens:         [lenA, lenB, lenC, seq_len_fill_value]
-out_cache_loc:    [locA, locB, locC, 0]
-positions:        [posA, posB, posC, pad]
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[\mathrm{tokA},\mathrm{tokB},\mathrm{tokC},\mathrm{pad}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{req\_pool\_indices}\right)=\left[\mathrm{reqA},\mathrm{reqB},\mathrm{reqC},0\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{seq\_lens}\right)=\left[\mathrm{lenA},\mathrm{lenB},\mathrm{lenC},\mathrm{seq\_len\_fill\_value}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{out\_cache\_loc}\right)=\left[\mathrm{locA},\mathrm{locB},\mathrm{locC},0\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[\mathrm{posA},\mathrm{posB},\mathrm{posC},\mathrm{pad}\right]
 ```
 
 其中 padding 行不是一个真实请求。它的目标是让 graph 看到固定 shape。
@@ -364,9 +393,13 @@ seq_lens_cpu
 每个请求的 KV 长度
 KV block/pool 索引
 每个 token 分配多少 KV split
-indptr / indices
-mask 或 custom mask
 ```
+
+```math
+\frac{\mathrm{indptr}}{\mathrm{indices}}
+```
+
+mask 或 custom mask
 
 可以理解成 attention backend 在 replay 前做了一次“kernel 调度表准备”：
 
@@ -394,9 +427,12 @@ Replay 完成后，输出已经写在 `output_buffers[graph_key]` 里。
 
 `CudaGraphRunner.replay()` 会按真实 token 数截取：
 
-```text
-next_token_logits = output.next_token_logits[:raw_num_token]
-hidden_states     = output.hidden_states[:raw_num_token]
+```math
+\mathrm{next\_token\_logits} = \mathrm{output}.\mathrm{next\_token\_logits}\left[:\mathrm{raw\_num\_token}\right]
+```
+
+```math
+\mathrm{hidden\_states} = \mathrm{output}.\mathrm{hidden\_states}\left[:\mathrm{raw\_num\_token}\right]
 ```
 
 然后返回 `LogitsProcessorOutput` 给 `ModelRunner`，再进入 sampler。
@@ -486,21 +522,27 @@ sequenceDiagram
 
 假设本轮有 3 个请求：
 
-```text
-request A: seq_len=10, next input token=101, new KV loc=9001
-request B: seq_len=25, next input token=202, new KV loc=9002
-request C: seq_len=7,  next input token=303, new KV loc=9003
+```math
+\text{request A}: \mathrm{seq\_len}=10, \mathrm{next} \mathrm{input} \mathrm{token}=101, \mathrm{new} \mathrm{KV} \mathrm{loc}=9001
+```
+
+```math
+\text{request B}: \mathrm{seq\_len}=25, \mathrm{next} \mathrm{input} \mathrm{token}=202, \mathrm{new} \mathrm{KV} \mathrm{loc}=9002
+```
+
+```math
+\text{request C}: \mathrm{seq\_len}=7, \mathrm{next} \mathrm{input} \mathrm{token}=303, \mathrm{new} \mathrm{KV} \mathrm{loc}=9003
 ```
 
 捕获 bucket 是 4，则 replay 前 buffer：
 
 | buffer | 内容 |
 |---|---|
-| `input_ids[:4]` | `[101, 202, 303, 0]` |
-| `seq_lens[:4]` | `[10, 25, 7, fill]` |
-| `positions[:4]` | `[9, 24, 6, 0]` |
-| `out_cache_loc[:4]` | `[9001, 9002, 9003, 0]` |
-| `req_pool_indices[:4]` | `[rowA, rowB, rowC, 0]` |
+| `input_ids[:4]` | $`\left[101,202,303,0\right]`$ |
+| `seq_lens[:4]` | $`\left[10,25,7,\mathrm{fill}\right]`$ |
+| `positions[:4]` | $`\left[9,24,6,0\right]`$ |
+| `out_cache_loc[:4]` | $`\left[9001,9002,9003,0\right]`$ |
+| `req_pool_indices[:4]` | $`\left[\mathrm{rowA},\mathrm{rowB},\mathrm{rowC},0\right]`$ |
 
 Replay 中：
 
@@ -592,7 +634,7 @@ flowchart TD
 ## 17. 阅读任务
 
 1. 找到 `DecodeInputBuffers.populate_from_forward_batch()`，列出它从 `ForwardBatch` copy 了哪些字段。
-2. 用 `raw_bs=5`、`bs=8` 举例说明 padding 行会如何填充。
+2. 用 $`\mathrm{raw\_bs}=5`$、$`\mathrm{bs}=8`$ 举例说明 padding 行会如何填充。
 3. 画出 `req_pool_indices`、`seq_lens`、`out_cache_loc` 和 KV Cache pool 的关系。
 4. 找一个 attention backend 的 `init_forward_metadata_replay_cuda_graph()`，说明它准备了哪些 metadata。
 5. 解释为什么 graph replay 后只返回 `raw_num_token` 对应的 logits。

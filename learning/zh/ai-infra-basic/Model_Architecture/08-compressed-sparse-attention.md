@@ -31,17 +31,23 @@ flowchart TD
 - **HCA layer**：精确局部窗口 + 对重度压缩短序列的稠密全局读取；
 - 模型把两类 layer 按配置交错排列，并非每一层同时跑 CSA 和 HCA。
 
-### 一个 `S=10, m=4` 的压缩时间线
+### 一个 $`S=10,\qquad m=4`$ 的压缩时间线
 
 把原始 token 分块：
 
+```math
+\text{chunk 0}= \mathrm{token} 0..3
+```
+
+```math
+\text{chunk 1}= \mathrm{token} 4..7
+```
+
 ```text
-chunk 0 = token 0..3
-chunk 1 = token 4..7
 chunk 2 = token 8..9 + padding（尾块尚不完整）
 ```
 
-重叠压缩的 receptive field 宽度是 `2m=8`，但 stride 是 `m=4`：
+重叠压缩的 receptive field 宽度是 $`2m=8`$，但 stride 是 $`m=4`$：
 
 ```text
 entry 0: masked previous block + current chunk 0
@@ -60,45 +66,55 @@ entry 2: previous chunk 1       + current chunk 2（需等尾块就绪）
 | 8 | 2 | 0 | entry 1 |
 | 10 | 2 | 2 | 无；entry 2 仍含未完成当前块 |
 
-如果一个离线 prefill 明确用 mask 处理最后的不完整块，可以生成 `ceil(S/m)=3` 个逻辑输出；在线 decode 的**可见完成条目数**仍必须按就绪条件推进。教程后文出现 `ceil(S/m)` 时描述的是 padded batch shape，出现 `floor(token_len/m)` 时描述的是在线可见状态，两者不可混用。
+如果一个离线 prefill 明确用 mask 处理最后的不完整块，可以生成 $`\mathrm{ceil}\left(\frac{S}{m}\right)=3`$ 个逻辑输出；在线 decode 的**可见完成条目数**仍必须按就绪条件推进。教程后文出现 `ceil(S/m)` 时描述的是 padded batch shape，出现 `floor(token_len/m)` 时描述的是在线可见状态，两者不可混用。
 
 ### 单个压缩特征的数值例子
 
 为便于手算，只观察一个输出特征 `d`，设某 entry 的四个有效源位置经过内容投影后为：
 
-```text
-Ubar[:,d] = [2.0, 1.0, -1.0, 3.0]
-gate+APE  = [0.0, 1.0,  0.0, 0.0]
+```math
+{\mathrm{Ubar}}_{:,d}=\left[2.0,1.0,-1.0,3.0\right]
+```
+
+```math
+\mathrm{gate}+\mathrm{APE}=\left[0.0,1.0,0.0,0.0\right]
 ```
 
 沿**源位置轴** softmax：
 
-```text
-A[:,d] = softmax([0,1,0,0])
-       ≈ [0.175, 0.475, 0.175, 0.175]
-
-C[d] = Σ_r A[r,d] Ubar[r,d]
-     ≈ 0.175*2 + 0.475*1 + 0.175*(-1) + 0.175*3
-     = 1.175
+```math
+{A}_{:,d}=\mathrm{softmax}\left(\left[0,1,0,0\right]\right)
 ```
 
-真实张量对每个 `d=0..D-1` 都有独立的 `[2m]` 权重，所以不同特征可以从不同源 token 提取证据。这不是 average pooling；内容和值得保留的位置都由训练学习。
+```math
+\approx  \left[0.175, 0.475, 0.175, 0.175\right]
+```
+
+```math
+C\left[d\right] = \sum_{r} A\left[r,d\right] \mathrm{Ubar}\left[r,d\right]
+```
+
+```math
+\approx  0.175\cdot 2 + 0.475\cdot 1 + 0.175\cdot \left(-1\right) + 0.175\cdot 3 = 1.175
+```
+
+真实张量对每个 $`d=0..D-1`$ 都有独立的 `[2m]` 权重，所以不同特征可以从不同源 token 提取证据。这不是 average pooling；内容和值得保留的位置都由训练学习。
 
 ### 一次 CSA decode 的完整 Tensor 账本
 
-设 `B=2,Nq=64,D=128,Dc=512,m=4,w=128,k=512`，当前每序列有 `L=32768` 个原始 token，则压缩候选约 `Nc=8192`：
+设 $`B=2,\qquad \mathrm{Nq}=64,\qquad D=128,\qquad \mathrm{Dc}=512,\qquad m=4,\qquad w=128,\qquad k=512`$，当前每序列有 $`L=32768`$ 个原始 token，则压缩候选约 $`\mathrm{Nc}=8192`$：
 
 | 阶段 | 输入 | 输出 | 说明 |
 |---|---:|---:|---|
-| 当前 token 投影 | `[2,1,H]` | local K/V、压缩器 content/gate | 更新两类状态 |
+| 当前 token 投影 | $`\left[2,1,H\right]`$ | local K/V、压缩器 content/gate | 更新两类状态 |
 | 压缩器尾部 | 旧 tail + 当前投影 | tail 或新 `C [2,1,512]` | 每满 4 token 才提交 entry |
-| Indexer Q | 当前 query latent | `[2,64,128]` 等实现配置 | 与 DSA 类似的轻量 heads |
-| Index scan | Q + `KI [2,8192,128]` | score `[2,8192]` | 对压缩条目而非 token 扫描 |
-| Top-k | score | ids `[2,512]` | ids 是压缩逻辑 ID |
+| Indexer Q | 当前 query latent | $`\left[2,64,128\right]`$ 等实现配置 | 与 DSA 类似的轻量 heads |
+| Index scan | Q + `KI [2,8192,128]` | score $`\left[2,8192\right]`$ | 对压缩条目而非 token 扫描 |
+| Top-k | score | ids $`\left[2,512\right]`$ | ids 是压缩逻辑 ID |
 | 支撑集合并 | local `≤128` + selected `≤512` | `visible [2,≤640,128]` | 可在融合 kernel 中保持两个 buffer |
 | Main logits | `Q [2,64,128]` × visible | `[2,64,≤640]` | 加 mask/sink 后 softmax |
-| Head output | probability × visible | `[2,64,128]` | 共享 K=V 的 MQA 语义 |
-| 分组低秩输出 | `[2,64,128]` | `[2,H]` | inverse partial RoPE 顺序不可改变 |
+| Head output | probability × visible | $`\left[2,64,128\right]`$ | 共享 K=V 的 MQA 语义 |
+| 分组低秩输出 | $`\left[2,64,128\right]`$ | $`\left[2,H\right]`$ | inverse partial RoPE 顺序不可改变 |
 
 这个表同时说明了为何 CSA runtime 需要局部 KV 池、压缩 KV 池、index-key 池和压缩器 tail，而不是一个普通 paged-KV pool。
 
@@ -118,11 +134,11 @@ C[d] = Σ_r A[r,d] Ubar[r,d]
 
 DeepSeek Sparse Attention（DSA）选择 token 级潜在 KV 条目。其注意力主核是稀疏的，但轻量 indexer 仍需扫描 token 历史。
 
-CSA 把候选空间从 `L` 个 token 条目缩小为约 `L / m` 个压缩条目，其中 `m` 是压缩步长。若主核检索 `k` 个压缩条目，则：
+CSA 把候选空间从 `L` 个 token 条目缩小为约 $`\frac{L}{m}`$ 个压缩条目，其中 `m` 是压缩步长。若主核检索 `k` 个压缩条目，则：
 
 | 组件 | DSA | CSA |
 |---|---:|---:|
-| 每个 query 的 indexer 候选数 | `L` | 约 `L / m` |
+| 每个 query 的 indexer 候选数 | `L` | 约 $`\frac{L}{m}`$ |
 | 每个 query 的主核条目数 | `k` | `k` 个压缩条目 |
 | 长程主缓存粒度 | token | 压缩块 |
 
@@ -135,8 +151,8 @@ CSA 把候选空间从 `L` 个 token 条目缩小为约 `L / m` 个压缩条目�
 - `X in R[L, d_model]`：隐藏状态；
 - `m`：CSA 压缩步长；
 - `m'`：HCA 压缩步长，通常远大于 `m`；
-- `Nc = ceil(L / m)`：CSA 条目数；
-- `Nh = ceil(L / m')`：HCA 条目数；
+- $`\mathrm{Nc}=\mathrm{ceil}\left(\frac{L}{m}\right)`$：CSA 条目数；
+- $`\mathrm{Nh} = \mathrm{ceil}\left(L / m'\right)`$：HCA 条目数；
 - `C in R[Nc, d_c]`：CSA 压缩 KV 条目；
 - `K_I in R[Nc, d_i]`：压缩 indexer key；
 - `k`：每个 query 选择的 CSA 条目数；
@@ -148,9 +164,12 @@ CSA 把候选空间从 `L` 个 token 条目缩小为约 `L / m` 个压缩条目�
 
 CSA 并非简单地对每 `m` 个 token 求平均。它构造两条内容投影流与两条可学习门控流：
 
-```text
-C_a = X W_a^C       Z_a = X W_a^Z
-C_b = X W_b^C       Z_b = X W_b^Z
+```math
+C_{a} = X W_{a}^{C} Z_{a} = X W_{a}^{Z}
+```
+
+```math
+C_{b} = X W_{b}^{C} Z_{b} = X W_{b}^{Z}
 ```
 
 对于压缩槽位 `i`，压缩器消费两个相邻源块：
@@ -162,13 +181,13 @@ C_b = X W_b^C       Z_b = X W_b^Z
 
 `a`、`b` 两条路径经过排列，使该槽位最多接收 `2m` 个源位置。对门控 logit 做 softmax 后得到按特征学习的混合权重。概念上：
 
-```text
-C_i = 对 2m 个源位置 j 求和：softmax(Z_i)[j] * projected_content[j]
+```math
+C_i=\sum_{j\in\mathcal{V}_i}\mathrm{softmax}(Z_i)_j\,\mathrm{projected\_content}_j,\qquad |\mathcal{V}_i|\le2m
 ```
 
 实际实现会批量执行并重排这些运算，但接口契约由三点定义：
 
-1. 输出步长是 `m`，缓存长度约为 `L / m`；
+1. 输出步长是 `m`，缓存长度约为 $`\frac{L}{m}`$；
 2. 相邻输出覆盖的源位置有重叠；
 3. 增量解码时，不完整块需要持久化压缩器状态。
 
@@ -178,24 +197,40 @@ C_i = 对 2m 个源位置 j 求和：softmax(Z_i)[j] * projected_content[j]
 
 ### 3.1 压缩器的精确逻辑 Shape
 
-设 `D` 为压缩 KV 宽度，重叠式 CSA 使用 `coff=2`。一种便于实现的布局为：
+设 `D` 为压缩 KV 宽度，重叠式 CSA 使用 $`\mathrm{coff}=2`$。一种便于实现的布局为：
+
+```math
+\mathrm{shape}\left(X\right)=\left[B,S,\mathrm{Hmodel}\right]
+```
+
+```math
+U_{\mathrm{flat}} = X \, \mathrm{Wcontent}^{\mathsf T}: \left[B,S,\mathrm{coff}\cdot D\right]
+```
+
+```math
+Z_{\mathrm{flat}} = X \, \mathrm{Wgate}^{\mathsf T}: \left[B,S,\mathrm{coff}\cdot D\right]
+```
 
 ```text
-X: [B,S,Hmodel]
-
-U_flat = X @ Wcontent^T: [B,S,coff*D]
-Z_flat = X @ Wgate^T:    [B,S,coff*D]
-
 把 S padding 到 Nc*m，再 reshape：
-U: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
-Z: [B,Nc,m,coff,D] = [B,Nc,m,2,D]
+```
+
+```math
+U: \left[B,\mathrm{Nc},m,\mathrm{coff},D\right] = \left[B,\mathrm{Nc},m,2,D\right]
+```
+
+```math
+Z: \left[B,\mathrm{Nc},m,\mathrm{coff},D\right] = \left[B,\mathrm{Nc},m,2,D\right]
 ```
 
 对压缩槽位 `i`，overlap transform 构造：
 
-```text
-Ubar_i = concat(U[i,:,path_a,:], U[i-1,:,path_b,:])  # [B,2m,D]
-Zbar_i = concat(Z[i,:,path_a,:], Z[i-1,:,path_b,:])  # [B,2m,D]
+```math
+\mathrm{Ubar\_i}=\mathrm{concat}\left({U}_{i,:,\mathrm{path\_a},:},{U}_{i-1,:,\mathrm{path\_b},:}\right)\qquad\text{[B,2m,D]}
+```
+
+```math
+\mathrm{Zbar\_i}=\mathrm{concat}\left({Z}_{i,:,\mathrm{path\_a},:},{Z}_{i-1,:,\mathrm{path\_b},:}\right)\qquad\text{[B,2m,D]}
 ```
 
 在序列左边界，缺失的前一块会被 padding 并 mask。压缩窗口内部的可学习绝对位置 embedding 为：
@@ -206,14 +241,20 @@ APE: [2m,D]
 
 逐特征的源位置权重与压缩条目为：
 
+```math
+A_{i}\left[b,r,d\right] = \mathrm{exp}\left(\mathrm{Zbar\_i}\left[b,r,d\right] + \mathrm{APE}\left[r,d\right]\right) / \sum_{u \mathrm{valid}} \mathrm{exp}\left(\mathrm{Zbar\_i}\left[b,u,d\right] + \mathrm{APE}\left[u,d\right]\right)
+```
+
+```math
+C_{i}\left[b,d\right] = \sum_{r \mathrm{valid}} A_{i}\left[b,r,d\right] \cdot  \mathrm{Ubar\_i}\left[b,r,d\right]
+```
+
 ```text
-A_i[b,r,d] = exp(Zbar_i[b,r,d] + APE[r,d])
-             / sum_(u valid) exp(Zbar_i[b,u,d] + APE[u,d])
-
-C_i[b,d] = sum_(r valid) A_i[b,r,d] * Ubar_i[b,r,d]
-
 A_i: [B,2m,D]
-C_i: [B,D]
+```
+
+```math
+\mathrm{shape}\left(C_{i}\right)=\left[B,D\right]
 ```
 
 Softmax 沿**源位置轴**执行，并对每个特征 `d` 独立计算。这比每 token 只有一个标量权重更有表达力：不同输出通道可以从不同源位置保留信息。
@@ -234,12 +275,18 @@ C_3 查看 chunk 2 和 3
 
 只有当一个压缩条目所需的全部源位置都已经到达，它才能对 query 可见。因果推理绝不能让 query 读取包含未来 token 的摘要。
 
-对 `m=4`，源位置 `0..3` 的完整摘要不能被位置 `0..2` 的 query 使用。Runtime 需要把已完成条目数与原始 token 长度分开维护：
+对 $`m=4`$，源位置 $`\{0,\ldots,3\}`$ 的完整摘要不能被位置 $`\{0,\ldots,2\}`$ 的 query 使用。Runtime 需要把已完成条目数与原始 token 长度分开维护：
 
-```text
-token_len = t + 1
-complete_entries = floor(token_len / m)
-tail_len = token_len % m
+```math
+\mathrm{token\_len}=t+1
+```
+
+```math
+\mathrm{complete\_entries}=\mathrm{floor}\left(\frac{\mathrm{token\_len}}{m}\right)
+```
+
+```math
+\mathrm{tail\_len}=\mathrm{token\_len}\bmod m
 ```
 
 Overlap 会增加前一路径状态，但不会放松这个因果边界。
@@ -248,11 +295,20 @@ Overlap 会增加前一路径状态，但不会放松这个因果边界。
 
 CSA 在压缩条目上执行检索，而非在原始 token 位置上检索。其 indexer 沿用 DSA 的高层模式：
 
-```text
-c_q = x_t W_DQ
-q_I = c_q W_UQ^I
-score(t, s) = sum_j w_j^I * ReLU(q^I_{t,j} dot k^I_s)
-I_t = TopK_s(score(t, s), k)
+```math
+c_{q} = x_{t} W_{\mathrm{DQ}}
+```
+
+```math
+q_{I} = c_{q} W_{\mathrm{UQ}}^{I}
+```
+
+```math
+\mathrm{score}(t,s)=\sum_j w_j^I\,\mathrm{ReLU}\left(\left\langle q^I_{t,j},k^I_s\right\rangle\right)
+```
+
+```math
+I_{t} = \mathrm{TopK\_s}\left(\mathrm{score}\left(t, s\right), k\right)
 ```
 
 区别在于 `s` 的取值域：它遍历 `Nc` 个压缩条目。因此，indexer key 需要独立的压缩缓存，并与主压缩 KV 缓存保持同步。
@@ -265,11 +321,20 @@ I_t = TopK_s(score(t, s), k)
 
 简化的 query 路径为：
 
-```text
-Q_t = x_t W^Q
-selected = C[I_t]
-A_t = softmax(Q_t selected^T + mask)
-O_t = GroupedOutput(A_t selected)
+```math
+Q_{t} = x_{t} W^{Q}
+```
+
+```math
+\mathrm{selected}={C}_{I_{t}}
+```
+
+```math
+A_{t} = \mathrm{softmax}\left(Q_{t} \mathrm{selected}^{\mathsf T} + \mathrm{mask}\right)
+```
+
+```math
+O_{t} = \mathrm{GroupedOutput}\left(A_{t} \mathrm{selected}\right)
 ```
 
 实际实现还包含归一化、位置处理、head 分组和融合 kernel。需要明确概念边界：
@@ -282,39 +347,77 @@ O_t = GroupedOutput(A_t selected)
 
 对一个 query token，定义：
 
-```text
-Klocal = Vlocal: [w_valid,1,D]
-Kcomp  = Vcomp:  [k_valid,1,D]       # CSA
-                 [Nh_valid,1,D]      # HCA
+```math
+\mathrm{Klocal} = \mathrm{Vlocal}: \left[w_{\mathrm{valid}},1,D\right]
+```
 
-Kvisible = concat(Klocal, Kcomp, dim=sequence)
-Vvisible = Kvisible                  # 共享 K=V 的 MQA
+```math
+\mathrm{Kcomp} = \mathrm{Vcomp}: \left[k_{\mathrm{valid}},1,D\right] \qquad\text{CSA}
+```
+
+```text
+[Nh_valid,1,D]      # HCA
+```
+
+```math
+\mathrm{Kvisible} = \mathrm{concat}\left(\mathrm{Klocal}, \mathrm{Kcomp}, \mathrm{dim}=\mathrm{sequence}\right)
+```
+
+```math
+\mathrm{Vvisible}=\mathrm{Kvisible}\qquad\text{共享 K=V 的 MQA}
 ```
 
 当 `Q [Nq,D]` 时，逻辑张量为：
 
-```text
-logits: [Nq,Nvisible]
-Nvisible = w_valid + k_valid         # CSA layer
-Nvisible = w_valid + Nh_valid        # HCA layer
-prob:   [Nq,Nvisible]
-Ohead:  [Nq,D]
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[\mathrm{Nq},\mathrm{Nvisible}\right]
+```
+
+```math
+\mathrm{Nvisible}=w_{\mathrm{valid}}+k_{\mathrm{valid}}\qquad\text{CSA layer}
+```
+
+```math
+\mathrm{Nvisible}=w_{\mathrm{valid}}+\mathrm{Nh\_valid}\qquad\text{HCA layer}
+```
+
+```math
+\mathrm{shape}\left(\mathrm{prob}\right)=\left[\mathrm{Nq},\mathrm{Nvisible}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Ohead}\right)=\left[\mathrm{Nq},D\right]
 ```
 
 逐 head attention sink 会为归一化增加一个稳定的额外 logit。融合 kernel 可以把局部与压缩缓存放在不同物理 buffer，但在数学上，它们构成本 layer 的同一个因果支撑集。
 
 ### 5.2 分组低秩输出投影
 
-宽 head 输出通常会展平为 `[Tq,Nq*D]`。DeepSeek-V4 在低秩输出投影前对 head 分组。设输出组数为 `G`，rank 为 `Ro`：
+宽 head 输出通常会展平为 $`\left[\mathrm{Tq},\mathrm{Nq}\cdot D\right]`$。DeepSeek-V4 在低秩输出投影前对 head 分组。设输出组数为 `G`，rank 为 `Ro`：
+
+```math
+\mathrm{shape}\left(\mathrm{Ohead}\right)=\left[\mathrm{Tq},\mathrm{Nq},D\right]
+```
 
 ```text
-Ohead:    [Tq,Nq,D]
 Ogroup:   [Tq,G,(Nq/G)*D]
 Woa:      [G,Ro,(Nq/G)*D]
-Olowrank: [Tq,G,Ro]
-merge:    [Tq,G*Ro]
-Wob:      [Hmodel,G*Ro]
-Omodel:   [Tq,Hmodel]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Olowrank}\right)=\left[\mathrm{Tq},G,\mathrm{Ro}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{merge}\right)=\left[\mathrm{Tq},G\cdot \mathrm{Ro}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Wob}\right)=\left[\mathrm{Hmodel},G\cdot \mathrm{Ro}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Omodel}\right)=\left[\mathrm{Tq},\mathrm{Hmodel}\right]
 ```
 
 在投影前，架构会对指定的 partial-RoPE 输出通道执行逆旋转。交换 inverse RoPE 与可学习投影的顺序会改变模型函数。
@@ -376,12 +479,24 @@ HCA layer：O(L / m') 稠密主核 + O(w) 局部路径
 
 从整个模型看，缓存包含多种表示；每个 layer 只持有其配置类型所需的子集：
 
-```text
-CSA 主缓存          ~ O(L / m)
-CSA indexer-key 缓存 ~ O(L / m)
-HCA 缓存            ~ O(L / m')
-局部未压缩 KV        ~ 每个序列 O(w) 个活跃条目
-压缩器尾部状态        ~ O(m + m')
+```math
+\mathrm{CSA} \text{主缓存} \sim  O\left(L / m\right)
+```
+
+```math
+\mathrm{CSA} \mathrm{indexer}-\mathrm{key} \text{缓存} \sim  O\left(L / m\right)
+```
+
+```math
+\mathrm{HCA} \text{缓存} \sim  O\left(L / m'\right)
+```
+
+```math
+\text{局部未压缩} \mathrm{KV} \sim  \text{每个序列} O\left(w\right) \text{个活跃条目}
+```
+
+```math
+\text{压缩器尾部状态} \sim  O\left(m + m'\right)
 ```
 
 真正的收益取决于字节数，而不只是条目数。需要记录每个池的 dtype、特征宽度、scale/元数据开销、对齐与页面碎片。
@@ -459,7 +574,7 @@ page 与 block 大小应考虑压缩步长。如果物理分配单元无法自�
 |---|---|---|---|
 | 长程存储单元 | token 级潜在条目 | 中度压缩块 | 重度压缩块 |
 | 检索方式 | top-k | top-k | 无；对短序列稠密计算 |
-| 候选数 | `L` | `L / m` | `L / m'` |
+| 候选数 | `L` | $`\frac{L}{m}`$ | `L / m'` |
 | 主 query 工作量 | `k` | `k` | `L / m'` |
 | 主要角色 | 选中的精细信息 | 选中的中分辨率历史 | 粗粒度全局覆盖 |
 
@@ -501,7 +616,7 @@ CSA 选中槽位:  逻辑上 [S,k]
 HCA 条目:      逻辑上 [S,ceil(S/m')]
 ```
 
-只有同时满足 request 边界与条目就绪条件的位置才有效。Backend 可能把 query 专属 CSA 槽位展平成 `[S,S*k]` 的 workspace 列，但这是执行布局，并不表示持久缓存中真的有 `S*k` 个条目。
+只有同时满足 request 边界与条目就绪条件的位置才有效。Backend 可能把 query 专属 CSA 槽位展平成 $`\left[S,S\cdot k\right]`$ 的 workspace 列，但这是执行布局，并不表示持久缓存中真的有 `S*k` 个条目。
 
 ## 19. 完整 Tensor 账本
 
@@ -509,22 +624,22 @@ HCA 条目:      逻辑上 [S,ceil(S/m')]
 
 | 阶段 | 张量 | 逻辑 shape | 说明 |
 |---|---|---:|---|
-| 输入 | hidden states | `[Tq,Hmodel]` | 共享 layer 输入 |
-| 原始局部投影 | 新 `K=V` | `[Tq,1,D]` | 追加到 SWA pool |
-| 主压缩器内容 | `U` | `[Tq,coff*D]` | CSA 的 `coff=2`，HCA 为 `1` |
-| 主压缩器 gate | `Z` | `[Tq,coff*D]` | 与内容使用相同拆分 |
-| 压缩器 workspace | `Ubar/Zbar` | `[Nc,coff*m,D]` | 概念 shape，通常被融合 |
-| 新主压缩条目 | `Cnew` | `[Nnew,D]` | 只在边界发射 |
-| CSA index 压缩输出 | `KInew` | `[Nnew,DI]` | 仅 CSA |
-| Index query | `QI` | `[Tq,HI,DI]` | 仅 CSA |
-| Index score | `I` | `[Tq,Nc_visible]` | 仅 CSA，可流式计算 |
-| 选中 ID | `ids` | `[Tq,k]` | 仅 CSA |
-| 局部 ID | `local_ids` | `[Tq,w]` 有界 | 无效槽位被 mask |
-| 可见 K/V | 概念并集 | `[Tq,Nvisible,1,D]` | 物理 pool 仍分离 |
-| 主 logits | `A` | `[Tq,Nq,Nvisible]` | 优化路径中分块/online |
-| Head 输出 | `Ohead` | `[Tq,Nq,D]` | 随后做 inverse partial RoPE |
-| 分组投影 | `Olowrank` | `[Tq,G,Ro]` | 最终投影之前 |
-| Layer 输出 | `Omodel` | `[Tq,Hmodel]` | 回到残差路径 |
+| 输入 | hidden states | $`\left[\mathrm{Tq},\mathrm{Hmodel}\right]`$ | 共享 layer 输入 |
+| 原始局部投影 | 新 $`K=V`$ | $`\left[\mathrm{Tq},1,D\right]`$ | 追加到 SWA pool |
+| 主压缩器内容 | `U` | $`\left[\mathrm{Tq},\mathrm{coff}\cdot D\right]`$ | CSA 的 $`\mathrm{coff}=2`$，HCA 为 `1` |
+| 主压缩器 gate | `Z` | $`\left[\mathrm{Tq},\mathrm{coff}\cdot D\right]`$ | 与内容使用相同拆分 |
+| 压缩器 workspace | `Ubar/Zbar` | $`\left[\mathrm{Nc},\mathrm{coff}\cdot m,D\right]`$ | 概念 shape，通常被融合 |
+| 新主压缩条目 | `Cnew` | $`\left[\mathrm{Nnew},D\right]`$ | 只在边界发射 |
+| CSA index 压缩输出 | `KInew` | $`\left[\mathrm{Nnew},\mathrm{DI}\right]`$ | 仅 CSA |
+| Index query | `QI` | $`\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]`$ | 仅 CSA |
+| Index score | `I` | $`\left[\mathrm{Tq},\mathrm{Nc\_visible}\right]`$ | 仅 CSA，可流式计算 |
+| 选中 ID | `ids` | $`\left[\mathrm{Tq},k\right]`$ | 仅 CSA |
+| 局部 ID | `local_ids` | $`\left[\mathrm{Tq},w\right]`$ 有界 | 无效槽位被 mask |
+| 可见 K/V | 概念并集 | $`\left[\mathrm{Tq},\mathrm{Nvisible},1,D\right]`$ | 物理 pool 仍分离 |
+| 主 logits | `A` | $`\left[\mathrm{Tq},\mathrm{Nq},\mathrm{Nvisible}\right]`$ | 优化路径中分块/online |
+| Head 输出 | `Ohead` | $`\left[\mathrm{Tq},\mathrm{Nq},D\right]`$ | 随后做 inverse partial RoPE |
+| 分组投影 | `Olowrank` | $`\left[\mathrm{Tq},G,\mathrm{Ro}\right]`$ | 最终投影之前 |
+| Layer 输出 | `Omodel` | $`\left[\mathrm{Tq},\mathrm{Hmodel}\right]`$ | 回到残差路径 |
 
 ## 20. 把增量压缩器看成状态机
 
@@ -576,21 +691,27 @@ def overlap_compress(U, Z, ape, valid):
     return compressed
 ```
 
-测试应覆盖 `S<m`、`S=m`、`S=m+1`、多个完整块、混合 request 长度，以及边界落在压缩块内部的 split prefill。
+测试应覆盖 $`S \lt m`$、$`S=m`$、$`S=m+1`$、多个完整块、混合 request 长度，以及边界落在压缩块内部的 split prefill。
 
 ## 22. 内存计算实例
 
-取 `L=1,048,576`、`D=512`，并用 FP8 非 RoPE 存储做一个粗略下界比较：
+取 $`L=1048576`$、$`D=512`$，并用 FP8 非 RoPE 存储做一个粗略下界比较：
 
-```text
-未压缩条目: 1,048,576 * 512 bytes ≈ 512 MiB/layer
-CSA m=4:      262,144 * 512 bytes ≈ 128 MiB/CSA layer
-HCA m'=128:     8,192 * 512 bytes ≈   4 MiB/HCA layer
+```math
+\text{未压缩条目}: 1,048,576 \cdot  512 \mathrm{bytes} \approx  512 \mathrm{MiB}/\mathrm{layer}
+```
+
+```math
+\text{CSA m}=4: 262,144 \cdot  512 \mathrm{bytes} \approx  128 \mathrm{MiB}/\mathrm{CSA} \mathrm{layer}
+```
+
+```math
+\text{HCA m'}=128: 8,192 \cdot  512 \mathrm{bytes} \approx  4 \mathrm{MiB}/\mathrm{HCA} \mathrm{layer}
 ```
 
 实际内存还要加入局部 SWA pool、BF16 RoPE 通道、CSA indexer cache、scale、对齐、压缩器状态与分配器碎片。这个例子说明“4 倍压缩”和“128 倍压缩”只描述序列条目项，而不是总 serving 内存。
 
-对一个 `k=512` 的 CSA decode query，主压缩读取约为 `512*D` 个元素，与 `L` 无关；indexer 仍需扫描最多 `L/4` 个压缩 index key。HCA 则读取全部 `L/128` 个条目，但没有 top-k。
+对一个 $`k=512`$ 的 CSA decode query，主压缩读取约为 $`512\cdot D`$ 个元素，与 `L` 无关；indexer 仍需扫描最多 `L/4` 个压缩 index key。HCA 则读取全部 `L/128` 个条目，但没有 top-k。
 
 ## 23. 调试与练习
 
@@ -606,9 +727,9 @@ HCA m'=128:     8,192 * 512 bytes ≈   4 MiB/HCA layer
 
 练习：
 
-1. 对 `S=19`、`m=4`，逐 token 计算 `Nc`、已完成条目数与 tail length。
+1. 对 $`S=19`$、$`m=4`$，逐 token 计算 `Nc`、已完成条目数与 tail length。
 2. 画出 overlap 模式下哪些源 chunk 会贡献给 `C_1`、`C_2` 与 `C_3`。
-3. 当 `w=128`、`k=512`、`Nq=64` 时，写出 `Tq=16` 的主 logit 逻辑 shape。
+3. 当 $`w=128`$、$`k=512`$、$`\mathrm{Nq}=64`$ 时，写出 $`\mathrm{Tq}=16`$ 的主 logit 逻辑 shape。
 4. 解释为什么 HCA layer 不需要 top-k 元数据，但仍需要 compressor-tail state。
 5. 设计一个 prefix-cache key，证明 local、compressed、indexer 与 tail state 指向同一 token 边界。
 

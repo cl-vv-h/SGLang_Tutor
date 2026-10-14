@@ -42,60 +42,74 @@ Logical shapes at each stage:
 
 | Stage | Input | Output | Notes |
 |---|---:|---:|---|
-| Token IDs | `[B,S]` or packed `[T]` | Same as input | Integer vocabulary indices |
-| Embedding | `[T]` | `[T,H]` | Lookup embedding row by token id |
-| Decoder Layers | `[T,H]` | `[T,H]` | Repeated `L` times, main path width unchanged |
-| Final RMSNorm | `[T,H]` | `[T,H]` | Independent normalization per token's hidden vector |
-| LM Head | `[M,H]` | `[M,V]` | `M` = number of token rows actually needing logits |
-| Sampling | `[M,V]` | `[B]` or multiple tokens | Temperature, Top-K, Top-P sampling |
+| Token IDs | $`\left[B,S\right]`$ or packed $`\left[T\right]`$ | Same as input | Integer vocabulary indices |
+| Embedding | $`\left[T\right]`$ | $`\left[T,H\right]`$ | Lookup embedding row by token id |
+| Decoder Layers | $`\left[T,H\right]`$ | $`\left[T,H\right]`$ | Repeated `L` times, main path width unchanged |
+| Final RMSNorm | $`\left[T,H\right]`$ | $`\left[T,H\right]`$ | Independent normalization per token's hidden vector |
+| LM Head | $`\left[M,H\right]`$ | $`\left[M,V\right]`$ | `M` = number of token rows actually needing logits |
+| Sampling | $`\left[M,V\right]`$ | $`\left[B\right]`$ or multiple tokens | Temperature, Top-K, Top-P sampling |
 
-Training typically sets `M=T`. Online autoregressive inference usually only needs logits at each request's last valid position, so `M=B` is common — there's no need to generate full-vocabulary logits for every row of the prompt.
+Training typically sets $`M=T`$. Online autoregressive inference usually only needs logits at each request's last valid position, so $`M=B`$ is common — there's no need to generate full-vocabulary logits for every row of the prompt.
 
 ## 3. Equal-Length Layout vs Packed Token Layout
 
-Textbooks usually write hidden states as `[B,S,H]`. When sequences in a batch have different lengths, you can pad to a uniform length or pack only valid tokens:
+Textbooks usually write hidden states as $`\left[B,S,H\right]`$. When sequences in a batch have different lengths, you can pad to a uniform length or pack only valid tokens:
 
-```text
-request 0: S_0 = 4
-request 1: S_1 = 2
-request 2: S_2 = 5
+```math
+\text{request 0}: S_{0} = 4
 ```
 
-If all padded to `S_max=5`, shape is `[3,5,H]` with 4 padding rows. Packed representation keeps only valid tokens:
-
-```text
-T = 4 + 2 + 5 = 11
-hidden_states.shape = [11,H]
+```math
+\text{request 1}: S_{1} = 2
 ```
 
-The packed representation must additionally store each sequence's start offset and length. Attention uses these boundaries to restrict visibility; linear layers, normalization, and MoE can directly process contiguous `[T,H]`.
+```math
+\text{request 2}: S_{2} = 5
+```
+
+If all padded to $`S_{\mathrm{max}}=5`$, shape is $`\left[3,5,H\right]`$ with 4 padding rows. Packed representation keeps only valid tokens:
+
+```math
+T=4+2+5=11
+```
+
+```math
+\mathrm{hidden\_states}.\mathrm{shape} = \left[11,H\right]
+```
+
+The packed representation must additionally store each sequence's start offset and length. Attention uses these boundaries to restrict visibility; linear layers, normalization, and MoE can directly process contiguous $`\left[T,H\right]`$.
 
 Both representations have the same mathematical meaning:
 
-```text
-dense training view: [B,S,H]
-packed serving view: [T,H], T = sum_i S_i
+```math
+\mathrm{shape}(X_{\mathrm{dense}})=[B,S,H],\quad\mathrm{shape}(X_{\mathrm{packed}})=[T,H],\quad T=\sum_iS_i
 ```
 
 ## 4. Token Embedding
 
 Embedding weights:
 
-```text
-W_embed: [V,H]
-input_ids: [T]
+```math
+\mathrm{shape}\left(W_{\mathrm{embed}}\right)=\left[V,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[T\right]
 ```
 
 The embedding lookup selects one row per id:
 
-```text
-X_0[t,:] = W_embed[input_ids[t],:]
-X_0: [T,H]
+```math
+{X_{0}}_{t,:}={W_{\mathrm{embed}}}_{{\mathrm{input\_ids}}_{t},:}
+```
+
+```math
+\mathrm{shape}\left(X_{0}\right)=\left[T,H\right]
 ```
 
 This is not ordinary matrix multiplication — it's sparse row indexing. Each token transforms from an integer into a continuous vector of length `H`.
 
-Position is not directly added as a `[T,H]` absolute position vector. Qwen3-MoE applies positional information to Q and K within Attention via RoPE.
+Position is not directly added as a $`\left[T,H\right]`$ absolute position vector. Qwen3-MoE applies positional information to Q and K within Attention via RoPE.
 
 ## 5. One Decoder Layer
 
@@ -103,40 +117,64 @@ Position is not directly added as a `[T,H]` absolute position vector. Qwen3-MoE 
 
 Most modern decoder-only models use a pre-norm residual structure. Let the layer input be `x_l [T,H]`:
 
-```text
-n_l = RMSNorm(x_l)                  [T,H]
-a_l = CausalGQA(n_l)                [T,H]
-r_l = x_l + a_l                     [T,H]
-m_l = RMSNorm(r_l)                  [T,H]
-f_l = SparseMoE(m_l)                [T,H]
-x_(l+1) = r_l + f_l                 [T,H]
+```math
+n_{l}=\mathrm{RMSNorm}\left(x_{l}\right)\qquad\mathrm{shape}:\left[T,H\right]
 ```
 
-The main path is always `[T,H]`, making residual addition valid. Attention and MoE can change dimensions internally but must restore `[T,H]` before returning.
+```math
+a_{l} = \mathrm{CausalGQA}\left(n_{l}\right) \left[T,H\right]
+```
+
+```math
+r_{l}=x_{l}+a_{l}\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+```math
+m_{l}=\mathrm{RMSNorm}\left(r_{l}\right)\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+```math
+f_{l}=\mathrm{SparseMoE}\left(m_{l}\right)\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+```math
+{x}_{l+1}=r_{l}+f_{l}\qquad\mathrm{shape}:\left[T,H\right]
+```
+
+The main path is always $`\left[T,H\right]`$, making residual addition valid. Attention and MoE can change dimensions internally but must restore $`\left[T,H\right]`$ before returning.
 
 ### 5.1 RMSNorm
 
 For a single token vector `x in R^H`:
 
-```text
-rms(x) = sqrt(mean(x_i^2) + epsilon)
-y_i = gamma_i * x_i / rms(x)
+```math
+\mathrm{rms}\left(x\right) = \mathrm{sqrt}\left(\mathrm{mean}\left(x_{i}^{2}\right) + \epsilon\right)
+```
+
+```math
+y_{i} = \gamma_{i} \cdot  x_{i} / \mathrm{rms}\left(x\right)
 ```
 
 Where `gamma [H]` are learnable weights. RMSNorm does not mix across tokens or across hidden-dimension positions — it only computes scale over each token's `H` elements.
 
-```text
-input:  [T,H]
-gamma:  [H]
-output: [T,H]
+```math
+\mathrm{shape}\left(\mathrm{input}\right)=\left[T,H\right]
+```
+
+```math
+\mathrm{shape}\left(\gamma\right)=\left[H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{output}\right)=\left[T,H\right]
 ```
 
 ### 5.2 Residual Connection
 
 Residual connections add sublayer output back to the main path:
 
-```text
-r = x + sublayer(norm(x))
+```math
+r = x + \mathrm{sublayer}\left(\mathrm{norm}\left(x\right)\right)
 ```
 
 This requires the two terms to have exactly the same shape. Its purpose is to preserve the original representation and provide short gradient paths for deep networks. In inference, it also determines how kernel fusion and temporary buffers are organized.
@@ -147,8 +185,8 @@ This requires the two terms to have exactly the same shape. Its purpose is to pr
 
 Token `t`'s Attention output depends on visible historical tokens:
 
-```text
-a_t = sum_j alpha_(t,j) * v_j, j <= t
+```math
+a_{t} = \sum_{j} \alpha_{t,j} \cdot  v_{j}, j \le  t
 ```
 
 Thus Attention exchanges information along the sequence dimension. It requires positions, causal masks, and historical KV Cache.
@@ -157,8 +195,8 @@ Thus Attention exchanges information along the sequence dimension. It requires p
 
 The MoE router selects experts based on each token's hidden vector. Each expert's internal MLP does not read other tokens:
 
-```text
-f_t = sum_(e in TopK(t)) p_(t,e) * Expert_e(m_t)
+```math
+f_{t} = \sum_{e \in \mathrm{TopK}\left(t\right)} p_{t,e} \cdot  \mathrm{Expert\_e}\left(m_{t}\right)
 ```
 
 MoE performs nonlinear transformations along the feature dimension; token-to-token coupling primarily comes from routing's parallel scheduling and communication, not mathematical token-level attention.
@@ -167,29 +205,38 @@ MoE performs nonlinear transformations along the feature dimension; token-to-tok
 
 After `L` layers:
 
-```text
-X_L: [T,H]
-X_final = RMSNorm(X_L): [T,H]
+```math
+\mathrm{shape}\left(X_{L}\right)=\left[T,H\right]
+```
+
+```math
+X_{\mathrm{final}} = \mathrm{RMSNorm}\left(X_{L}\right): \left[T,H\right]
 ```
 
 LM Head weights:
 
-```text
-W_lm: [V,H]
+```math
+\mathrm{shape}\left(W_{\mathrm{lm}}\right)=\left[V,H\right]
 ```
 
 Selecting `M` rows of hidden states:
 
-```text
-H_selected: [M,H]
-logits = H_selected @ W_lm^T
-logits: [M,V]
+```math
+\mathrm{shape}\left(H_{\mathrm{selected}}\right)=\left[M,H\right]
+```
+
+```math
+\mathrm{logits}=H_{\mathrm{selected}}\,{W_{\mathrm{lm}}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[M,V\right]
 ```
 
 Each `logits[m,v]` is the unnormalized score of the `m`-th position-to-predict for vocabulary token `v`. Probability:
 
-```text
-P(v) = softmax(logits / temperature)[v]
+```math
+P\left(v\right)={\mathrm{softmax}\left(\frac{\mathrm{logits}}{\mathrm{temperature}}\right)}_{v}
 ```
 
 `argmax` is greedy decoding; Top-K and Top-P renormalize over a candidate subset then sample.
@@ -198,12 +245,24 @@ P(v) = softmax(logits / temperature)[v]
 
 Suppose two requests with new input lengths 3 and 2:
 
-```text
-B = 2
-extend lengths = [3,2]
-T = 5
-input_ids: [5]
-positions: [5]
+```math
+B=2
+```
+
+```math
+\text{extend lengths}= \left[3,2\right]
+```
+
+```math
+T=5
+```
+
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[5\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[5\right]
 ```
 
 Each layer executes:
@@ -224,20 +283,38 @@ Current K/V are written to each layer's KV Cache. Attention only accesses each r
 
 Normal decode inputs one token per active request per round:
 
-```text
-B_active = B
-T = B
-input_ids: [B]
-positions: [B]
-hidden_states: [B,H]
+```math
+B_{\mathrm{active}}=B
+```
+
+```math
+T=B
+```
+
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[B\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[B\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[B,H\right]
 ```
 
 Each layer only computes new Q/K/V:
 
-```text
-Q_new: [B,Nq,D]
-K_new: [B,Nkv,D]
-V_new: [B,Nkv,D]
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[B,\mathrm{Nq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{new}}\right)=\left[B,\mathrm{Nkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{new}}\right)=\left[B,\mathrm{Nkv},D\right]
 ```
 
 But each Query needs to read that request's historical KV Cache of length `L_ctx`:
@@ -253,32 +330,44 @@ Thus decode's arithmetic input tokens are few, while historical KV reads grow wi
 
 The values below illustrate shape relationships, not a specific checkpoint:
 
-```text
-B=2, extend lengths=[3,2], T=5
-H=4096, Nq=32, Nkv=8, D=128
-E=64, K=4, Ie=1536, V=150000
+```math
+B=2, \mathrm{extend} \mathrm{lengths}=\left[3,2\right], T=5
+```
+
+```math
+H=4096,\qquad \mathrm{Nq}=32,\qquad \mathrm{Nkv}=8,\qquad D=128
+```
+
+```math
+E=64,\qquad K=4,\qquad \mathrm{Ie}=1536,\qquad V=150000
 ```
 
 Single-layer main path:
 
 | Variable | Shape |
 |---|---:|
-| `input_ids` | `[5]` |
-| `hidden_states` | `[5,4096]` |
-| `q` | `[5,32,128]` |
-| `k`, `v` | `[5,8,128]` |
-| `attention_output` | `[5,4096]` |
-| `router_logits` | `[5,64]` |
-| `topk_ids`, `topk_weights` | `[5,4]` |
-| dispatched expert rows | At most `5*4=20` rows, each width `4096` |
-| `moe_output` | `[5,4096]` |
+| `input_ids` | $`\left[5\right]`$ |
+| `hidden_states` | $`\left[5,4096\right]`$ |
+| `q` | $`\left[5,32,128\right]`$ |
+| `k`, `v` | $`\left[5,8,128\right]`$ |
+| `attention_output` | $`\left[5,4096\right]`$ |
+| `router_logits` | $`\left[5,64\right]`$ |
+| `topk_ids`, `topk_weights` | $`\left[5,4\right]`$ |
+| dispatched expert rows | At most $`5\cdot 4=20`$ rows, each width `4096` |
+| `moe_output` | $`\left[5,4096\right]`$ |
 
 If only computing logits for each request's last position:
 
-```text
-selected_hidden: [2,4096]
-logits: [2,150000]
-sampled_ids: [2]
+```math
+\mathrm{shape}\left(\mathrm{selected\_hidden}\right)=\left[2,4096\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[2,150000\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{sampled\_ids}\right)=\left[2\right]
 ```
 
 ## 11. Parameters, Activations & Runtime State
@@ -295,7 +384,7 @@ Decoder Layer outputs are not independently preserved as history; decode reuses 
 
 ## 12. Key Structural Constraints
 
-1. The residual main path must maintain `[T,H]`.
+1. The residual main path must maintain $`\left[T,H\right]`$.
 2. `Nq*D` typically equals `H`, while `Nkv*D` can be significantly smaller than `H`.
 3. Causal Attention cannot read future tokens or cross-request tokens.
 4. MoE parameter count can grow with expert count, but single tokens only activate Top-K experts.

@@ -262,7 +262,7 @@ python/sglang/srt/model_loader/utils.py
 | 情况 | 处理方式 | 结果 |
 |---|---|---|
 | SGLang native 已支持 | 直接用 `ModelRegistry.resolve_model_cls()` | 返回 native 模型类，例如 `DeepseekV4ForCausalLM` |
-| 用户指定 `model_impl=transformers` 或 native 不支持但 Transformers 支持 | `resolve_transformers_arch()` 后走 `TransformersForCausalLM` 等包装类 | 牺牲部分 SGLang 专用优化，换取兼容性 |
+| 用户指定 $`\mathrm{model\_impl}=\mathrm{transformers}`$ 或 native 不支持但 Transformers 支持 | `resolve_transformers_arch()` 后走 `TransformersForCausalLM` 等包装类 | 牺牲部分 SGLang 专用优化，换取兼容性 |
 | 完全不支持 | `ModelRegistry` 抛出 unsupported architecture 错误 | 启动失败，需要添加模型实现或修正 config |
 
 外部模型还有一个扩展口：
@@ -417,13 +417,19 @@ python/sglang/srt/model_loader/loader.py
 
 ```text
 ModelConfig.hf_config.architectures = ["DeepseekV4ForCausalLM"]
-  -> get_model_architecture()
-  -> ModelRegistry.resolve_model_cls(["DeepseekV4ForCausalLM"])
-  -> python/sglang/srt/models/deepseek_v4.py
-       EntryClass = [DeepseekV4ForCausalLM]
-  -> DefaultModelLoader._initialize_model()
-       model = DeepseekV4ForCausalLM(config=hf_config, quant_config=...)
-  -> model.load_weights(...)
+-> get_model_architecture()
+-> ModelRegistry.resolve_model_cls(["DeepseekV4ForCausalLM"])
+-> python/sglang/srt/models/deepseek_v4.py
+```
+
+```math
+\mathrm{EntryClass}=\left[\mathrm{DeepseekV4ForCausalLM}\right]
+```
+
+```text
+-> DefaultModelLoader._initialize_model()
+model = DeepseekV4ForCausalLM(config=hf_config, quant_config=...)
+-> model.load_weights(...)
 ```
 
 DeepSeek V4 还有一些专门适配逻辑：
@@ -449,13 +455,21 @@ python/sglang/srt/configs/model_config.py
 
 ```text
 python/sglang/srt/models/glm4_moe.py
-  Glm4MoeForCausalLM
-  GlmMoeDsaForCausalLM
-  EntryClass = [Glm4MoeForCausalLM, GlmMoeDsaForCausalLM]
+Glm4MoeForCausalLM
+GlmMoeDsaForCausalLM
+```
 
+```math
+\mathrm{EntryClass}=\left[\mathrm{Glm4MoeForCausalLM},\mathrm{GlmMoeDsaForCausalLM}\right]
+```
+
+```text
 python/sglang/srt/models/glm4_moe_nextn.py
-  Glm4MoeForCausalLMNextN
-  EntryClass = [Glm4MoeForCausalLMNextN]
+Glm4MoeForCausalLMNextN
+```
+
+```math
+\mathrm{EntryClass}=\left[\mathrm{Glm4MoeForCausalLMNextN}\right]
 ```
 
 如果 GLM-4.7-Flash checkpoint 的 `architectures` 是 `Glm4MoeForCausalLM`，链路就是：
@@ -564,7 +578,7 @@ python/sglang/srt/model_executor/model_runner.py
 |---|---|---|
 | 1 | 新建或修改模型实现文件 | `python/sglang/srt/models/<new_model>.py` |
 | 2 | 定义模型类 | `class NewModelForCausalLM(nn.Module)` |
-| 3 | 暴露 `EntryClass` | `EntryClass = [NewModelForCausalLM]` |
+| 3 | 暴露 `EntryClass` | $`\mathrm{EntryClass}=\left[\mathrm{NewModelForCausalLM}\right]`$ |
 | 4 | 确认 config architecture 名称匹配 | checkpoint `config.json` / `architectures` |
 | 5 | 实现构造函数 | `__init__(self, config, quant_config, ...)` |
 | 6 | 实现前向 | `forward(self, input_ids, positions, forward_batch, ...)` |

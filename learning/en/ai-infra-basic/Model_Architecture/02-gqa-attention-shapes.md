@@ -4,14 +4,14 @@
 
 The Attention sublayer receives normalized hidden states:
 
-```text
-X: [T,H]
+```math
+\mathrm{shape}\left(X\right)=\left[T,H\right]
 ```
 
 And returns a result of the same shape:
 
-```text
-O: [T,H]
+```math
+\mathrm{shape}\left(O\right)=\left[T,H\right]
 ```
 
 Internally: QKV projection, head splitting, QK Norm, RoPE, causal Attention, head merging, and output projection.
@@ -24,38 +24,61 @@ Definitions:
 
 ```text
 Nq  = number of query heads
-Nkv = number of key/value heads
+```
+
+```math
+\mathrm{Nkv} = \mathrm{number} \mathrm{of} \mathrm{key}/\mathrm{value} \mathrm{heads}
+```
+
+```text
 D   = head dimension
-Qdim  = Nq * D
-KVdim = Nkv * D
+```
+
+```math
+\mathrm{Qdim}=\mathrm{Nq}\cdot D
+```
+
+```math
+\mathrm{KVdim}=\mathrm{Nkv}\cdot D
 ```
 
 The three linear projections:
 
-```text
-Q_flat = X @ Wq
-K_flat = X @ Wk
-V_flat = X @ Wv
+```math
+Q_{\mathrm{flat}}=X\,\mathrm{Wq}
+```
+
+```math
+K_{\mathrm{flat}}=X\,\mathrm{Wk}
+```
+
+```math
+V_{\mathrm{flat}}=X\,\mathrm{Wv}
 ```
 
 Weights and output shapes:
 
 | Variable | Shape |
 |---|---:|
-| `X` | `[T,H]` |
-| `Wq` | `[H,Qdim]` |
-| `Wk` | `[H,KVdim]` |
-| `Wv` | `[H,KVdim]` |
-| `Q_flat` | `[T,Qdim]` |
-| `K_flat`, `V_flat` | `[T,KVdim]` |
+| `X` | $`\left[T,H\right]`$ |
+| `Wq` | $`\left[H,\mathrm{Qdim}\right]`$ |
+| `Wk` | $`\left[H,\mathrm{KVdim}\right]`$ |
+| `Wv` | $`\left[H,\mathrm{KVdim}\right]`$ |
+| `Q_flat` | $`\left[T,\mathrm{Qdim}\right]`$ |
+| `K_flat`, `V_flat` | $`\left[T,\mathrm{KVdim}\right]`$ |
 
 High-performance implementations typically concatenate the three weights into a single fused QKV projection:
 
-```text
-qkv = qkv_proj(X)
-qkv: [T, Qdim + 2*KVdim]
+```math
+\mathrm{qkv} = \mathrm{qkv\_proj}\left(X\right)
+```
 
-q, k, v = split(qkv, [Qdim, KVdim, KVdim])
+```math
+\mathrm{shape}\left(\mathrm{qkv}\right)=\left[T,\mathrm{Qdim}+2\cdot \mathrm{KVdim}\right]
+```
+
+```math
+\text{q, k, v}= \mathrm{split}\left(\mathrm{qkv}, \left[\mathrm{Qdim}, \mathrm{KVdim}, \mathrm{KVdim}\right]\right)
 ```
 
 This fusion reduces kernel launches and intermediate memory accesses without changing the mathematical result.
@@ -74,23 +97,23 @@ V_flat [T,Nkv*D]  -> V [T,Nkv,D]
 
 | Type | Relationship | How Each Query Head Uses K/V |
 |---|---|---|
-| MHA | `Nq=Nkv` | Each Query head has independent K/V heads |
-| MQA | `Nkv=1` | All Query heads share a single K/V head |
-| GQA | `1<Nkv<Nq` | A group of Query heads shares one K/V head |
+| MHA | $`\mathrm{Nq}=\mathrm{Nkv}`$ | Each Query head has independent K/V heads |
+| MQA | $`\mathrm{Nkv}=1`$ | All Query heads share a single K/V head |
+| GQA | $`1 \lt \mathrm{Nkv} \lt \mathrm{Nq}`$ | A group of Query heads shares one K/V head |
 
 GQA group size:
 
-```text
-G = Nq / Nkv
+```math
+G=\frac{\mathrm{Nq}}{\mathrm{Nkv}}
 ```
 
 Query head `h` maps to KV head:
 
-```text
-kv_head(h) = floor(h / G)
+```math
+\mathrm{kv\_head}\left(h\right) = \mathrm{floor}\left(h / G\right)
 ```
 
-Example: `Nq=8, Nkv=2, G=4`:
+Example: $`\mathrm{Nq}=8,\qquad \mathrm{Nkv}=2,\qquad G=4`$:
 
 ```text
 Q heads 0,1,2,3 -> KV head 0
@@ -110,9 +133,12 @@ K: [T,Nkv,D]  -> K_norm: [T,Nkv,D]
 
 Normalization occurs on the last dimension:
 
-```text
-Q_norm[t,h,:] = RMSNorm(Q[t,h,:])
-K_norm[t,h,:] = RMSNorm(K[t,h,:])
+```math
+{Q_{\mathrm{norm}}}_{t,h,:}=\mathrm{RMSNorm}\left({Q}_{t,h,:}\right)
+```
+
+```math
+{K_{\mathrm{norm}}}_{t,h,:}=\mathrm{RMSNorm}\left({K}_{t,h,:}\right)
 ```
 
 Shape unchanged. QK Norm controls vector scale before dot product, preventing different heads or layers from producing excessively large attention logits.
@@ -121,15 +147,21 @@ Shape unchanged. QK Norm controls vector scale before dot product, preventing di
 
 RoPE encodes position `p` as rotation in 2D subspaces. For a pair of components in an even-dimensional vector:
 
-```text
-[x_2i']     [ cos(theta_p,i)  -sin(theta_p,i) ] [x_2i  ]
-[x_2i+1'] = [ sin(theta_p,i)   cos(theta_p,i) ] [x_2i+1]
+```math
+x'_{2i}=\cos(\theta_{p,i})x_{2i}-\sin(\theta_{p,i})x_{2i+1}
+```
+
+```math
+x'_{2i+1}=\sin(\theta_{p,i})x_{2i}+\cos(\theta_{p,i})x_{2i+1}
 ```
 
 It acts on Q and K, not on V:
 
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[T\right]
+```
+
 ```text
-positions: [T]
 Q_norm: [T,Nq,D]   -> Q_rope: [T,Nq,D]
 K_norm: [T,Nkv,D]  -> K_rope: [T,Nkv,D]
 V:      [T,Nkv,D]  -> unchanged
@@ -141,17 +173,26 @@ All heads of the same token use the same position id, but different frequency di
 
 Consider a single request, single Query head. Current Query length `Lq`, visible KV length `Lkv`:
 
-```text
-Q_h: [Lq,D]
-K_h: [Lkv,D]
-V_h: [Lkv,D]
+```math
+\mathrm{shape}\left(Q_{h}\right)=\left[\mathrm{Lq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K_{h}\right)=\left[\mathrm{Lkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V_{h}\right)=\left[\mathrm{Lkv},D\right]
 ```
 
 Scores:
 
-```text
-S_h = Q_h @ K_h^T / sqrt(D)
-S_h: [Lq,Lkv]
+```math
+S_{h}=\frac{Q_{h}\,{K_{h}}^{\mathsf T}}{\sqrt{D}}
+```
+
+```math
+\mathrm{shape}\left(S_{h}\right)=\left[\mathrm{Lq},\mathrm{Lkv}\right]
 ```
 
 After causal masking:
@@ -162,19 +203,25 @@ S_h[i,j] = -infinity, if key position j > query position i
 
 Probabilities and output:
 
-```text
-A_h = softmax(S_h, dim=-1)   [Lq,Lkv]
-O_h = A_h @ V_h              [Lq,D]
+```math
+A_{h} = \mathrm{softmax}\left(S_{h}, \mathrm{dim}=-1\right) \left[\mathrm{Lq},\mathrm{Lkv}\right]
+```
+
+```math
+O_{h}=A_{h}\,V_{h}\qquad\mathrm{shape}:\left[\mathrm{Lq},D\right]
 ```
 
 Merging all Query heads:
 
-```text
-O_heads: [T,Nq,D]
-O_flat:  [T,Nq*D]
+```math
+\mathrm{shape}\left(O_{\mathrm{heads}}\right)=\left[T,\mathrm{Nq},D\right]
 ```
 
-Production-grade FlashAttention or decode attention kernels don't fully materialize the `[Nq,Lq,Lkv]` score matrix — they compute softmax and weighted sum in blocks. The shape remains the correct logical view for understanding mathematical dependencies.
+```math
+\mathrm{shape}\left(O_{\mathrm{flat}}\right)=\left[T,\mathrm{Nq}\cdot D\right]
+```
+
+Production-grade FlashAttention or decode attention kernels don't fully materialize the $`\left[\mathrm{Nq},\mathrm{Lq},\mathrm{Lkv}\right]`$ score matrix — they compute softmax and weighted sum in blocks. The shape remains the correct logical view for understanding mathematical dependencies.
 
 ## 8. Sequence Boundaries in Packed Batches
 
@@ -202,37 +249,55 @@ The kernel constructs independent visible ranges per request from metadata. A's 
 
 Each Decoder Layer has independent K/V Cache. The current layer produces:
 
-```text
-K_new: [T,Nkv,D]
-V_new: [T,Nkv,D]
+```math
+\mathrm{shape}\left(K_{\mathrm{new}}\right)=\left[T,\mathrm{Nkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{new}}\right)=\left[T,\mathrm{Nkv},D\right]
 ```
 
 Logically, for request `r`'s token position `p`:
 
-```text
-K_cache[layer,r,p,:,:] = K_new[token_row,:,:]
-V_cache[layer,r,p,:,:] = V_new[token_row,:,:]
+```math
+{K_{\mathrm{cache}}}_{\mathrm{layer},r,p,:,:}={K_{\mathrm{new}}}_{\mathrm{token\_row},:,:}
 ```
 
-Serving systems typically don't allocate contiguous `[B,Lmax,Nkv,D]`. Paged KV Cache maps token positions to physical slots via `req_to_token` mapping.
+```math
+{V_{\mathrm{cache}}}_{\mathrm{layer},r,p,:,:}={V_{\mathrm{new}}}_{\mathrm{token\_row},:,:}
+```
+
+Serving systems typically don't allocate contiguous $`\left[B,\mathrm{Lmax},\mathrm{Nkv},D\right]`$. Paged KV Cache maps token positions to physical slots via `req_to_token` mapping.
 
 ## 10. Prefill Attention
 
 For an uncached prompt of length `S`:
 
+```math
+\mathrm{shape}\left(Q\right)=\left[S,\mathrm{Nq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K\right)=\left[S,\mathrm{Nkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V\right)=\left[S,\mathrm{Nkv},D\right]
+```
+
 ```text
-Q: [S,Nq,D]
-K: [S,Nkv,D]
-V: [S,Nkv,D]
 logical scores: [Nq,S,S]
 ```
 
-Causal visibility is lower-triangular. Row `i` can only read `[0,i]`.
+Causal visibility is lower-triangular. Row `i` can only read $`\left[0,i\right]`$.
 
 With prefix cache of length `P` and current extend of `E`:
 
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[E,\mathrm{Nq},D\right]
+```
+
 ```text
-Q_new: [E,Nq,D]
 K_new,V_new: [E,Nkv,D]
 K_visible,V_visible: [P+E,Nkv,D]
 logical scores: [Nq,E,P+E]
@@ -244,9 +309,15 @@ Only compute Query for new tokens; historical prefix K/V are read directly from 
 
 Normal decode has one new token per request:
 
+```math
+\mathrm{Lq}=1
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[1,\mathrm{Nq},D\right]
+```
+
 ```text
-Lq = 1
-Q_new: [1,Nq,D]
 K_new,V_new: [1,Nkv,D]
 K_visible,V_visible: [Lctx,Nkv,D]
 logical scores: [Nq,1,Lctx]
@@ -254,8 +325,11 @@ logical scores: [Nq,1,Lctx]
 
 With `B` requests packed:
 
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[B,\mathrm{Nq},D\right]
+```
+
 ```text
-Q_new: [B,Nq,D]
 K_new,V_new: [B,Nkv,D]
 ```
 
@@ -265,48 +339,69 @@ Each request's `Lctx` can differ. The decode kernel reads each request's history
 
 Attention head outputs merged:
 
-```text
-O_heads: [T,Nq,D]
-O_flat: [T,Nq*D]
+```math
+\mathrm{shape}\left(O_{\mathrm{heads}}\right)=\left[T,\mathrm{Nq},D\right]
+```
+
+```math
+\mathrm{shape}\left(O_{\mathrm{flat}}\right)=\left[T,\mathrm{Nq}\cdot D\right]
 ```
 
 Output weight:
 
-```text
-Wo: [Nq*D,H]
-O = O_flat @ Wo
-O: [T,H]
+```math
+\mathrm{shape}\left(\mathrm{Wo}\right)=\left[\mathrm{Nq}\cdot D,H\right]
 ```
 
-If `Nq*D=H`, input and output widths match, but `Wo` still performs cross-head mixing.
+```math
+O=O_{\mathrm{flat}}\,\mathrm{Wo}
+```
+
+```math
+\mathrm{shape}\left(O\right)=\left[T,H\right]
+```
+
+If $`\mathrm{Nq}\cdot D=H`$, input and output widths match, but `Wo` still performs cross-head mixing.
 
 ## 13. Local Shapes Under Tensor Parallelism
 
 Let attention TP size be `Ptp`, assuming `Nq` is divisible:
 
-```text
-Nq_local = Nq / Ptp
-Qdim_local = Nq_local * D
+```math
+\mathrm{Nq\_local}=\frac{\mathrm{Nq}}{\mathrm{Ptp}}
 ```
 
-If `Nkv >= Ptp` and divisible:
-
-```text
-Nkv_local = Nkv / Ptp
+```math
+\mathrm{Qdim\_local}=\mathrm{Nq\_local}\cdot D
 ```
 
-If `Nkv < Ptp`, one common strategy replicates KV heads across some TP ranks:
+If $`\mathrm{Nkv} \ge \mathrm{Ptp}`$ and divisible:
 
-```text
-Nkv_local = max(1, Nkv / Ptp)
+```math
+\mathrm{Nkv\_local}=\frac{\mathrm{Nkv}}{\mathrm{Ptp}}
+```
+
+If $`\mathrm{Nkv} \lt \mathrm{Ptp}`$, one common strategy replicates KV heads across some TP ranks:
+
+```math
+\mathrm{Nkv\_local}=\mathrm{max}\left(1,\frac{\mathrm{Nkv}}{\mathrm{Ptp}}\right)
 ```
 
 Single-rank typical shapes:
 
+```math
+\mathrm{shape}\left(q\right)=\left[T,\mathrm{Nq\_local},D\right]
+```
+
+```math
+\mathrm{shape}\left(k\right)=\left[T,\mathrm{Nkv\_local},D\right]
+```
+
+```math
+\mathrm{shape}\left(v\right)=\left[T,\mathrm{Nkv\_local},D\right]
+```
+
 ```text
-q: [T,Nq_local,D]
-k: [T,Nkv_local,D]
-v: [T,Nkv_local,D]
 attn output local: [T,Nq_local*D]
 ```
 
@@ -314,43 +409,73 @@ attn output local: [T,Nq_local*D]
 
 Ignoring specific frameworks, the GQA implementation order:
 
-```text
-qkv = linear(hidden_states, Wqkv)
-q, k, v = split(qkv)
-q = reshape(q, [B,S,Nq,D])
-k = reshape(k, [B,S,Nkv,D])
-v = reshape(v, [B,S,Nkv,D])
-q = rms_norm_per_head(q)
-k = rms_norm_per_head(k)
-q, k = apply_rope(q, k, positions)
-k_cache, v_cache = append_cache(k, v)
-attn_output = causal_gqa(q, k_cache, v_cache)
-output = linear(merge_heads(attn_output), Wo)
+```math
+\mathrm{qkv} = \mathrm{linear}\left(\mathrm{hidden\_states}, \mathrm{Wqkv}\right)
+```
+
+```math
+\text{q, k, v}= \mathrm{split}\left(\mathrm{qkv}\right)
+```
+
+```math
+q=\mathrm{reshape}\left(q,\left[B,S,\mathrm{Nq},D\right]\right)
+```
+
+```math
+k=\mathrm{reshape}\left(k,\left[B,S,\mathrm{Nkv},D\right]\right)
+```
+
+```math
+v=\mathrm{reshape}\left(v,\left[B,S,\mathrm{Nkv},D\right]\right)
+```
+
+```math
+q = \mathrm{rms\_norm\_per\_head}\left(q\right)
+```
+
+```math
+k = \mathrm{rms\_norm\_per\_head}\left(k\right)
+```
+
+```math
+\text{q, k}= \mathrm{apply\_rope}\left(q, k, \mathrm{positions}\right)
+```
+
+```math
+\text{k\_cache, v\_cache}= \mathrm{append\_cache}\left(k, v\right)
+```
+
+```math
+\mathrm{attn\_output} = \mathrm{causal\_gqa}\left(q, k_{\mathrm{cache}}, v_{\mathrm{cache}}\right)
+```
+
+```math
+\mathrm{output} = \mathrm{linear}\left(\mathrm{merge\_heads}\left(\mathrm{attn\_output}\right), \mathrm{Wo}\right)
 ```
 
 Key variables:
 
 | Variable | Logical Shape |
 |---|---:|
-| `hidden_states` | `[T,H]` |
-| `qkv` | `[T,q_size+2*kv_size]` |
-| `q` | `[T,q_size]`, or recovered as `[T,Nq_local,D]` |
-| `k`, `v` | `[T,kv_size]`, or recovered as `[T,Nkv_local,D]` |
-| `attn_output` | `[T,q_size]` |
-| `output` | `[T,H]` or equivalent local representation before communication |
+| `hidden_states` | $`\left[T,H\right]`$ |
+| `qkv` | $`\left[T,q_{\mathrm{size}}+2\cdot \mathrm{kv\_size}\right]`$ |
+| `q` | $`\left[T,q_{\mathrm{size}}\right]`$, or recovered as $`\left[T,\mathrm{Nq\_local},D\right]`$ |
+| `k`, `v` | $`\left[T,\mathrm{kv\_size}\right]`$, or recovered as $`\left[T,\mathrm{Nkv\_local},D\right]`$ |
+| `attn_output` | $`\left[T,q_{\mathrm{size}}\right]`$ |
+| `output` | $`\left[T,H\right]`$ or equivalent local representation before communication |
 
 ## 15. KV Cache Capacity Formula
 
 Ignoring alignment, quantization, and allocator metadata, approximate KV Cache bytes per request:
 
-```text
-bytes = L * Sctx * 2 * Nkv * D * bytes_per_element
+```math
+\mathrm{bytes}=L\cdot \mathrm{Sctx}\cdot 2\cdot \mathrm{Nkv}\cdot D\cdot \mathrm{bytes\_per\_element}
 ```
 
 Where `2` accounts for K and V. For `B` requests:
 
-```text
-total_bytes = sum_r L * Sctx_r * 2 * Nkv * D * bytes_per_element
+```math
+\mathrm{total\_bytes} = \sum_{r} L \cdot  \mathrm{Sctx\_r} \cdot  2 \cdot  \mathrm{Nkv} \cdot  D \cdot  \mathrm{bytes\_per\_element}
 ```
 
 GQA reduces `Nkv`, thus directly reducing persistent KV state across all layers and tokens.

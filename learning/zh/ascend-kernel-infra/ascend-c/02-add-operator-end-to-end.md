@@ -59,10 +59,16 @@ Host 负责填写，Device 负责读取。字段一旦改动，两侧必须同�
 
 一个简单策略：
 
-```text
-numBlocks = min(物理 Vector Core 数, ceil(totalLength / targetPerCore))
-base = totalLength // numBlocks
-remainder = totalLength % numBlocks
+```math
+\mathrm{numBlocks} = \mathrm{min}\left(\text{物理} \mathrm{Vector} \mathrm{Core} \text{数}, \mathrm{ceil}\left(\mathrm{totalLength} / \mathrm{targetPerCore}\right)\right)
+```
+
+```math
+\mathrm{base}=\left\lfloor\frac{\mathrm{totalLength}}{\mathrm{numBlocks}}\right\rfloor
+```
+
+```math
+\mathrm{remainder}=\mathrm{totalLength}\bmod \mathrm{numBlocks}
 ```
 
 前 `remainder` 个核可多处理一个对齐块，或专门给出尾核参数。

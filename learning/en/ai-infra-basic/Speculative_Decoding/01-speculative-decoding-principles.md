@@ -37,7 +37,7 @@ flowchart LR
 
 The draft model is much smaller (e.g., 0.5B params vs 70B), so proposing K tokens is fast. The target model only runs once for K tokens instead of K times. If the draft is good, you get K tokens for the cost of ~1 target forward + 1 draft forward.
 
-Speedup = `K * (T_target) / (T_target + T_draft * K)` where T = time per forward.
+Speedup = $`\frac{K\cdot T_{\mathrm{target}}}{T_{\mathrm{target}}+T_{\mathrm{draft}}\cdot K}`$ where T = time per forward.
 
 ## 4. Rejection Sampling Intuition
 
@@ -45,8 +45,8 @@ For each draft token, compare:
 - `p_draft(token | context)` — draft model's probability
 - `p_target(token | context)` — target model's probability
 
-If `p_target >= p_draft`: always accept (draft was conservative)
-If `p_target < p_draft`: accept with probability `p_target / p_draft` (draft was overconfident)
+If $`p_{\mathrm{target}} \ge p_{\mathrm{draft}}`$: always accept (draft was conservative)
+If $`p_{\mathrm{target}} \lt p_{\mathrm{draft}}`$: accept with probability $`\frac{p_{\mathrm{target}}}{p_{\mathrm{draft}}}`$ (draft was overconfident)
 
 This ensures the output distribution exactly matches the target model's distribution — speculative decoding is lossless.
 

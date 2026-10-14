@@ -6,13 +6,13 @@
 
 | 参数 | 代码模块/字段 | 形状直觉 | 作用 |
 |---|---|---:|---|
-| `in_proj_qkvz.weight` | `MergedColumnParallelLinear` | `[2*H*K+2*HV*V, H_model]` | 从 hidden 投影出 q/k/v/z |
-| `in_proj_ba.weight` | `MergedColumnParallelLinear` | `[2*HV, H_model]` | 从 hidden 投影出 b/a gate 激活 |
-| `conv1d.weight` | `ColumnParallelLinear` 后 reshape | `[2*H*K+HV*V, C]` 的等价布局 | q/k/v 路径的短 causal convolution |
-| `A_log` | `nn.Parameter` | `[HV]` | log-space decay 参数 |
-| `dt_bias` | `nn.Parameter` | `[HV]` | decay/time-step 偏置 |
-| `norm.weight` | `RMSNormGated` | `[V]` 或实现相关 | 输出 gate/norm 的缩放参数 |
-| `out_proj.weight` | `RowParallelLinear` | `[H_model, HV*V]` | 把 GDN 多 head 输出投回 hidden size |
+| `in_proj_qkvz.weight` | `MergedColumnParallelLinear` | $`\left[2\cdot H\cdot K+2\cdot \mathrm{HV}\cdot V,H_{\mathrm{model}}\right]`$ | 从 hidden 投影出 q/k/v/z |
+| `in_proj_ba.weight` | `MergedColumnParallelLinear` | $`\left[2\cdot \mathrm{HV},H_{\mathrm{model}}\right]`$ | 从 hidden 投影出 b/a gate 激活 |
+| `conv1d.weight` | `ColumnParallelLinear` 后 reshape | $`\left[2\cdot H\cdot K+\mathrm{HV}\cdot V,C\right]`$ 的等价布局 | q/k/v 路径的短 causal convolution |
+| `A_log` | `nn.Parameter` | $`\left[\mathrm{HV}\right]`$ | log-space decay 参数 |
+| `dt_bias` | `nn.Parameter` | $`\left[\mathrm{HV}\right]`$ | decay/time-step 偏置 |
+| `norm.weight` | `RMSNormGated` | $`\left[V\right]`$ 或实现相关 | 输出 gate/norm 的缩放参数 |
+| `out_proj.weight` | `RowParallelLinear` | $`\left[H_{\mathrm{model}},\mathrm{HV}\cdot V\right]`$ | 把 GDN 多 head 输出投回 hidden size |
 
 不是可训练参数的对象：
 
@@ -30,21 +30,24 @@ GDN 本身不是一个单独训练目标。它作为 decoder layer 的一部分�
 
 训练样本：
 
-```text
-input_ids:  [B,S]
-labels:     [B,S]
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[B,S\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{labels}\right)=\left[B,S\right]
 ```
 
 模型输出：
 
-```text
-logits: [B,S,Vocab]
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[B,S,\mathrm{Vocab}\right]
 ```
 
 loss：
 
-```text
-loss = CrossEntropy(logits[:, :-1, :], labels[:, 1:])
+```math
+\mathrm{loss} = \mathrm{CrossEntropy}\left(\mathrm{logits}\left[:, :-1, :\right], \mathrm{labels}\left[:, 1:\right]\right)
 ```
 
 反向传播会更新 GDN 层内参数：
@@ -67,8 +70,8 @@ S_t 是 forward 过程中的中间状态；
 
 训练通常使用 teacher forcing，一次给一段序列。对每个训练样本，初始状态一般是零或由前一段切块传入：
 
-```text
-S_0 = zeros([B, HV, V, K])
+```math
+S_{0}=\mathrm{zeros}\left(\left[B,\mathrm{HV},V,K\right]\right)
 ```
 
 然后对序列递推：
@@ -108,12 +111,11 @@ T = 4096, 32768, ...
 
 单步递推里有：
 
-```text
-S_t = exp(g_t) * S_(t-1)
-      + beta_t * (v_t - exp(g_t) * S_(t-1) @ k_t) outer k_t
+```math
+S_{t}=\mathrm{exp}\left(g_{t}\right)\cdot {S}_{t-1}+\beta_{t}\cdot \left(v_{t}-\mathrm{exp}\left(g_{t}\right)\cdot {S}_{t-1}\,k_{t}\right)\,{k_{t}}^{\mathsf T}
 ```
 
-一个 chunk 内的 token 会互相影响。第 `i` 个 token 的写入会影响第 `j>i` 个 token 的预测。因此 chunk 内需要处理一个因果的下三角依赖。
+一个 chunk 内的 token 会互相影响。第 `i` 个 token 的写入会影响第 $`j \gt i`$ 个 token 的预测。因此 chunk 内需要处理一个因果的下三角依赖。
 
 SGLang 的 `chunk_fwd.py` 中可以看到核心阶段：
 
@@ -125,7 +127,7 @@ SGLang 的 `chunk_fwd.py` 中可以看到核心阶段：
 5. 合并 chunk state 并计算 output
 ```
 
-为什么出现 `K @ K^T`？
+为什么出现 $`K\,{K}^{\mathsf T}`$？
 
 ```text
 因为每个写入方向是 k_i，
@@ -138,9 +140,12 @@ SGLang 的 `chunk_fwd.py` 中可以看到核心阶段：
 
 prefill 处理 prompt 或新增长段 tokens：
 
-```text
-hidden_states: [T,H_model]
-query_start_loc: [N+1]
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[T,H_{\mathrm{model}}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{query\_start\_loc}\right)=\left[N+1\right]
 ```
 
 端到端流程：
@@ -185,8 +190,8 @@ prefill 的结果包括两类：
 
 decode 通常每请求一个 token：
 
-```text
-hidden_states: [B,H_model]
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[B,H_{\mathrm{model}}\right]
 ```
 
 流程：
@@ -214,11 +219,20 @@ decode 的核心是常数时间状态更新：
 
 SGLang 的 Triton GDN backend 支持 packed decode：
 
-```text
-mixed_qkv: [B, 2*H*K + HV*V]
-a:         [B, HV]
-b:         [B, HV]
-ssm_states:[num_slots, HV, V, K]
+```math
+\mathrm{shape}\left(\mathrm{mixed\_qkv}\right)=\left[B,2\cdot H\cdot K+\mathrm{HV}\cdot V\right]
+```
+
+```math
+\mathrm{shape}\left(a\right)=\left[B,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(b\right)=\left[B,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{ssm\_states}\right)=\left[\mathrm{num\_slots},\mathrm{HV},V,K\right]
 ```
 
 packed kernel 在一个 kernel 中完成：
@@ -312,14 +326,14 @@ GDN state 需要像 KV Cache 一样被视作请求运行时状态。
 
 标准 attention 的 KV Cache 主体：
 
-```text
-KV bytes ∝ context_len * num_layers * num_kv_heads * head_dim
+```math
+\mathrm{KV} \mathrm{bytes} \propto  \mathrm{context\_len} \cdot  \mathrm{num\_layers} \cdot  \mathrm{num\_kv\_heads} \cdot  \mathrm{head\_dim}
 ```
 
 GDN state 主体：
 
-```text
-GDN bytes ∝ num_linear_layers * HV * V * K
+```math
+\mathrm{GDN} \mathrm{bytes} \propto  \mathrm{num\_linear\_layers} \cdot  \mathrm{HV} \cdot  V \cdot  K
 ```
 
 它不随 context_len 线性增长。
@@ -334,12 +348,8 @@ GDN 层还需要 conv state 和 ssm state。
 
 所以实际显存是：
 
-```text
-total_runtime_cache =
-    full_attention_KV_cache
-    + GDN_ssm_states
-    + GDN_conv_states
-    + allocator/prefix/spec metadata
+```math
+\mathrm{total\_runtime\_cache} = \mathrm{full\_attention\_KV\_cache} + \mathrm{GDN\_ssm\_states} + \mathrm{GDN\_conv\_states} + \mathrm{allocator}/\mathrm{prefix}/\mathrm{spec} \mathrm{metadata}
 ```
 
 ## 12. 训练与 serving 的差异

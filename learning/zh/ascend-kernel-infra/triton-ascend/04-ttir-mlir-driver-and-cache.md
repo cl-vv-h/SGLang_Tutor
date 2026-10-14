@@ -268,7 +268,7 @@ def add_stages(self, stages, options, language):
 
 这一步为什么关键？因为它解释了：**有时候你看到的是 launcher 编译问题，不是 kernel binary 问题。**
 
-### 10.3 `TRITON_COMPILE_ONLY=1` 只编不跑
+### 10.3 $`\mathrm{TRITON\_COMPILE\_ONLY}=1`$ 只编不跑
 
 `NPULauncher.__call__()` 对 `TRITON_COMPILE_ONLY` 做了显式判断。打开后，它会跳过真正运行，并打印“compiled kernel cache 在哪里”。这在没有把握运行环境是否稳定时很有价值，因为你至少能先拿到编译产物和 cache 目录。
 
@@ -288,7 +288,7 @@ Triton-Ascend 源码里至少有三类东西在进 cache：
 - launcher stub `.so`
 - kernel 编译产物及相关中间文件
 
-`make_npu_launcher_stub()` 还额外说明了一个细节：它会先尝试读取缓存的 `precompiled.h` / `precompiled.h.gch`，`TRITON_DISABLE_PRECOMPILE=1` 可以关掉这条预编译头路径。
+`make_npu_launcher_stub()` 还额外说明了一个细节：它会先尝试读取缓存的 `precompiled.h` / `precompiled.h.gch`，$`\mathrm{TRITON\_DISABLE\_PRECOMPILE}=1`$ 可以关掉这条预编译头路径。
 
 因此调试 cache 时，建议脑中分清三层：
 
@@ -389,9 +389,9 @@ Cache 又会让边界更隐蔽：你可能复用了旧 binary，却重新生成�
 
 **答案：**前者控制“编译完成后是否真正 launch”，后者控制“是否允许直接复用已有编译缓存”。它们作用在两个正交维度。
 
-`TRITON_COMPILE_ONLY=1` 让 `NPULauncher.__call__()` 跳过设备执行，只生成/定位编译产物并报告 cache。它适合把问题先切成两半：如果 compile-only 都失败，故障在编译或构建产物之前；如果 compile-only 成功而正常调用失败，再看 launcher、Runtime、stream 和设备环境。它不能证明 kernel 数学正确，因为 kernel 根本没有执行。
+$`\mathrm{TRITON\_COMPILE\_ONLY}=1`$ 让 `NPULauncher.__call__()` 跳过设备执行，只生成/定位编译产物并报告 cache。它适合把问题先切成两半：如果 compile-only 都失败，故障在编译或构建产物之前；如果 compile-only 成功而正常调用失败，再看 launcher、Runtime、stream 和设备环境。它不能证明 kernel 数学正确，因为 kernel 根本没有执行。
 
-`TRITON_ALWAYS_COMPILE=1` 用于强制触发重新编译，避免旧 cache 让源码修改、dump 开关或 compiler option 看起来没有生效。它并不禁止后续 launch，也不等价于清空所有 launcher/预编译头缓存。
+$`\mathrm{TRITON\_ALWAYS\_COMPILE}=1`$ 用于强制触发重新编译，避免旧 cache 让源码修改、dump 开关或 compiler option 看起来没有生效。它并不禁止后续 launch，也不等价于清空所有 launcher/预编译头缓存。
 
 组合使用时，可以做到“强制重新编译，但先不运行”，很适合抓取新 IR；代价是失去缓存带来的启动速度，不能作为正常生产配置。
 
@@ -416,7 +416,7 @@ ttadapter
 
 还应依次检查：环境变量是否在导入/首次 JIT 之前设置、`TRITON_DUMP_DIR` 是否可写且检查的是正确绝对路径、当前变体的 dtype/meta-parameter 是否真的触发了新 cache key、错误是否发生在目标 dump 阶段之前，以及 dump 开关对应的是 kernel IR、launcher 还是其他产物。只打开 `MLIR_ENABLE_DUMP` 也不保证 Triton 自己的 dump manager 一定把文件写到你猜测的目录。
 
-稳妥做法是设置 `TRITON_ALWAYS_COMPILE=1`，使用一个明确的新 dump 目录，只运行最小复现一次，然后从 TTIR、ttadapter、binary、launcher 的实际生成顺序检查。若仍无输出，再根据日志判断是环境变量未被目标进程继承，还是编译在 dump hook 之前失败。
+稳妥做法是设置 $`\mathrm{TRITON\_ALWAYS\_COMPILE}=1`$，使用一个明确的新 dump 目录，只运行最小复现一次，然后从 TTIR、ttadapter、binary、launcher 的实际生成顺序检查。若仍无输出，再根据日志判断是环境变量未被目标进程继承，还是编译在 dump hook 之前失败。
 
 ## 17. 下一步学什么
 

@@ -103,8 +103,11 @@ flowchart TD
 
 可以把二者理解为：
 
+```math
+\mathrm{Req}=\text{一个用户请求的长期状态}
+```
+
 ```text
-Req = 一个用户请求的长期状态
 ScheduleBatch = 某一次模型 forward 要处理的一组 Req 的短期视图
 ForwardBatch = 这个短期视图被投影到模型执行所需的 tensors 和 metadata
 ```

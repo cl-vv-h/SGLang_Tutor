@@ -33,15 +33,18 @@ Ascend layout:   FRACTAL_NZ rearranged for Cube Unit efficiency
 
 ### Page Size
 
-NPU default `page_size = 128` (vs GPU default `16`):
+NPU default $`\mathrm{page\_size}=128`$ (vs GPU default `16`):
 - Better alignment with NPU memory access granularity
 - Larger pages reduce page table overhead
 - Trade-off: more memory fragmentation for short requests
 
 ### Memory Pool
 
+```math
+\mathrm{shape}\left(\mathrm{req\_to\_token\_pool}\right)=\left[\mathrm{max\_requests},\mathrm{max\_tokens\_per\_request}\right]
+```
+
 ```text
-req_to_token_pool: [max_requests, max_tokens_per_request]
 token_to_kv_pool:  [max_total_tokens, ...] (stored in FRACTAL_NZ)
 ```
 

@@ -4,14 +4,14 @@
 
 Attention 子层接收归一化后的 hidden states：
 
-```text
-X: [T,H]
+```math
+\mathrm{shape}\left(X\right)=\left[T,H\right]
 ```
 
 并返回同形状结果：
 
-```text
-O: [T,H]
+```math
+\mathrm{shape}\left(O\right)=\left[T,H\right]
 ```
 
 内部需要经历 QKV 投影、head 拆分、QK Norm、RoPE、因果 Attention、head 合并和输出投影。
@@ -24,38 +24,61 @@ O: [T,H]
 
 ```text
 Nq  = number of query heads
-Nkv = number of key/value heads
+```
+
+```math
+\mathrm{Nkv} = \mathrm{number} \mathrm{of} \mathrm{key}/\mathrm{value} \mathrm{heads}
+```
+
+```text
 D   = head dimension
-Qdim  = Nq * D
-KVdim = Nkv * D
+```
+
+```math
+\mathrm{Qdim}=\mathrm{Nq}\cdot D
+```
+
+```math
+\mathrm{KVdim}=\mathrm{Nkv}\cdot D
 ```
 
 三个线性投影的数学形式是：
 
-```text
-Q_flat = X @ Wq
-K_flat = X @ Wk
-V_flat = X @ Wv
+```math
+Q_{\mathrm{flat}}=X\,\mathrm{Wq}
+```
+
+```math
+K_{\mathrm{flat}}=X\,\mathrm{Wk}
+```
+
+```math
+V_{\mathrm{flat}}=X\,\mathrm{Wv}
 ```
 
 权重和输出形状：
 
 | 变量 | 形状 |
 |---|---:|
-| `X` | `[T,H]` |
-| `Wq` | `[H,Qdim]` |
-| `Wk` | `[H,KVdim]` |
-| `Wv` | `[H,KVdim]` |
-| `Q_flat` | `[T,Qdim]` |
-| `K_flat`, `V_flat` | `[T,KVdim]` |
+| `X` | $`\left[T,H\right]`$ |
+| `Wq` | $`\left[H,\mathrm{Qdim}\right]`$ |
+| `Wk` | $`\left[H,\mathrm{KVdim}\right]`$ |
+| `Wv` | $`\left[H,\mathrm{KVdim}\right]`$ |
+| `Q_flat` | $`\left[T,\mathrm{Qdim}\right]`$ |
+| `K_flat`, `V_flat` | $`\left[T,\mathrm{KVdim}\right]`$ |
 
 高性能实现通常把三个权重拼接为一次融合 QKV 投影：
 
-```text
-qkv = qkv_proj(X)
-qkv: [T, Qdim + 2*KVdim]
+```math
+\mathrm{qkv} = \mathrm{qkv\_proj}\left(X\right)
+```
 
-q, k, v = split(qkv, [Qdim, KVdim, KVdim])
+```math
+\mathrm{shape}\left(\mathrm{qkv}\right)=\left[T,\mathrm{Qdim}+2\cdot \mathrm{KVdim}\right]
+```
+
+```math
+\text{q, k, v}= \mathrm{split}\left(\mathrm{qkv}, \left[\mathrm{Qdim}, \mathrm{KVdim}, \mathrm{KVdim}\right]\right)
 ```
 
 打包减少 kernel launch 和中间访存，不改变数学结果。
@@ -74,23 +97,23 @@ V_flat [T,Nkv*D]  -> V [T,Nkv,D]
 
 | 类型 | 关系 | 每个 Query head 如何使用 K/V |
 |---|---|---|
-| MHA | `Nq=Nkv` | 每个 Query head 有独立 K/V head |
-| MQA | `Nkv=1` | 所有 Query heads 共享一个 K/V head |
-| GQA | `1<Nkv<Nq` | 一组 Query heads 共享一个 K/V head |
+| MHA | $`\mathrm{Nq}=\mathrm{Nkv}`$ | 每个 Query head 有独立 K/V head |
+| MQA | $`\mathrm{Nkv}=1`$ | 所有 Query heads 共享一个 K/V head |
+| GQA | $`1 \lt \mathrm{Nkv} \lt \mathrm{Nq}`$ | 一组 Query heads 共享一个 K/V head |
 
 GQA 的 group size：
 
-```text
-G = Nq / Nkv
+```math
+G=\frac{\mathrm{Nq}}{\mathrm{Nkv}}
 ```
 
 Query head `h` 对应的 KV head：
 
-```text
-kv_head(h) = floor(h / G)
+```math
+\mathrm{kv\_head}\left(h\right) = \mathrm{floor}\left(h / G\right)
 ```
 
-示例：`Nq=8, Nkv=2, G=4`。
+示例：$`\mathrm{Nq}=8,\qquad \mathrm{Nkv}=2,\qquad G=4`$。
 
 ```text
 Q heads 0,1,2,3 -> KV head 0
@@ -110,9 +133,12 @@ K: [T,Nkv,D]  -> K_norm: [T,Nkv,D]
 
 归一化发生在最后一维：
 
-```text
-Q_norm[t,h,:] = RMSNorm(Q[t,h,:])
-K_norm[t,h,:] = RMSNorm(K[t,h,:])
+```math
+{Q_{\mathrm{norm}}}_{t,h,:}=\mathrm{RMSNorm}\left({Q}_{t,h,:}\right)
+```
+
+```math
+{K_{\mathrm{norm}}}_{t,h,:}=\mathrm{RMSNorm}\left({K}_{t,h,:}\right)
 ```
 
 形状不变。QK Norm 控制点积前的向量尺度，避免不同 head 或层产生过大的 attention logits。
@@ -121,15 +147,21 @@ K_norm[t,h,:] = RMSNorm(K[t,h,:])
 
 RoPE 把位置 `p` 编码成二维子空间中的旋转。对一个偶数维向量中的一对分量：
 
-```text
-[x_2i']     [ cos(theta_p,i)  -sin(theta_p,i) ] [x_2i  ]
-[x_2i+1'] = [ sin(theta_p,i)   cos(theta_p,i) ] [x_2i+1]
+```math
+x'_{2i}=\cos(\theta_{p,i})x_{2i}-\sin(\theta_{p,i})x_{2i+1}
+```
+
+```math
+x'_{2i+1}=\sin(\theta_{p,i})x_{2i}+\cos(\theta_{p,i})x_{2i+1}
 ```
 
 它作用于 Q 和 K，不作用于 V：
 
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[T\right]
+```
+
 ```text
-positions: [T]
 Q_norm: [T,Nq,D]   -> Q_rope: [T,Nq,D]
 K_norm: [T,Nkv,D]  -> K_rope: [T,Nkv,D]
 V:      [T,Nkv,D]  -> unchanged
@@ -141,17 +173,26 @@ V:      [T,Nkv,D]  -> unchanged
 
 先考虑单请求、单 Query head。当前 Query 长度为 `Lq`，可见 KV 长度为 `Lkv`：
 
-```text
-Q_h: [Lq,D]
-K_h: [Lkv,D]
-V_h: [Lkv,D]
+```math
+\mathrm{shape}\left(Q_{h}\right)=\left[\mathrm{Lq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K_{h}\right)=\left[\mathrm{Lkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V_{h}\right)=\left[\mathrm{Lkv},D\right]
 ```
 
 分数：
 
-```text
-S_h = Q_h @ K_h^T / sqrt(D)
-S_h: [Lq,Lkv]
+```math
+S_{h}=\frac{Q_{h}\,{K_{h}}^{\mathsf T}}{\sqrt{D}}
+```
+
+```math
+\mathrm{shape}\left(S_{h}\right)=\left[\mathrm{Lq},\mathrm{Lkv}\right]
 ```
 
 加因果 mask 后：
@@ -162,19 +203,25 @@ S_h[i,j] = -infinity, if key position j is later than query position i
 
 概率和输出：
 
-```text
-A_h = softmax(S_h, dim=-1)   [Lq,Lkv]
-O_h = A_h @ V_h              [Lq,D]
+```math
+A_{h} = \mathrm{softmax}\left(S_{h}, \mathrm{dim}=-1\right) \left[\mathrm{Lq},\mathrm{Lkv}\right]
+```
+
+```math
+O_{h}=A_{h}\,V_{h}\qquad\mathrm{shape}:\left[\mathrm{Lq},D\right]
 ```
 
 合并所有 Query heads：
 
-```text
-O_heads: [T,Nq,D]
-O_flat:  [T,Nq*D]
+```math
+\mathrm{shape}\left(O_{\mathrm{heads}}\right)=\left[T,\mathrm{Nq},D\right]
 ```
 
-生产级 FlashAttention 或 decode attention kernel 不会完整物化 `[Nq,Lq,Lkv]` 分数矩阵，而是分块计算 softmax 和加权和。该形状仍然是理解数学依赖的正确逻辑视图。
+```math
+\mathrm{shape}\left(O_{\mathrm{flat}}\right)=\left[T,\mathrm{Nq}\cdot D\right]
+```
+
+生产级 FlashAttention 或 decode attention kernel 不会完整物化 $`\left[\mathrm{Nq},\mathrm{Lq},\mathrm{Lkv}\right]`$ 分数矩阵，而是分块计算 softmax 和加权和。该形状仍然是理解数学依赖的正确逻辑视图。
 
 ## 8. Packed Batch 中的序列边界
 
@@ -202,19 +249,25 @@ Kernel 根据 metadata 为每条请求构造独立可见区间。A 的 Query 不
 
 每个 Decoder Layer 都有独立 K/V Cache。当前层生成：
 
-```text
-K_new: [T,Nkv,D]
-V_new: [T,Nkv,D]
+```math
+\mathrm{shape}\left(K_{\mathrm{new}}\right)=\left[T,\mathrm{Nkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{new}}\right)=\left[T,\mathrm{Nkv},D\right]
 ```
 
 逻辑上，对请求 `r` 的 token 位置 `p`：
 
-```text
-K_cache[layer,r,p,:,:] = K_new[token_row,:,:]
-V_cache[layer,r,p,:,:] = V_new[token_row,:,:]
+```math
+{K_{\mathrm{cache}}}_{\mathrm{layer},r,p,:,:}={K_{\mathrm{new}}}_{\mathrm{token\_row},:,:}
 ```
 
-Serving 系统通常不分配连续 `[B,Lmax,Nkv,D]`。Paged KV Cache 把 token 位置映射到物理 slot：
+```math
+{V_{\mathrm{cache}}}_{\mathrm{layer},r,p,:,:}={V_{\mathrm{new}}}_{\mathrm{token\_row},:,:}
+```
+
+Serving 系统通常不分配连续 $`\left[B,\mathrm{Lmax},\mathrm{Nkv},D\right]`$。Paged KV Cache 把 token 位置映射到物理 slot：
 
 ```text
 request token position
@@ -223,25 +276,37 @@ request token position
   -> layer K/V storage
 ```
 
-物理布局由 backend 决定，逻辑上每个历史 token 仍拥有 `[Nkv,D]` 的 K 和 V。
+物理布局由 backend 决定，逻辑上每个历史 token 仍拥有 $`\left[\mathrm{Nkv},D\right]`$ 的 K 和 V。
 
 ## 10. Prefill Attention
 
 对一条无缓存、长度 `S` 的 prompt：
 
+```math
+\mathrm{shape}\left(Q\right)=\left[S,\mathrm{Nq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K\right)=\left[S,\mathrm{Nkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V\right)=\left[S,\mathrm{Nkv},D\right]
+```
+
 ```text
-Q: [S,Nq,D]
-K: [S,Nkv,D]
-V: [S,Nkv,D]
 logical scores: [Nq,S,S]
 ```
 
-因果可见范围是下三角。第 `i` 行只能读取 `[0,i]`。
+因果可见范围是下三角。第 `i` 行只能读取 $`\left[0,i\right]`$。
 
 若已有 prefix cache，prefix 长度为 `P`，本轮 extend 长度为 `E`：
 
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[E,\mathrm{Nq},D\right]
+```
+
 ```text
-Q_new: [E,Nq,D]
 K_new,V_new: [E,Nkv,D]
 K_visible,V_visible: [P+E,Nkv,D]
 logical scores: [Nq,E,P+E]
@@ -253,9 +318,15 @@ logical scores: [Nq,E,P+E]
 
 普通 decode 对每条请求只有一个新 token：
 
+```math
+\mathrm{Lq}=1
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[1,\mathrm{Nq},D\right]
+```
+
 ```text
-Lq = 1
-Q_new: [1,Nq,D]
 K_new,V_new: [1,Nkv,D]
 K_visible,V_visible: [Lctx,Nkv,D]
 logical scores: [Nq,1,Lctx]
@@ -263,8 +334,11 @@ logical scores: [Nq,1,Lctx]
 
 Batch 中 `B` 条请求打包后：
 
+```math
+\mathrm{shape}\left(Q_{\mathrm{new}}\right)=\left[B,\mathrm{Nq},D\right]
+```
+
 ```text
-Q_new: [B,Nq,D]
 K_new,V_new: [B,Nkv,D]
 ```
 
@@ -274,48 +348,69 @@ K_new,V_new: [B,Nkv,D]
 
 Attention 各 head 输出合并：
 
-```text
-O_heads: [T,Nq,D]
-O_flat: [T,Nq*D]
+```math
+\mathrm{shape}\left(O_{\mathrm{heads}}\right)=\left[T,\mathrm{Nq},D\right]
+```
+
+```math
+\mathrm{shape}\left(O_{\mathrm{flat}}\right)=\left[T,\mathrm{Nq}\cdot D\right]
 ```
 
 输出权重：
 
-```text
-Wo: [Nq*D,H]
-O = O_flat @ Wo
-O: [T,H]
+```math
+\mathrm{shape}\left(\mathrm{Wo}\right)=\left[\mathrm{Nq}\cdot D,H\right]
 ```
 
-若 `Nq*D=H`，输入输出宽度相同，但 `Wo` 仍负责跨 head 混合。
+```math
+O=O_{\mathrm{flat}}\,\mathrm{Wo}
+```
+
+```math
+\mathrm{shape}\left(O\right)=\left[T,H\right]
+```
+
+若 $`\mathrm{Nq}\cdot D=H`$，输入输出宽度相同，但 `Wo` 仍负责跨 head 混合。
 
 ## 13. Tensor Parallel 下的局部形状
 
 设 attention TP size 为 `Ptp`，并假设 `Nq` 可整除：
 
-```text
-Nq_local = Nq / Ptp
-Qdim_local = Nq_local * D
+```math
+\mathrm{Nq\_local}=\frac{\mathrm{Nq}}{\mathrm{Ptp}}
 ```
 
-若 `Nkv >= Ptp` 且可整除：
-
-```text
-Nkv_local = Nkv / Ptp
+```math
+\mathrm{Qdim\_local}=\mathrm{Nq\_local}\cdot D
 ```
 
-若 `Nkv < Ptp`，一种常见策略是在部分 TP ranks 上复制 KV heads，使：
+若 $`\mathrm{Nkv} \ge \mathrm{Ptp}`$ 且可整除：
 
-```text
-Nkv_local = max(1, Nkv / Ptp)
+```math
+\mathrm{Nkv\_local}=\frac{\mathrm{Nkv}}{\mathrm{Ptp}}
+```
+
+若 $`\mathrm{Nkv} \lt \mathrm{Ptp}`$，一种常见策略是在部分 TP ranks 上复制 KV heads，使：
+
+```math
+\mathrm{Nkv\_local}=\mathrm{max}\left(1,\frac{\mathrm{Nkv}}{\mathrm{Ptp}}\right)
 ```
 
 单 rank 的典型形状：
 
+```math
+\mathrm{shape}\left(q\right)=\left[T,\mathrm{Nq\_local},D\right]
+```
+
+```math
+\mathrm{shape}\left(k\right)=\left[T,\mathrm{Nkv\_local},D\right]
+```
+
+```math
+\mathrm{shape}\left(v\right)=\left[T,\mathrm{Nkv\_local},D\right]
+```
+
 ```text
-q: [T,Nq_local,D]
-k: [T,Nkv_local,D]
-v: [T,Nkv_local,D]
 attn output local: [T,Nq_local*D]
 ```
 
@@ -325,30 +420,60 @@ attn output local: [T,Nq_local*D]
 
 不考虑特定框架时，GQA 的实现顺序可以表示为：
 
-```text
-qkv = linear(hidden_states, Wqkv)
-q, k, v = split(qkv)
-q = reshape(q, [B,S,Nq,D])
-k = reshape(k, [B,S,Nkv,D])
-v = reshape(v, [B,S,Nkv,D])
-q = rms_norm_per_head(q)
-k = rms_norm_per_head(k)
-q, k = apply_rope(q, k, positions)
-k_cache, v_cache = append_cache(k, v)
-attn_output = causal_gqa(q, k_cache, v_cache)
-output = linear(merge_heads(attn_output), Wo)
+```math
+\mathrm{qkv} = \mathrm{linear}\left(\mathrm{hidden\_states}, \mathrm{Wqkv}\right)
+```
+
+```math
+\text{q, k, v}= \mathrm{split}\left(\mathrm{qkv}\right)
+```
+
+```math
+q=\mathrm{reshape}\left(q,\left[B,S,\mathrm{Nq},D\right]\right)
+```
+
+```math
+k=\mathrm{reshape}\left(k,\left[B,S,\mathrm{Nkv},D\right]\right)
+```
+
+```math
+v=\mathrm{reshape}\left(v,\left[B,S,\mathrm{Nkv},D\right]\right)
+```
+
+```math
+q = \mathrm{rms\_norm\_per\_head}\left(q\right)
+```
+
+```math
+k = \mathrm{rms\_norm\_per\_head}\left(k\right)
+```
+
+```math
+\text{q, k}= \mathrm{apply\_rope}\left(q, k, \mathrm{positions}\right)
+```
+
+```math
+\text{k\_cache, v\_cache}= \mathrm{append\_cache}\left(k, v\right)
+```
+
+```math
+\mathrm{attn\_output} = \mathrm{causal\_gqa}\left(q, k_{\mathrm{cache}}, v_{\mathrm{cache}}\right)
+```
+
+```math
+\mathrm{output} = \mathrm{linear}\left(\mathrm{merge\_heads}\left(\mathrm{attn\_output}\right), \mathrm{Wo}\right)
 ```
 
 关键变量：
 
 | 变量 | 逻辑形状 |
 |---|---:|
-| `hidden_states` | `[T,H]` |
-| `qkv` | `[T,q_size+2*kv_size]` |
-| `q` | `[T,q_size]`，或恢复为 `[T,Nq_local,D]` |
-| `k`, `v` | `[T,kv_size]`，或恢复为 `[T,Nkv_local,D]` |
-| `attn_output` | `[T,q_size]` |
-| `output` | `[T,H]` 或通信前的等价局部表示 |
+| `hidden_states` | $`\left[T,H\right]`$ |
+| `qkv` | $`\left[T,q_{\mathrm{size}}+2\cdot \mathrm{kv\_size}\right]`$ |
+| `q` | $`\left[T,q_{\mathrm{size}}\right]`$，或恢复为 $`\left[T,\mathrm{Nq\_local},D\right]`$ |
+| `k`, `v` | $`\left[T,\mathrm{kv\_size}\right]`$，或恢复为 $`\left[T,\mathrm{Nkv\_local},D\right]`$ |
+| `attn_output` | $`\left[T,q_{\mathrm{size}}\right]`$ |
+| `output` | $`\left[T,H\right]`$ 或通信前的等价局部表示 |
 
 工程实现可以把 split、QK Norm、RoPE 和 KV 写入融合到一个 kernel。融合改变的是 kernel 边界和中间访存，不改变上述逻辑形状和数据依赖。
 
@@ -356,14 +481,14 @@ output = linear(merge_heads(attn_output), Wo)
 
 不考虑对齐、量化和 allocator metadata，单请求的 KV Cache 字节数近似为：
 
-```text
-bytes = L * Sctx * 2 * Nkv * D * bytes_per_element
+```math
+\mathrm{bytes}=L\cdot \mathrm{Sctx}\cdot 2\cdot \mathrm{Nkv}\cdot D\cdot \mathrm{bytes\_per\_element}
 ```
 
 其中 `2` 对应 K 和 V。对 `B` 条请求：
 
-```text
-total_bytes = sum_r L * Sctx_r * 2 * Nkv * D * bytes_per_element
+```math
+\mathrm{total\_bytes} = \sum_{r} L \cdot  \mathrm{Sctx\_r} \cdot  2 \cdot  \mathrm{Nkv} \cdot  D \cdot  \mathrm{bytes\_per\_element}
 ```
 
 GQA 减小的是 `Nkv`，因此直接降低跨所有层、所有 token 的持久 KV 状态。

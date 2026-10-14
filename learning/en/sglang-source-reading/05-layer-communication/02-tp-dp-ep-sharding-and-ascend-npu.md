@@ -28,7 +28,7 @@ This chapter is a static walkthrough of the source currently retained in the rep
 
 The most important warning is:
 
-> SGLang has two operating forms for `dp_size`: regular DP and DP Attention. Seeing `dp_size=2` is not enough to infer the process topology; you must also inspect `enable_dp_attention`.
+> SGLang has two operating forms for `dp_size`: regular DP and DP Attention. Seeing $`\mathrm{dp\_size}=2`$ is not enough to infer the process topology; you must also inspect `enable_dp_attention`.
 
 ## 2. Parameter Relationships: `tp_size` Is Not Always the Matrix-Sharding Degree
 
@@ -150,7 +150,7 @@ for pp_rank in pp_rank_range:
 
 This code performs **process partitioning**. No model weight has been sliced yet.
 
-On one node with `base_gpu_id=0` and `gpu_id_step=1`, the usual mapping is:
+On one node with $`\mathrm{base\_gpu\_id}=0`$ and $`\mathrm{gpu\_id\_step}=1`$, the usual mapping is:
 
 ```text
 tp_rank 0 -> Scheduler process 0 -> npu:0
@@ -158,7 +158,7 @@ tp_rank 1 -> Scheduler process 1 -> npu:1
 ...
 ```
 
-Across nodes, `tp_rank` can be a global model rank while `gpu_id` is a node-local device index. Multiple nodes may each have a `gpu_id=0`, but their global ranks differ.
+Across nodes, `tp_rank` can be a global model rank while `gpu_id` is a node-local device index. Multiple nodes may each have a $`\mathrm{gpu\_id}=0`$, but their global ranks differ.
 
 ### 4.2 Global Rank, Local Rank, and Group Rank Are Different
 
@@ -167,14 +167,14 @@ Across nodes, `tp_rank` can be a global model rank while `gpu_id` is a node-loca
 | global rank | Unique identifier inside WORLD | 6 |
 | local rank / `gpu_id` | Device selected on the current node | `npu:2` |
 | TP rank | Position in the current TP world | 6 |
-| rank in group | Position inside a particular subgroup | 2 inside `[4,5,6,7]` |
-| DP/EP rank | Coordinate obtained by decoding the rank grid | `attn_dp_rank=1`, `moe_ep_rank=2` |
+| rank in group | Position inside a particular subgroup | 2 inside $`\left[4,5,6,7\right]`$ |
+| DP/EP rank | Coordinate obtained by decoding the rank grid | $`\mathrm{attn\_dp\_rank}=1`$, $`\mathrm{moe\_ep\_rank}=2`$ |
 
 Some of these integers happen to be equal in simple deployments, but their meanings must not be mixed.
 
 ### 4.3 Regular DP Creates Independent TP Replicas
 
-When `dp_size > 1` and DP Attention is disabled, `DataParallelController.launch_dp_schedulers()` launches a complete TP/PP worker group for each DP rank:
+When $`\mathrm{dp\_size} \gt 1`$ and DP Attention is disabled, `DataParallelController.launch_dp_schedulers()` launches a complete TP/PP worker group for each DP rank:
 
 ```python
 base_gpu_id = 0
@@ -188,7 +188,7 @@ for dp_rank in range(server_args.dp_size):
     )
 ```
 
-For `dp_size=2, tp_size=4`:
+For $`\mathrm{dp\_size}=2,\qquad \mathrm{tp\_size}=4`$:
 
 ```text
 DP replica 0: NPU 0..3, internal TP ranks 0..3
@@ -312,7 +312,7 @@ for tp_group_idx in range(num_tensor_model_parallel_groups):
     )
 ```
 
-For `world_size=8, tp_size=4, pp_size=2`:
+For $`\mathrm{world\_size}=8,\qquad \mathrm{tp\_size}=4,\qquad \mathrm{pp\_size}=2`$:
 
 ```text
 TP groups: [0,1,2,3], [4,5,6,7]
@@ -329,11 +329,8 @@ The Attention rank layout is:
 
 TP is the fastest-changing dimension:
 
-```text
-tp_rank =
-    (attn_dp_rank * attn_cp_size + attn_cp_rank)
-    * attn_tp_size
-    + attn_tp_rank
+```math
+\mathrm{tp\_rank}=\left(\mathrm{attn\_dp\_rank}\cdot \mathrm{attn\_cp\_size}+\mathrm{attn\_cp\_rank}\right)\cdot \mathrm{attn\_tp\_size}+\mathrm{attn\_tp\_rank}
 ```
 
 ### 6.3 MoE Groups
@@ -346,11 +343,8 @@ The MoE rank layout is:
 
 MoE TP is the fastest-changing dimension:
 
-```text
-tp_rank =
-    (moe_dp_rank * ep_size + moe_ep_rank)
-    * moe_tp_size
-    + moe_tp_rank
+```math
+\mathrm{tp\_rank}=\left(\mathrm{moe\_dp\_rank}\cdot \mathrm{ep\_size}+\mathrm{moe\_ep\_rank}\right)\cdot \mathrm{moe\_tp\_size}+\mathrm{moe\_tp\_rank}
 ```
 
 These two formulas are the most useful tools for understanding SGLang's multidimensional parallelism.
@@ -359,31 +353,53 @@ These two formulas are the most useful tools for understanding SGLang's multidim
 
 Assume:
 
+```math
+\mathrm{tp\_size}=8
+```
+
+```math
+\mathrm{dp\_size}=2
+```
+
 ```text
-tp_size      = 8
-dp_size      = 2
 enable_dp_attention = True
-attn_cp_size = 1
-ep_size      = 4
-moe_dp_size  = 2
-pp_size      = 1
+```
+
+```math
+\mathrm{attn\_cp\_size}=1
+```
+
+```math
+\mathrm{ep\_size}=4
+```
+
+```math
+\mathrm{moe\_dp\_size}=2
+```
+
+```math
+\mathrm{pp\_size}=1
 ```
 
 Then:
 
-```text
-attn_tp_size = 8 / 2 / 1 = 4
-moe_tp_size  = 8 / 2 / 4 = 1
+```math
+\mathrm{attn\_tp\_size}=\frac{\frac{8}{2}}{1}=4
+```
+
+```math
+\mathrm{moe\_tp\_size}=\frac{\frac{8}{2}}{4}=1
 ```
 
 The groups are:
 
-```text
-TP:       [0,1,2,3,4,5,6,7]
+```math
+\mathrm{shape}\left(\mathrm{TP}\right)=\left[0,1,2,3,4,5,6,7\right]
+```
 
+```text
 ATTN_TP:  [0,1,2,3], [4,5,6,7]
 ATTN_CP:  [0], [1], [2], [3], [4], [5], [6], [7]
-
 MOE_EP:   [0,1,2,3], [4,5,6,7]
 MOE_DP:   [0,4], [1,5], [2,6], [3,7]
 MOE_TP:   [0], [1], [2], [3], [4], [5], [6], [7]
@@ -405,7 +421,7 @@ For a model with 16 routed experts and no redundant experts:
 Compare ranks 2 and 6:
 
 - They belong to different MoE-DP replicas.
-- Both have `moe_ep_rank=2`, so they store the same logical expert shard.
+- Both have $`\mathrm{moe\_ep\_rank}=2`$, so they store the same logical expert shard.
 - They process different token data, forming MoE data parallelism.
 
 EP and MoE DP can therefore coexist: EP answers "where is each expert set?", while MoE DP answers "how many data replicas of that expert set exist?"
@@ -429,7 +445,7 @@ Source locations:
 
 ### 8.1 Column Parallel Splits the Output Dimension
 
-For `Y = XW`, Column Parallel splits the output dimension of `W`:
+For $`Y=\mathrm{XW}`$, Column Parallel splits the output dimension of `W`:
 
 ```text
 W = [W0, W1, ..., Wp-1]
@@ -807,7 +823,7 @@ This is **local expert computation**. The outer EP/TP path still decides how res
 
 ### 12.2 Common DeepEP Dispatcher + NPU Expert Compute
 
-With `moe_a2a_backend=deepep`:
+With $`\mathrm{moe\_a2a\_backend}=\mathrm{deepep}`$:
 
 1. The common `MaybeTboDeepEPDispatcher.dispatch()` sends tokens to destination EP ranks.
 2. NPU `_forward_npu_deepep()` or `maybe_apply_deepep_npu()` reads the dispatched tokens and `group_list`.
@@ -934,7 +950,7 @@ The precise answer to "Is the sharding logic common?" is:
 
 ## 15. Common Misunderstandings
 
-### 15.1 `tp_size=8` Means Every Matrix Is Split Eight Ways
+### 15.1 $`\mathrm{tp\_size}=8`$ Means Every Matrix Is Split Eight Ways
 
 Not necessarily. With DP Attention, CP, EP, or MoE DP enabled, compute `attn_tp_size` and `moe_tp_size` as well.
 

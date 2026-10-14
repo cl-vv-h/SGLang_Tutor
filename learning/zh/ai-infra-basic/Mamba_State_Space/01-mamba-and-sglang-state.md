@@ -48,9 +48,12 @@ flowchart LR
 
 SSM 可以用非常简化的形式理解：
 
-```text
-state_t = A * state_{t-1} + B * x_t
-y_t     = C * state_t     + D * x_t
+```math
+\mathrm{state\_t} = A \cdot  \mathrm{state}_{t-1} + B \cdot  x_{t}
+```
+
+```math
+y_{t}=C\cdot \mathrm{state\_t}+D\cdot x_{t}
 ```
 
 含义：
@@ -109,8 +112,8 @@ Mamba 不只是 SSM。它通常还在进入 SSM 前做一个短卷积，用来�
 
 如果卷积 kernel size 是 4，那么计算当前 token 时需要最近 3 个 token 的中间表示：
 
-```text
-conv_state_t = 最近 K-1 个输入窗口
+```math
+\mathrm{conv\_state\_t} = \text{最近} K-1 \text{个输入窗口}
 ```
 
 所以 Mamba 推理至少有两类状态：
@@ -155,14 +158,14 @@ flowchart LR
 
 Attention 的 cache 和 token 数强相关：
 
-```text
-KV Cache 大小 ≈ layers * tokens * kv_heads * head_dim * 2
+```math
+\mathrm{KV} \mathrm{Cache} \text{大小} \approx  \mathrm{layers} \cdot  \mathrm{tokens} \cdot  \mathrm{kv\_heads} \cdot  \mathrm{head\_dim} \cdot  2
 ```
 
 Mamba 的主状态更像和请求数强相关：
 
-```text
-Mamba state 大小 ≈ mamba_layers * running_requests * state_shape
+```math
+\mathrm{Mamba} \mathrm{state} \text{大小} \approx  \mathrm{mamba\_layers} \cdot  \mathrm{running\_requests} \cdot  \mathrm{state\_shape}
 ```
 
 但注意：Mamba prefix/radix cache、extra buffer、speculative 中间状态仍然会让内存管理变复杂。
@@ -190,12 +193,16 @@ Mamba2CacheParams:
 
 `Mamba2StateShape.create()` 会根据模型配置和 TP 切分计算 state shape：
 
-```text
 conv_state_shape:
-    [conv_dim / tp, conv_kernel - 1]
+
+```math
+\left[\frac{\mathrm{conv\_dim}}{\mathrm{tp}},\mathrm{conv\_kernel}-1\right]
+```
 
 temporal_state_shape:
-    [num_heads / tp, head_dim, state_size]
+
+```math
+\left[\frac{\mathrm{num\_heads}}{\mathrm{tp}},\mathrm{head\_dim},\mathrm{state\_size}\right]
 ```
 
 所以 Mamba state 不是拍脑袋分配的，而是由模型配置决定：

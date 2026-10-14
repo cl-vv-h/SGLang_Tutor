@@ -124,12 +124,15 @@ flowchart TB
 
 这是“先看 CANN/`torch_npu` 里有没有现成能力”的路径：
 
+```math
+\frac{\mathrm{PyTorch}}{\mathrm{SGLang}}
+```
+
 ```text
-PyTorch / SGLang
-  -> torch_npu
-  -> AscendCL / CANN Runtime
-  -> CANN 算子库
-  -> Ascend NPU
+-> torch_npu
+-> AscendCL / CANN Runtime
+-> CANN 算子库
+-> Ascend NPU
 ```
 
 适合：
@@ -178,13 +181,13 @@ w = torch.ops.npu.helloworld(x, y)
 
 1. `import torch_npu`：把 PyTorch 的 NPU backend 和相关能力接进来；
 2. `import sgl_kernel_npu`：除了导入 Python 包，还会加载它自己的 `.so`，把 custom op 注册进 PyTorch；
-3. `z = x + y`：更可能走现成 NPU backend 与算子库路径；
+3. $`z=x+y`$：更可能走现成 NPU backend 与算子库路径；
 4. `w = torch.ops.npu.helloworld(x, y)`：更明确地走“已注册 custom op”的路径；
 5. 两条路最后都不是“Python 自己算完”，而是 Host 把工作提交给 CANN runtime，再由 runtime 送到 NPU。
 
 这就是为什么看到 `torch.ops.npu.xxx` 时，不能立刻说“这一定是 torch_npu 自己实现的”。它也可能是 import 某个扩展后动态注册进去的。
 
-变量类型也要分层：`x/y/z/w` 的 Python 类型都是 `torch.Tensor`；`x/y` 的元素 dtype 是 `torch.float16`、shape 是 `[4096]`、device 是 NPU。`torch.ops.npu.helloworld` 是 Python dispatcher 提供的可调用 op packet，不是 device kernel 函数对象；调用后 dispatcher 把 `torch.Tensor` 映射为 C++ `at::Tensor`，Host 实现再取得设备地址并 launch。`import sgl_kernel_npu` 返回 Python module，同时触发 `.so` 加载与静态注册，它本身不执行 `helloworld`。
+变量类型也要分层：`x/y/z/w` 的 Python 类型都是 `torch.Tensor`；`x/y` 的元素 dtype 是 `torch.float16`、shape 是 $`\left[4096\right]`$、device 是 NPU。`torch.ops.npu.helloworld` 是 Python dispatcher 提供的可调用 op packet，不是 device kernel 函数对象；调用后 dispatcher 把 `torch.Tensor` 映射为 C++ `at::Tensor`，Host 实现再取得设备地址并 launch。`import sgl_kernel_npu` 返回 Python module，同时触发 `.so` 加载与静态注册，它本身不执行 `helloworld`。
 
 ## 8. 逐层源码解读：`import` 之后发生了什么
 
@@ -260,7 +263,7 @@ w = torch.ops.npu.helloworld(x, y)
 - 是否需要 workspace；
 - 尾块和对齐策略。
 
-同一个算子，`[B=1, S=128, H=4096]` 和 `[B=32, S=8192, H=4096]` 的最优切分往往完全不同。没有 tiling，就没有正确的 launch 计划；tiling 错了，轻则慢，重则越界或 UB 不够。
+同一个算子，$`\left[B=1, S=128, H=4096\right]`$ 和 $`\left[B=32, S=8192, H=4096\right]`$ 的最优切分往往完全不同。没有 tiling，就没有正确的 launch 计划；tiling 错了，轻则慢，重则越界或 UB 不够。
 
 ## 10. 常见错误
 

@@ -32,7 +32,7 @@ DecoderLayer.forward(hidden_states):
 
 ## 3. TP Communication Detail
 
-With `TP_size = 4`, each attention layer:
+With $`\mathrm{TP\_size}=4`$, each attention layer:
 
 ```text
 Rank 0: computes Q[0:Nq/4], K[0:Nkv/4], V[0:Nkv/4]
@@ -44,7 +44,7 @@ LayerCommunicator.all_reduce(): sum → full output [T, H]
 
 ## 4. EP Communication Detail
 
-With `EP_size = 4`, `E = 32` experts:
+With $`\mathrm{EP\_size}=4`$, $`E=32`$ experts:
 
 ```text
 Rank 0: Experts 0-7

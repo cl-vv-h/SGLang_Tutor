@@ -76,8 +76,8 @@ def forward_batch_generation(self, batch: ScheduleBatch):
 ### 3.6 ForwardBatch as Model Execution Metadata Contract
 
 `forward_batch_info.py:ForwardBatch`:
-- `input_ids`: `[T]` packed token IDs
-- `positions`: `[T]` position indices
+- `input_ids`: $`\left[T\right]`$ packed token IDs
+- `positions`: $`\left[T\right]`$ position indices
 - `out_cache_loc`: Where to write KV Cache
 - `seq_lens`: Per-request sequence lengths
 - `sampling_info`: Temperature, top-p, top-k, etc.

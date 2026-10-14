@@ -305,7 +305,7 @@ PY
 |---|---|---|
 | `Environment variable SGL_* is deprecated, please use SGLANG_*` | 旧脚本还在用 `SGL_MODELS`、`SGL_CACHE` 等旧变量。 | 改成 `SGLANG_MODELS`、`SGLANG_CACHE`、`SGLANG_WORKSPACE`。 |
 | `'python -m sglang.launch_server' is still supported...` | 旧入口仍可用，但推荐 CLI。 | 使用 `sglang serve`。 |
-| `Triton is not supported on current platform, roll back to CPU` | 某些 Triton 辅助路径在当前 Ascend 平台不可用。 | 若服务可用且日志确认 `attention_backend=ascend`，先记录为性能风险；吞吐异常再检查 `triton-ascend`、`sgl_kernel_npu` 和模型算子路径。 |
+| `Triton is not supported on current platform, roll back to CPU` | 某些 Triton 辅助路径在当前 Ascend 平台不可用。 | 若服务可用且日志确认 $`\mathrm{attention\_backend}=\mathrm{ascend}`$，先记录为性能风险；吞吐异常再检查 `triton-ascend`、`sgl_kernel_npu` 和模型算子路径。 |
 
 ## 4. 拉起 SGLang 服务
 
@@ -464,11 +464,20 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 日志里重点确认：
 
-```text
-device=npu
-attention_backend=ascend
-prefill_attention_backend=ascend
-decode_attention_backend=ascend
+```math
+\mathrm{device}=\mathrm{npu}
+```
+
+```math
+\mathrm{attention\_backend}=\mathrm{ascend}
+```
+
+```math
+\mathrm{prefill\_attention\_backend}=\mathrm{ascend}
+```
+
+```math
+\mathrm{decode\_attention\_backend}=\mathrm{ascend}
 ```
 
 ## 5. 模型准备
@@ -553,7 +562,7 @@ find /home/{myspace}/sglang-npu-workspace/models/Qwen2.5-7B-Instruct -maxdepth 1
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 容器里 `npu-smi` 不存在 | 没挂载 `/usr/local/sbin` 或 driver 路径 | 检查 Docker `-v /usr/local/sbin` 和 Ascend driver 挂载。 |
+| 容器里 `npu-smi` 不存在 | 没挂载 `/usr/local/sbin` 或 driver 路径 | 检查 Docker $`\frac{\frac{\frac{-v}{\mathrm{usr}}}{\mathrm{local}}}{\mathrm{sbin}}`$ 和 Ascend driver 挂载。 |
 | 容器里看不到 NPU | 没映射 `/dev/davinci*` | 增加对应 `--device`。 |
 | `torch.npu.is_available()` 为 False | 没有正确加载 CANN，或 torch/torch_npu/CANN 不匹配 | 官方 Docker 优先；自建环境检查 `source set_env.sh` 和版本组合。 |
 | `import sgl_kernel_npu` 失败 | NPU kernel 包没装或版本不匹配 | 使用官方 Docker，或安装匹配 wheel。 |
@@ -568,7 +577,7 @@ find /home/{myspace}/sglang-npu-workspace/models/Qwen2.5-7B-Instruct -maxdepth 1
 - `torch.npu.is_available()` 为 `True`。
 - `import sglang` 和 `import sgl_kernel_npu` 成功。
 - 模型目录中有完整 `config.json`、tokenizer 和权重文件。
-- 服务日志确认 `device=npu` 和 `attention_backend=ascend`。
+- 服务日志确认 $`\mathrm{device}=\mathrm{npu}`$ 和 $`\mathrm{attention\_backend}=\mathrm{ascend}`$。
 - `/health` 正常。
 - `/v1/chat/completions` 能返回内容。
 

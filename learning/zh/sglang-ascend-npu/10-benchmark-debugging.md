@@ -67,33 +67,53 @@ curl http://127.0.0.1:8000/v1/models
 
 ```text
 单卡:
-  1 request, prompt 128, output 64
-  1 request, prompt 4096, output 64
-  8 concurrent, prompt 512, output 128
-
+1 request, prompt 128, output 64
+1 request, prompt 4096, output 64
+8 concurrent, prompt 512, output 128
 多卡:
-  tp=2
-  tp=4
+```
+
+```math
+\mathrm{tp}=2
+```
+
+```math
+\mathrm{tp}=4
+```
 
 graph:
-  disable graph
-  enable graph
-  different cuda_graph_max_bs
-```
+
+disable graph
+
+enable graph
+
+different cuda_graph_max_bs
 
 ## 日志关键字
 
-```text
-device=npu
-attention_backend=ascend
-Init torch distributed
-backend=hccl
-Capture npu graph begin
-Capture npu graph end
-mem usage
-chunked_prefill_size
-cuda_graph_max_bs
+```math
+\mathrm{device}=\mathrm{npu}
 ```
+
+```math
+\mathrm{attention\_backend}=\mathrm{ascend}
+```
+
+Init torch distributed
+
+```math
+\mathrm{backend}=\mathrm{hccl}
+```
+
+Capture npu graph begin
+
+Capture npu graph end
+
+mem usage
+
+chunked_prefill_size
+
+cuda_graph_max_bs
 
 ## 常见故障速查
 
@@ -193,7 +213,7 @@ sglang serve \
 - stream/non-stream API 都稳定。
 - 长 prompt 不 OOM。
 - graph 打开后无 replay 错误。
-- 日志确认 `attention_backend=ascend`。
+- 日志确认 $`\mathrm{attention\_backend}=\mathrm{ascend}`$。
 - 压测记录包括模型、TP、上下文长度、并发、输出长度、graph 参数。
 - 如果启用 PD/LoRA/MoE/量化，分别做单独验收。
 

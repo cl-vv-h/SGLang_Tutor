@@ -128,7 +128,7 @@ LLM 推理中最核心的 NPU 热路径通常是 attention 与 KV cache。prefil
 
 | 工作 | 解释 |
 |---|---|
-| 选择 `attention_backend=ascend` | 确保请求进入 Ascend backend，而不是 CUDA/Triton fallback。 |
+| 选择 $`\mathrm{attention\_backend}=\mathrm{ascend}`$ | 确保请求进入 Ascend backend，而不是 CUDA/Triton fallback。 |
 | 构造 attention metadata | 把 batch、seq len、page table、slot mapping 传给 kernel。 |
 | 管理 KV cache allocator | 控制 page 分配、释放、复用、碎片。 |
 | 配置 page size / dtype | 影响 kernel 访问粒度和显存占用。 |

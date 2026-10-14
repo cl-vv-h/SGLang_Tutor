@@ -12,14 +12,24 @@ LLM 推理中最贵的资源通常有三类：
 
 量化的核心不是“压缩文件”，而是重新定义一个近似计算：
 
-```text
 原始计算:
-    y = x_float @ w_float
+
+```math
+y=x_{\mathrm{float}}\,w_{\mathrm{float}}
+```
 
 量化计算:
-    q_w, scale_w, zero_w = quantize(w_float)
-    q_x, scale_x, zero_x = quantize(x_float)   # 如果量化 activation
-    y ≈ dequant(q_x, scale_x, zero_x) @ dequant(q_w, scale_w, zero_w)
+
+```math
+\text{q\_w, scale\_w, zero\_w}= \mathrm{quantize}\left(w_{\mathrm{float}}\right)
+```
+
+```math
+\text{q\_x, scale\_x, zero\_x}= \mathrm{quantize}\left(x_{\mathrm{float}}\right) \qquad\text{如果量化 activation}
+```
+
+```math
+y \approx  \mathrm{dequant}\left(q_{x}, \mathrm{scale\_x}, \mathrm{zero\_x}\right) \, \mathrm{dequant}\left(q_{w}, \mathrm{scale\_w}, \mathrm{zero\_w}\right)
 ```
 
 高性能推理不会真的把整个 `q_w` 先反量化成大块 FP16 权重再做 GEMM，而是在 kernel 内部融合：
@@ -32,12 +42,16 @@ LLM 推理中最贵的资源通常有三类：
 
 最常见的 INT 量化是 affine quantization。它用一个缩放系数 `scale` 和一个整数偏移 `zero_point`，把实数映射到整数格点。
 
-```text
 量化:
-    q = clamp(round(x / scale) + zero_point, q_min, q_max)
+
+```math
+q=\mathrm{clamp}\left(\mathrm{round}\left(\frac{x}{\mathrm{scale}}\right)+\mathrm{zero\_point},q_{\mathrm{min}},q_{\mathrm{max}}\right)
+```
 
 反量化:
-    x_hat = (q - zero_point) * scale
+
+```math
+x_{\mathrm{hat}}=\left(q-\mathrm{zero\_point}\right)\cdot \mathrm{scale}
 ```
 
 | 符号 | 含义 |
@@ -60,35 +74,44 @@ LLM 推理中最贵的资源通常有三类：
 
 一个 4-bit unsigned 量化的整数范围是：
 
-```text
-q_min = 0
-q_max = 15
+```math
+q_{\mathrm{min}}=0
+```
+
+```math
+q_{\mathrm{max}}=15
 ```
 
 一个 4-bit signed 对称量化的常见范围是：
 
-```text
-q_min = -8
-q_max = 7
+```math
+q_{\mathrm{min}}=-8
 ```
 
-为什么 signed INT4 不是 `-7..7`？因为 4 个 bit 一共有 16 个编码，二补码天然覆盖 `-8..7`。有些 kernel 为了对称性会不用 `-8`，但这会浪费一个编码，需要看具体格式。
+```math
+q_{\mathrm{max}}=7
+```
+
+为什么 signed INT4 不是 $`\{-7,\ldots,7\}`$？因为 4 个 bit 一共有 16 个编码，二补码天然覆盖 $`\{-8,\ldots,7\}`$。有些 kernel 为了对称性会不用 `-8`，但这会浪费一个编码，需要看具体格式。
 
 ## 3. 对称量化与非对称量化
 
 ### 3.1 对称量化
 
-对称量化令 `zero_point = 0`，整数范围围绕 0。
+对称量化令 $`\mathrm{zero\_point}=0`$，整数范围围绕 0。
 
-```text
-q = clamp(round(x / scale), q_min, q_max)
-x_hat = q * scale
+```math
+q=\mathrm{clamp}\left(\mathrm{round}\left(\frac{x}{\mathrm{scale}}\right),q_{\mathrm{min}},q_{\mathrm{max}}\right)
+```
+
+```math
+x_{\mathrm{hat}}=q\cdot \mathrm{scale}
 ```
 
 scale 常按最大绝对值计算：
 
-```text
-scale = max(abs(x)) / q_max_abs
+```math
+\mathrm{scale}=\frac{\mathrm{max}\left(\mathrm{abs}\left(x\right)\right)}{\mathrm{q\_max\_abs}}
 ```
 
 | 优点 | 缺点 |
@@ -100,9 +123,12 @@ scale = max(abs(x)) / q_max_abs
 
 非对称量化允许 `zero_point != 0`，更适合非零中心分布。
 
-```text
-scale = (x_max - x_min) / (q_max - q_min)
-zero_point = round(q_min - x_min / scale)
+```math
+\mathrm{scale}=\frac{x_{\mathrm{max}}-x_{\mathrm{min}}}{q_{\mathrm{max}}-q_{\mathrm{min}}}
+```
+
+```math
+\mathrm{zero\_point}=\mathrm{round}\left(q_{\mathrm{min}}-\frac{x_{\mathrm{min}}}{\mathrm{scale}}\right)
 ```
 
 | 优点 | 缺点 |
@@ -116,12 +142,12 @@ zero_point = round(q_min - x_min / scale)
 
 | 粒度 | scale 形状示例 | 直观含义 | 常见场景 |
 |---|---:|---|---|
-| per-tensor | `[1]` | 整个张量共用一个 scale | 最简单、最快，但最粗 |
-| per-channel | `[O]` | 每个输出通道一个 scale | Linear 权重常用 |
-| per-group | `[O, I/group_size]` | 每个输出通道沿输入维按组分 scale | W4A16/GPTQ/AWQ 常用 |
-| per-block | `[O/block_n, I/block_k]` | 矩阵按 tile 共享 scale | FP8 block quant、MXFP8 |
-| per-token | `[T]` 或 `[T, group]` | 每个 token 的 activation 动态 scale | W8A8/FP8 activation |
-| per-head/layer | `[L,H]` 或 `[layer,head]` | 给 KV Cache 或 attention 相关张量单独 scale | KV Cache quant |
+| per-tensor | $`\left[1\right]`$ | 整个张量共用一个 scale | 最简单、最快，但最粗 |
+| per-channel | $`\left[O\right]`$ | 每个输出通道一个 scale | Linear 权重常用 |
+| per-group | $`\left[O,\frac{I}{\mathrm{group\_size}}\right]`$ | 每个输出通道沿输入维按组分 scale | W4A16/GPTQ/AWQ 常用 |
+| per-block | $`\left[\frac{O}{\mathrm{block\_n}},\frac{I}{\mathrm{block\_k}}\right]`$ | 矩阵按 tile 共享 scale | FP8 block quant、MXFP8 |
+| per-token | $`\left[T\right]`$ 或 $`\left[T,\mathrm{group}\right]`$ | 每个 token 的 activation 动态 scale | W8A8/FP8 activation |
+| per-head/layer | $`\left[L,H\right]`$ 或 $`\left[\mathrm{layer},\mathrm{head}\right]`$ | 给 KV Cache 或 attention 相关张量单独 scale | KV Cache quant |
 | per-expert | `[E,...]` | 每个 MoE expert 独立 scale | MoE 权重量化 |
 
 粒度越细，通常越准，因为不同区域不用被同一个 outlier 绑架。但粒度越细，metadata 越多，kernel 也越难写。
@@ -130,11 +156,11 @@ zero_point = round(q_min - x_min / scale)
 
 设 Linear 权重逻辑形状：
 
-```text
-W: [O, I]
+```math
+\mathrm{shape}\left(W\right)=\left[O,I\right]
 ```
 
-如果做 per-group W4，`group_size = 128`，则每个输出通道每 128 个输入维度共享一组 scale：
+如果做 per-group W4，$`\mathrm{group\_size}=128`$，则每个输出通道每 128 个输入维度共享一组 scale：
 
 ```text
 qweight: [O, I] 的逻辑 INT4 值
@@ -143,9 +169,12 @@ scale:   [O, ceil(I / 128)]
 
 计算某个元素 `W[o, i]` 的近似值：
 
-```text
-group_id = floor(i / 128)
-W_hat[o, i] = dequant(qweight[o, i], scale[o, group_id], zero_point[o, group_id])
+```math
+\mathrm{group\_id}=\mathrm{floor}\left(\frac{i}{128}\right)
+```
+
+```math
+W_{\mathrm{hat}}\left[o, i\right] = \mathrm{dequant}\left(\mathrm{qweight}\left[o, i\right], \mathrm{scale}\left[o, \mathrm{group\_id}\right], \mathrm{zero\_point}\left[o, \mathrm{group\_id}\right]\right)
 ```
 
 group size 越小，scale 越细，质量通常越好；但 scale 数量和内存访问会增加。常见 group size 有 `32`、`64`、`128`、`256`，具体取决于模型、硬件和 kernel。
@@ -156,8 +185,8 @@ group size 越小，scale 越细，质量通常越好；但 scale 数量和内�
 
 MinMax 是最直接的方法：
 
-```text
-scale = (x_max - x_min) / (q_max - q_min)
+```math
+\mathrm{scale}=\frac{x_{\mathrm{max}}-x_{\mathrm{min}}}{q_{\mathrm{max}}-q_{\mathrm{min}}}
 ```
 
 它的问题是极端 outlier 会把范围拉得很大。
@@ -173,14 +202,14 @@ scale = (x_max - x_min) / (q_max - q_min)
 
 为了避免少量 outlier 支配 scale，可以先选择截断阈值：
 
-```text
-clip_min, clip_max = percentile(x, 0.1%), percentile(x, 99.9%)
+```math
+\mathrm{clip\_min}=\mathrm{percentile}(x,0.1\%),\qquad\mathrm{clip\_max}=\mathrm{percentile}(x,99.9\%)
 ```
 
 然后只按截断后的范围量化：
 
-```text
-x_clipped = clamp(x, clip_min, clip_max)
+```math
+x_{\mathrm{clipped}}=\mathrm{clamp}\left(x,\mathrm{clip\_min},\mathrm{clip\_max}\right)
 ```
 
 这会牺牲 outlier 的精度，换取多数值更细的量化格点。
@@ -189,8 +218,8 @@ x_clipped = clamp(x, clip_min, clip_max)
 
 也可以搜索一个截断阈值，使反量化误差最小：
 
-```text
-error = mean((x - dequant(quantize(x, scale)))^2)
+```math
+\mathrm{error} = \mathrm{mean}\left(\left(x - \mathrm{dequant}\left(\mathrm{quantize}\left(x, \mathrm{scale}\right)\right)\right)^{2}\right)
 ```
 
 读法：
@@ -224,36 +253,36 @@ KV Cache: 创建或写入 cache 时量化
 
 量化误差可以写成：
 
-```text
-e = x_hat - x
+```math
+e=x_{\mathrm{hat}}-x
 ```
 
 但真正影响模型输出的不是单个元素误差，而是这些误差进入矩阵乘法、attention 和 softmax 后的结果。
 
 对 Linear：
 
-```text
-y = x @ W
-y_hat = (x + e_x) @ (W + e_w)
+```math
+y=x\,W
+```
+
+```math
+y_{\mathrm{hat}}=\left(x+e_{x}\right)\,\left(W+e_{w}\right)
 ```
 
 展开后：
 
-```text
-y_hat ≈ x @ W
-      + x @ e_w
-      + e_x @ W
-      + e_x @ e_w
+```math
+y_{\mathrm{hat}}\approx x\,W+x\,e_{w}+e_{x}\,W+e_{x}\,e_{w}
 ```
 
 | 项 | 含义 |
 |---|---|
-| `x @ W` | 原始结果 |
-| `x @ e_w` | 权重量化误差被 activation 放大 |
-| `e_x @ W` | activation 量化误差被权重放大 |
-| `e_x @ e_w` | 两边都量化后的二阶小项 |
+| $`x\,W`$ | 原始结果 |
+| $`x\,e_{w}`$ | 权重量化误差被 activation 放大 |
+| $`e_{x}\,W`$ | activation 量化误差被权重放大 |
+| $`e_{x}\,e_{w}`$ | 两边都量化后的二阶小项 |
 
-这解释了为什么只做 weight-only 往往比 W4A4 更容易保质量：activation 不量化时，少了 `e_x @ W` 和 `e_x @ e_w`。
+这解释了为什么只做 weight-only 往往比 W4A4 更容易保质量：activation 不量化时，少了 $`e_{x}\,W`$ 和 $`e_{x}\,e_{w}`$。
 
 ## 8. PTQ 与 QAT 的区别
 
@@ -276,7 +305,7 @@ PTQ 的优势是快，不需要原始训练流程；QAT 的优势是模型能适
 | `activation_scheme` | static、dynamic、per-token、per-tensor 等 |
 | `group_size` | 权重沿输入维共享 scale 的组大小 |
 | `sym` / `zero_point` | 对称还是非对称 |
-| `weight_block_size` | block quant 的二维 tile，比如 `[1,32]`、`[128,128]` |
+| `weight_block_size` | block quant 的二维 tile，比如 $`\left[1,32\right]`$、$`\left[128,128\right]`$ |
 | `kv_cache_quant_algo` | KV Cache 是否 FP8/INT8/MXFP8 |
 | `ignored_layers` | 哪些层不量化，常见于 embedding、lm_head 或敏感层 |
 | `packed_modules_mapping` | QKV、gate/up 等 fused 权重如何对应原始子模块 |

@@ -42,5 +42,5 @@
 1. Mamba 为什么不需要像 attention 那样保存完整 KV Cache？
 2. Mamba 的 `conv state` 和 `SSM/temporal state` 分别是什么？
 3. SGLang 为什么要为每个请求分配 `mamba_pool_idx`？
-4. `mamba_scheduler_strategy=no_buffer/extra_buffer` 大致在解决什么问题？
+4. $`\mathrm{mamba\_scheduler\_strategy}=\frac{\mathrm{no\_buffer}}{\mathrm{extra\_buffer}}`$ 大致在解决什么问题？
 5. 为什么 Mamba 与 radix cache、chunked prefill、speculative decoding、graph replay 都会发生耦合？

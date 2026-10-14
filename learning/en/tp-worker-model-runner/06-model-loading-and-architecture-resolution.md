@@ -262,7 +262,7 @@ It handles three common cases:
 | Case | Handling | Result |
 |---|---|---|
 | Native SGLang support exists | Directly call `ModelRegistry.resolve_model_cls()` | Returns a native model class such as `DeepseekV4ForCausalLM` |
-| User chose `model_impl=transformers`, or native support is missing but Transformers can handle it | Use `resolve_transformers_arch()` and a Transformers wrapper | Better compatibility, fewer SGLang-native optimizations |
+| User chose $`\mathrm{model\_impl}=\mathrm{transformers}`$, or native support is missing but Transformers can handle it | Use `resolve_transformers_arch()` and a Transformers wrapper | Better compatibility, fewer SGLang-native optimizations |
 | Unsupported everywhere | `ModelRegistry` raises unsupported architecture | Startup fails; add an implementation or fix config |
 
 There is also an extension point:
@@ -417,13 +417,19 @@ The main path is:
 
 ```text
 ModelConfig.hf_config.architectures = ["DeepseekV4ForCausalLM"]
-  -> get_model_architecture()
-  -> ModelRegistry.resolve_model_cls(["DeepseekV4ForCausalLM"])
-  -> python/sglang/srt/models/deepseek_v4.py
-       EntryClass = [DeepseekV4ForCausalLM]
-  -> DefaultModelLoader._initialize_model()
-       model = DeepseekV4ForCausalLM(config=hf_config, quant_config=...)
-  -> model.load_weights(...)
+-> get_model_architecture()
+-> ModelRegistry.resolve_model_cls(["DeepseekV4ForCausalLM"])
+-> python/sglang/srt/models/deepseek_v4.py
+```
+
+```math
+\mathrm{EntryClass}=\left[\mathrm{DeepseekV4ForCausalLM}\right]
+```
+
+```text
+-> DefaultModelLoader._initialize_model()
+model = DeepseekV4ForCausalLM(config=hf_config, quant_config=...)
+-> model.load_weights(...)
 ```
 
 DeepSeek V4 also has dedicated adaptation logic:
@@ -449,13 +455,21 @@ Source locations:
 
 ```text
 python/sglang/srt/models/glm4_moe.py
-  Glm4MoeForCausalLM
-  GlmMoeDsaForCausalLM
-  EntryClass = [Glm4MoeForCausalLM, GlmMoeDsaForCausalLM]
+Glm4MoeForCausalLM
+GlmMoeDsaForCausalLM
+```
 
+```math
+\mathrm{EntryClass}=\left[\mathrm{Glm4MoeForCausalLM},\mathrm{GlmMoeDsaForCausalLM}\right]
+```
+
+```text
 python/sglang/srt/models/glm4_moe_nextn.py
-  Glm4MoeForCausalLMNextN
-  EntryClass = [Glm4MoeForCausalLMNextN]
+Glm4MoeForCausalLMNextN
+```
+
+```math
+\mathrm{EntryClass}=\left[\mathrm{Glm4MoeForCausalLMNextN}\right]
 ```
 
 If a GLM-4.7-Flash checkpoint says `architectures = ["Glm4MoeForCausalLM"]`, the path is:
@@ -564,7 +578,7 @@ Checklist:
 |---|---|---|
 | 1 | Add or update a model implementation file | `python/sglang/srt/models/<new_model>.py` |
 | 2 | Define the model class | `class NewModelForCausalLM(nn.Module)` |
-| 3 | Expose `EntryClass` | `EntryClass = [NewModelForCausalLM]` |
+| 3 | Expose `EntryClass` | $`\mathrm{EntryClass}=\left[\mathrm{NewModelForCausalLM}\right]`$ |
 | 4 | Ensure architecture name matches config | checkpoint `config.json` / `architectures` |
 | 5 | Implement constructor | `__init__(self, config, quant_config, ...)` |
 | 6 | Implement forward | `forward(self, input_ids, positions, forward_batch, ...)` |

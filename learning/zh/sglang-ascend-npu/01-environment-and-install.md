@@ -343,7 +343,7 @@ sglang serve \
 日志里重点找：
 
 - `device='npu'` 或 NPU device 设置。
-- `attention_backend=ascend`。
+- $`\mathrm{attention\_backend}=\mathrm{ascend}`$。
 - `Capture npu graph begin/end`，如果没有禁用 graph。
 - HCCL 或 distributed 初始化信息。
 - KV cache pool 初始化信息。
@@ -541,10 +541,16 @@ pip list | grep -i sgl
 
 并在日志里确认：
 
-```text
-attention_backend=ascend
-prefill_attention_backend=ascend
-decode_attention_backend=ascend
+```math
+\mathrm{attention\_backend}=\mathrm{ascend}
+```
+
+```math
+\mathrm{prefill\_attention\_backend}=\mathrm{ascend}
+```
+
+```math
+\mathrm{decode\_attention\_backend}=\mathrm{ascend}
 ```
 
 ### 10.4 启动后卡住

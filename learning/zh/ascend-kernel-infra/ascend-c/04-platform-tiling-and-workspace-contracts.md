@@ -84,14 +84,23 @@
 
 拿本章后面会读的 `apply_token_bitmask` 举例，开发者在 Host 源码里写下这套策略：
 
+```math
+\mathrm{blockDim} = \mathrm{min}\left(\text{本次需要处理的行数}, \text{当前设备} \mathrm{AIV} \text{核数}\right)
+```
+
+```math
+\mathrm{baseRows}=\frac{\text{行数}}{\mathrm{blockDim}}
+```
+
+```math
+\mathrm{extraRows}=\text{行数}\bmod \mathrm{blockDim}
+```
+
 ```text
-blockDim  = min(本次需要处理的行数, 当前设备 AIV 核数)
-baseRows  = 行数 / blockDim
-extraRows = 行数 % blockDim
 tileLength 根据 UB 容量、dtypeSize、double buffer、bitmask packing 和 256-element 对齐反推
 ```
 
-运行时如果输入是 `[batch=64, vocab=32000]`，Host 会算出一组具体 `blockDim/baseRows/extraCores/tileLength`；如果下一次输入变成 `[batch=1, vocab=128000]`，同一套策略会得到另一组具体值。策略是源码里写好的，具体数值是 launch 前动态算出来的。
+运行时如果输入是 $`\left[\mathrm{batch}=64, \mathrm{vocab}=32000\right]`$，Host 会算出一组具体 `blockDim/baseRows/extraCores/tileLength`；如果下一次输入变成 $`\left[\mathrm{batch}=1, \mathrm{vocab}=128000\right]`$，同一套策略会得到另一组具体值。策略是源码里写好的，具体数值是 launch 前动态算出来的。
 
 如果你调用的是 CANN 内置 ACLNN 或高层算子库，tiling 策略可能藏在库内部，看起来像“库自动算好了”。但这不表示 Host 天生会自动优化任意自定义 kernel；只是这部分策略由库作者替你写了。自己写 Ascend C custom op 时，通常就要自己设计并实现这段 Host tiling 逻辑。
 
@@ -196,7 +205,7 @@ uint32_t tileLength = static_cast<uint32_t>(
 逐层理解：
 
 1. `GetCoreNumAiv()` 先查当前平台可用的 AIV 数量；
-2. `blockDim = min(numIndices, coreNum)` 决定“一行一个 block，但最多不超过当前 AIV 核数”；
+2. $`\mathrm{blockDim}=\mathrm{min}\left(\mathrm{numIndices},\mathrm{coreNum}\right)`$ 决定“一行一个 block，但最多不超过当前 AIV 核数”；
 3. `GetCoreMemSize(UB, ubSize)` 查询 UB 容量；
 4. Host 再依据 `dtypeSize`、双缓冲队列数量和 256-element 对齐单元，算出 `tileLength`；
 5. launch 时把 `numRowsU32`、`vocabSizeU32`、`baseRows`、`extraCores`、`tileLength` 等标量直接传给 `EXEC_KERNEL_CMD(...)`。
@@ -217,13 +226,13 @@ uint32_t tileLength = static_cast<uint32_t>(
 
 这条路径比 `apply_token_bitmask` 多了两样东西：
 
-- `workspace_size = GetLibApiWorkSpaceSize()`
+- $`\mathrm{workspace\_size} = \mathrm{GetLibApiWorkSpaceSize}\left(\right)`$
 - `tiling_buffer -> tiling_tensor`
 
 先看 Host 侧：
 
-1. `block_dim = min(max_aiv_core, batch_size)` 仍然先决定启动多少实例；
-2. `workspace_size = GetLibApiWorkSpaceSize()` 返回该 launch 框架或库接口要求的额外 device scratch 大小；
+1. $`\mathrm{block\_dim}=\mathrm{min}\left(\mathrm{max\_aiv\_core},\mathrm{batch\_size}\right)`$ 仍然先决定启动多少实例；
+2. $`\mathrm{workspace\_size} = \mathrm{GetLibApiWorkSpaceSize}\left(\right)`$ 返回该 launch 框架或库接口要求的额外 device scratch 大小；
 3. Host 按 32 字节对齐分配一块 CPU byte tensor；
 4. 把 `BuildTreeTilingData` 里的字段写进去；
 5. 再调用 `TorchNpuHelper::CopyTensorHostToDevice(...)` 把这块小字节缓冲区送到 device；
@@ -415,7 +424,7 @@ Host 先按共享结构体 ABI 写一块小的 CPU byte buffer，再把它复制
 
 **答案：**Tiling key 选择“运行哪一种 kernel/模板路径”，`blockDim` 决定“这次启动多少个逻辑核实例”。
 
-例如 tiling key 可以编码 transpose、数据格式、量化模式、split-K 或某套专用算法，使 Host/launch 选择匹配的编译变体；`blockDim=32` 则表示该变体启动 32 个 SPMD 实例，由 `GetBlockIdx()` 区分工作。
+例如 tiling key 可以编码 transpose、数据格式、量化模式、split-K 或某套专用算法，使 Host/launch 选择匹配的编译变体；$`\mathrm{blockDim}=32`$ 则表示该变体启动 32 个 SPMD 实例，由 `GetBlockIdx()` 区分工作。
 
 同一个 tiling key 可以针对不同 shape 使用不同 blockDim，同一个 blockDim 也可能启动不同 tiling key 的 kernel。前者是实现/算法分支，后者是并行规模。把 key 当核数会选错 binary，把 blockDim 当算法变体则无法表达 Device 应执行哪套代码。
 
@@ -425,7 +434,7 @@ Host 先按共享结构体 ABI 写一块小的 CPU byte buffer，再把它复制
 
 开发者设计的是“公式和规则”，例如按行切还是按二维 tile 切、最多启多少核、每个 tile 需要几份输入输出 buffer、尾块如何处理、是否需要 workspace、是否要根据 dtype 选择不同 kernel 变体。Host 运行时拿到真实输入后，把 `shape/dtype/layout` 与 `Platform` 查询到的 AIV/AIC 数量、UB/L1/L0 容量等硬件事实代入这些规则，得到本次 launch 的 `blockDim`、`tileLength`、`baseRows`、`extraCores`、workspace 大小或 tiling tensor 字段。
 
-以 `apply_token_bitmask` 为例，`blockDim=min(numRows,coreNum)` 和 UB 预算公式是源码中写死的策略；`numRows`、`coreNum`、`dtypeSize`、`ubSize` 是运行时才知道的值；最终的 `blockDim/baseRows/extraCores/tileLength` 是 Host launch 前算出的 tiling 结果。Device kernel 启动后只通过 `GetBlockIdx()` 和这些参数决定自己处理哪几行、每轮处理多少 vocab 元素，它不会再反过来改变全局 `blockDim`。
+以 `apply_token_bitmask` 为例，$`\mathrm{blockDim}=\mathrm{min}\left(\mathrm{numRows},\mathrm{coreNum}\right)`$ 和 UB 预算公式是源码中写死的策略；`numRows`、`coreNum`、`dtypeSize`、`ubSize` 是运行时才知道的值；最终的 `blockDim/baseRows/extraCores/tileLength` 是 Host launch 前算出的 tiling 结果。Device kernel 启动后只通过 `GetBlockIdx()` 和这些参数决定自己处理哪几行、每轮处理多少 vocab 元素，它不会再反过来改变全局 `blockDim`。
 
 如果使用 CANN 内置算子，tiling 代码可能在库内部，所以调用者感觉“Host/库自动算了”；但那是库作者预先实现的策略，并不是 Runtime 对任意 kernel 做通用自动规划。写自定义 Ascend C 算子时，tiling 设计本身就是核心开发工作之一。
 

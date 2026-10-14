@@ -14,7 +14,7 @@ token A starts on rank 0: experts [0,2], weights [0.25,0.75]
 token B starts on rank 1: experts [2,3], weights [0.50,0.50]
 ```
 
-One expert path for A stays on rank 0; the other goes to rank 1. Both paths for B stay on rank 1. There are four logical token-expert assignments, but only A→expert 2 requires cross-rank dispatch. `tokens * top_k` is not the number of tokens crossing the network.
+One expert path for A stays on rank 0; the other goes to rank 1. Both paths for B stay on rank 1. There are four logical token-expert assignments, but only A→expert 2 requires cross-rank dispatch. $`\mathrm{tokens}\cdot \mathrm{top\_k}`$ is not the number of tokens crossing the network.
 
 ```mermaid
 flowchart LR
@@ -35,7 +35,7 @@ flowchart LR
 | combine | original token/rank, inverse indices, location of top-k weight application |
 | completion and reuse | when communication/GEMM finish reading buffers and handles can retire |
 
-The mathematical target is `y_t = sum_j weight[t,j] * expert_j(x_t)`. Weights may be applied in the expert path or combine; follow the implementation contract exactly once. A dispatch handle often retains restoration metadata rather than merely representing a network connection.
+The mathematical target is $`y_{t} = \sum_{j} \mathrm{weight}\left[t,j\right] \cdot  \mathrm{expert\_j}\left(x_{t}\right)`$. Weights may be applied in the expert path or combine; follow the implementation contract exactly once. A dispatch handle often retains restoration metadata rather than merely representing a network connection.
 
 When several target experts for one token reside on the same remote rank/node, optimized implementations may share a transfer and expand locally. Actual bytes depend on deduplication, padding, quantization, and topology. Skew also matters: balanced average token counts do not guarantee a short wait for the busiest expert.
 
@@ -66,7 +66,7 @@ For implementation details, read [07: ZBAL zero buffer source and dataflow](./07
 
 | Entry | Current Code Behavior | Why It Matters |
 |---|---|---|
-| [parallel_state.py](../../../../python/sglang/srt/distributed/parallel_state.py) | selects `zbal` for NPU when `SGLANG_ZBAL_LOCAL_MEM_SIZE > 0`, otherwise `hccl` | changes the default device communication backend |
+| [parallel_state.py](../../../../python/sglang/srt/distributed/parallel_state.py) | selects `zbal` for NPU when $`\mathrm{SGLANG\_ZBAL\_LOCAL\_MEM\_SIZE} \gt 0`$, otherwise `hccl` | changes the default device communication backend |
 | [npu/utils.py](../../../../python/sglang/srt/hardware_backend/npu/utils.py) | `init_zbal()`, `switch_to_allocator()`, `lazy_init_zbal_gva_mem()` | allocator, mixed allocation, and global-address memory setup are execution prerequisites |
 | [deepep.py](../../../../python/sglang/srt/layers/moe/token_dispatcher/deepep.py) | imports `Config/Buffer` from `zbal` under the NPU+ZBAL condition, otherwise from `deep_ep` | one dispatcher entry can use different implementations |
 
@@ -86,7 +86,7 @@ else:
     from deep_ep import Buffer, Config
 ```
 
-`Scheduler.init_zbal_on_npu()` runs early. Mixed-allocation mode first switches the allocator; ModelRunner initializes the related memory later, before graph capture. The code multiplies `SGLANG_ZBAL_LOCAL_MEM_SIZE` by `1024**2` to obtain bytes; `SGLANG_ZBAL_BOOTSTRAP_URL` optionally supplies a bootstrap address. Setting a variable without compatible packages and correct initialization order is insufficient.
+`Scheduler.init_zbal_on_npu()` runs early. Mixed-allocation mode first switches the allocator; ModelRunner initializes the related memory later, before graph capture. The code multiplies `SGLANG_ZBAL_LOCAL_MEM_SIZE` by $`{1024}^{2}`$ to obtain bytes; `SGLANG_ZBAL_BOOTSTRAP_URL` optionally supplies a bootstrap address. Setting a variable without compatible packages and correct initialization order is insufficient.
 
 ## 6. ZBAL and HCCL Are Not Simply Exclusive Alternatives
 

@@ -97,7 +97,7 @@ flowchart LR
 
 ## page size
 
-NPU 默认 `page_size=128`，会影响：
+NPU 默认 $`\mathrm{page\_size}=128`$，会影响：
 
 - `NPUMHATokenToKVPool`
 - `NPUMLATokenToKVPool`
@@ -131,10 +131,16 @@ NPU 默认 `page_size=128`，会影响：
 
 NPU 默认会设置：
 
-```text
-hicache_io_backend = kernel_ascend
-hicache_mem_layout = page_first_kv_split    # MLA
-hicache_mem_layout = page_first_direct      # MHA
+```math
+\mathrm{hicache\_io\_backend}=\mathrm{kernel\_ascend}
+```
+
+```math
+\mathrm{hicache\_mem\_layout}=\mathrm{page\_first\_kv\_split}\qquad\text{MLA}
+```
+
+```math
+\mathrm{hicache\_mem\_layout}=\mathrm{page\_first\_direct}\qquad\text{MHA}
 ```
 
 直觉：
@@ -169,8 +175,8 @@ NPU 里有 ACL format：
 
 相关函数：
 
-```text
-npu_format_cast(tensor, acl_format=NPUACLFormat.ACL_FORMAT_FRACTAL_NZ)
+```math
+\mathrm{npu\_format\_cast}\left(\mathrm{tensor}, \mathrm{acl\_format}=\mathrm{NPUACLFormat}.\mathrm{ACL\_FORMAT\_FRACTAL\_NZ}\right)
 ```
 
 注意：

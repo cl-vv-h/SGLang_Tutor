@@ -16,7 +16,7 @@ flowchart LR
     R2 --> IO["下一层或输出头"]
 ```
 
-1. **输入/输出契约**：主残差流为什么通常始终是 `[B,S,H]`？
+1. **输入/输出契约**：主残差流为什么通常始终是 $`\left[B,S,H\right]`$？
 2. **Token mixer**：一个 token 能读取哪些 token，又用什么运算读取？
 3. **Channel mixer**：Dense FFN、SwiGLU、MoE 如何改变最后一维？
 4. **Runtime state**：decode 到下一个 token 时，上一轮究竟留下了什么？
@@ -27,36 +27,60 @@ flowchart LR
 
 以最常见的 Pre-Norm 串行残差为例：
 
-```text
-U = RMSNorm(X)                 [B,S,H]
-A, state' = TokenMixer(U,state) [B,S,H]
-R = X + A                     [B,S,H]
-V = RMSNorm(R)                [B,S,H]
-F = ChannelMixer(V)           [B,S,H]
-Y = R + F                     [B,S,H]
+```math
+U=\mathrm{RMSNorm}\left(X\right)\qquad\mathrm{shape}:\left[B,S,H\right]
 ```
 
-这里真正变化的是**中间张量**和**持久状态**，而不是残差流的外形。例如 SwiGLU 会暂时扩张到 `[B,S,I]`；MoE 会暂时把 token 展开成 `B×S×K` 条路由；Attention 会产生 `[B,N,Lq,Lkv]` 分数；SSM/KDA 会读写固定形状矩阵。所有分支最终必须投影回 `H`，才能和残差相加。
+```math
+\text{A, state'}= \mathrm{TokenMixer}\left(U,\mathrm{state}\right) \left[B,S,H\right]
+```
+
+```math
+R=X+A\qquad\mathrm{shape}:\left[B,S,H\right]
+```
+
+```math
+V=\mathrm{RMSNorm}\left(R\right)\qquad\mathrm{shape}:\left[B,S,H\right]
+```
+
+```math
+F = \mathrm{ChannelMixer}\left(V\right) \left[B,S,H\right]
+```
+
+```math
+Y=R+F\qquad\mathrm{shape}:\left[B,S,H\right]
+```
+
+这里真正变化的是**中间张量**和**持久状态**，而不是残差流的外形。例如 SwiGLU 会暂时扩张到 $`\left[B,S,I\right]`$；MoE 会暂时把 token 展开成 `B×S×K` 条路由；Attention 会产生 $`\left[B,N,\mathrm{Lq},\mathrm{Lkv}\right]`$ 分数；SSM/KDA 会读写固定形状矩阵。所有分支最终必须投影回 `H`，才能和残差相加。
 
 ### 用同一个教学配置观察不同家族
 
-```text
-B=2, S=1024, H=4096, L=32
-Nq=32, Nkv=8, D=128
-FFN I=11008
-MoE E=64, top-K=2, expert width Ie=1408
+```math
+B=2,\qquad S=1024,\qquad H=4096,\qquad L=32
+```
+
+```math
+\mathrm{Nq}=32,\qquad \mathrm{Nkv}=8,\qquad D=128
+```
+
+```math
+\text{FFN I}=11008
+```
+
+```math
+\text{MoE E}=64, \mathrm{top}-K=2, \mathrm{expert} \mathrm{width} \mathrm{Ie}=1408
 ```
 
 | 家族 | 最大的临时张量（逻辑形状） | 每层 decode 持久状态 | 状态是否随上下文增长 |
 |---|---|---|---|
-| Encoder-only | attention score `[2,32,1024,1024]` | 通常无 | 否 |
-| Encoder-Decoder | self score + cross score `[2,32,Stgt,Ssrc]` | decoder KV + encoder memory/KV | decoder 部分是 |
-| Dense/MoE Decoder | causal score `[2,32,1024,1024]` | KV `[B,S,Nkv,D] × 2` | 是 |
-| MLA Decoder | latent attention score `[2,32,1024,1024]` | `Ckv [B,S,Dc] + Krope [B,S,Dr]` | 是，但每 token 更窄 |
+| Encoder-only | attention score $`\left[2,32,1024,1024\right]`$ | 通常无 | 否 |
+| Encoder-Decoder | self score + cross score $`\left[2,32,\mathrm{Stgt},\mathrm{Ssrc}\right]`$ | decoder KV + encoder memory/KV | decoder 部分是 |
+| Dense/MoE Decoder | causal score $`\left[2,32,1024,1024\right]`$ | KV `[B,S,Nkv,D] × 2` | 是 |
+| MLA Decoder | latent attention score $`\left[2,32,1024,1024\right]`$ | `Ckv [B,S,Dc] + Krope [B,S,Dr]` | 是，但每 token 更窄 |
 | SSM/KDA | scan/chunk 临时量 | 固定形状 recurrent state + conv tail | 否 |
 | Hybrid | 取决于当前 layer 类型 | KV 与 recurrent state 的并集 | 部分层是 |
 
-注意：score 矩阵在训练/朴素实现里可按上述逻辑理解；FlashAttention 类 kernel 会分块计算 softmax，不会把完整 `[S,S]` 矩阵写回 HBM。
+注意：score 矩阵在训练/朴素实现里可按上述逻辑理解；FlashAttention 类 kernel 会分块计算 softmax，不会把完整 $`\left[S,S\right]`$ 矩阵写回 HBM。
 
 ### Decoder-only 的端到端主路径
 
@@ -82,7 +106,7 @@ flowchart TD
     LAYER --> FINAL["Final Norm + LM Head<br/>[B,S,H] -> [B,S,V]"]
 ```
 
-Prefill 把 `S` 个位置一起送入该图；decode 只送 `[B,1,H]`，但 token mixer 会读取之前持久化的历史状态。这正是同一个模型在两个阶段性能特征完全不同的原因。
+Prefill 把 `S` 个位置一起送入该图；decode 只送 $`\left[B,1,H\right]`$，但 token mixer 会读取之前持久化的历史状态。这正是同一个模型在两个阶段性能特征完全不同的原因。
 
 ## 1. 统一分析框架
 
@@ -152,7 +176,10 @@ Cross Attention 形状：
 ```text
 Q from decoder: [B,Stgt,N,D]
 K,V from encoder memory: [B,Ssrc,Nkv,D]
-scores: [B,N,Stgt,Ssrc]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[B,N,\mathrm{Stgt},\mathrm{Ssrc}\right]
 ```
 
 特点：
@@ -177,18 +204,30 @@ Token Embedding
 
 每层：
 
-```text
-r = x + Attention(Norm(x))
-y = r + FFN(Norm(r))
+```math
+r = x + \mathrm{Attention}\left(\mathrm{Norm}\left(x\right)\right)
+```
+
+```math
+y = r + \mathrm{FFN}\left(\mathrm{Norm}\left(r\right)\right)
 ```
 
 Dense SwiGLU FFN：
 
-```text
-gate = X @ W_gate       [B,S,I]
-up   = X @ W_up         [B,S,I]
-mid  = SiLU(gate) * up  [B,S,I]
-Y    = mid @ W_down     [B,S,H]
+```math
+\mathrm{gate}=X\,W_{\mathrm{gate}}\qquad\mathrm{shape}:\left[B,S,I\right]
+```
+
+```math
+\mathrm{up}=X\,W_{\mathrm{up}}\qquad\mathrm{shape}:\left[B,S,I\right]
+```
+
+```math
+\mathrm{mid}=\mathrm{SiLU}\left(\mathrm{gate}\right)\odot \mathrm{up}\qquad\mathrm{shape}:\left[B,S,I\right]
+```
+
+```math
+Y=\mathrm{mid}\,W_{\mathrm{down}}\qquad\mathrm{shape}:\left[B,S,H\right]
 ```
 
 参数量和每 token 计算量都随 FFN intermediate size `I` 增长。所有 token 经过同一组 FFN 权重。
@@ -199,9 +238,12 @@ GPT-style、LLaMA-style 以及许多 dense Qwen-style 模型属于该家族。�
 
 Sparse MoE Decoder 保留 causal Attention，把 Dense FFN 替换为路由 experts：
 
-```text
-r = x + Attention(Norm(x))
-y = r + SparseMoE(Norm(r))
+```math
+r = x + \mathrm{Attention}\left(\mathrm{Norm}\left(x\right)\right)
+```
+
+```math
+y = r + \mathrm{SparseMoE}\left(\mathrm{Norm}\left(r\right)\right)
 ```
 
 MoE 层：
@@ -210,7 +252,10 @@ MoE 层：
 router logits: [B,S,E]
 top-k ids/weights: [B,S,K]
 logical expert routes: B*S*K
-output: [B,S,H]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{output}\right)=\left[B,S,H\right]
 ```
 
 模型总 expert 参数量约与 `E` 成正比，单 token 激活计算约与 `K` 成正比。其主要结构特征是：
@@ -226,9 +271,8 @@ Mixtral-style 和多种 MoE Qwen-style 模型属于该家族。
 
 部分 MoE 架构同时使用 shared experts 和 routed experts：
 
-```text
-Y = SharedExpert(X)
-  + sum_(e in TopK(X)) p_e * RoutedExpert_e(X)
+```math
+Y = \mathrm{SharedExpert}\left(X\right) + \sum_{e \in \mathrm{TopK}\left(X\right)} p_{e} \cdot  \mathrm{RoutedExpert\_e}\left(X\right)
 ```
 
 其中：
@@ -239,10 +283,16 @@ Y = SharedExpert(X)
 
 形状：
 
-```text
-shared_output: [B,S,H]
-routed_output: [B,S,H]
-final_output:  [B,S,H]
+```math
+\mathrm{shape}\left(\mathrm{shared\_output}\right)=\left[B,S,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{routed\_output}\right)=\left[B,S,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{final\_output}\right)=\left[B,S,H\right]
 ```
 
 两条路径输出可直接相加。
@@ -251,14 +301,14 @@ final_output:  [B,S,H]
 
 Fine-grained MoE 使用更多、尺寸更小的 experts。若把原本 intermediate size 为 `I_big` 的 expert 拆成 `m` 个小 expert：
 
-```text
-Ie = I_big / m
+```math
+\mathrm{Ie}=\frac{I_{\mathrm{big}}}{m}
 ```
 
 同时提高 Top-K，使单 token 激活的总 intermediate width保持在目标范围：
 
-```text
-active_width = K * Ie
+```math
+\mathrm{active\_width}=K\cdot \mathrm{Ie}
 ```
 
 较细粒度路由提供更多 expert 组合，但会增加路由 metadata、dispatch 复杂度和小矩阵问题。
@@ -296,9 +346,12 @@ DeepSeek-style 模型代表这一组合。
 
 状态空间模型不显式让当前 token 与所有历史 K/V 做点积，而是递推更新固定大小状态：
 
-```text
-h_t = A_t * h_(t-1) + B_t * x_t
-y_t = C_t * h_t + D * x_t
+```math
+h_{t}=A_{t}\cdot {h}_{t-1}+B_{t}\cdot x_{t}
+```
+
+```math
+y_{t}=C_{t}\cdot h_{t}+D\cdot x_{t}
 ```
 
 数据流：
@@ -400,26 +453,26 @@ vision feature width Hvision -> language hidden size H
 | ALiBi | 按距离加线性 bias | score shape 不变 | 无位置 embedding 表 |
 | Decoupled RoPE | 仅旋转 Q/K 的位置子空间 | 最后一维拆分 | 支持内容投影矩阵吸收 |
 
-位置编码会影响长上下文外推、缓存内容和 Attention kernel，但通常不改变主路径 `[B,S,H]`。
+位置编码会影响长上下文外推、缓存内容和 Attention kernel，但通常不改变主路径 $`\left[B,S,H\right]`$。
 
 ## 14. Normalization 与残差布局
 
 ### Post-Norm
 
-```text
-y = Norm(x + Sublayer(x))
+```math
+y = \mathrm{Norm}\left(x + \mathrm{Sublayer}\left(x\right)\right)
 ```
 
 ### Pre-Norm
 
-```text
-y = x + Sublayer(Norm(x))
+```math
+y = x + \mathrm{Sublayer}\left(\mathrm{Norm}\left(x\right)\right)
 ```
 
 ### Parallel Residual
 
-```text
-y = x + Attention(Norm(x)) + FFN(Norm(x))
+```math
+y = x + \mathrm{Attention}\left(\mathrm{Norm}\left(x\right)\right) + \mathrm{FFN}\left(\mathrm{Norm}\left(x\right)\right)
 ```
 
 大规模深层模型多使用 Pre-Norm 或其变体，以改善优化稳定性。LayerNorm 与 RMSNorm 的主要差异是 RMSNorm 不减均值：
@@ -429,7 +482,7 @@ LayerNorm: center + scale
 RMSNorm: scale only
 ```
 
-两者均保持 `[B,S,H]`。
+两者均保持 $`\left[B,S,H\right]`$。
 
 ## 15. 从配置参数还原模型结构
 

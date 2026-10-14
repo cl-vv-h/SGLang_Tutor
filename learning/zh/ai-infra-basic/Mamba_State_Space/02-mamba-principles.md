@@ -45,9 +45,12 @@ Mamba 的历史是“压缩的”：历史被滚动写入一个固定形状的 s
 
 最小的离散 SSM 可以写成：
 
-```text
-h_t = A h_{t-1} + B x_t
-y_t = C h_t     + D x_t
+```math
+h_{t}=A\,{h}_{t-1}+B\,x_{t}
+```
+
+```math
+y_{t}=C\,h_{t}+D\,x_{t}
 ```
 
 其中：
@@ -117,8 +120,8 @@ Mamba block 里通常有一个短 causal convolution。它不是为了替代 SSM
 
 假设 kernel size 是 4，则当前 token 的卷积要看最近 4 个位置：
 
-```text
-conv_out_t = f(x_t, x_{t-1}, x_{t-2}, x_{t-3})
+```math
+\mathrm{conv\_out\_t}=f\left(x_{t},{x}_{t-1},{x}_{t-2},{x}_{t-3}\right)
 ```
 
 Decode 时不能每步回头重算最近窗口，所以要保存 `conv state`：
@@ -280,9 +283,12 @@ C
 
 对应 SSM 公式：
 
-```text
-h_t = A h_{t-1} + B_t x_t
-y_t = C_t h_t     + D x_t
+```math
+h_{t}=A\,{h}_{t-1}+B_{t}\,x_{t}
+```
+
+```math
+y_{t}=C_{t}\,h_{t}+D\,x_{t}
 ```
 
 这里的 `B_t` 和 `C_t` 是由当前输入路径生成的，所以是 selective 的。
@@ -347,8 +353,8 @@ flowchart TD
 
 Decode 是一步更新：
 
-```text
-state_t = update(state_{t-1}, x_t)
+```math
+\mathrm{state\_t} = \mathrm{update}\left(\mathrm{state}_{t-1}, x_{t}\right)
 ```
 
 所以不用跑完整 chunk scan，而是使用：
@@ -434,8 +440,11 @@ flowchart TD
 
 两个状态池：
 
+```math
+\mathrm{conv\_state} = \mathrm{layer\_cache}.\mathrm{conv}\left[0\right]
+```
+
 ```text
-conv_state = layer_cache.conv[0]
 ssm_state  = layer_cache.temporal
 ```
 
@@ -444,7 +453,10 @@ Prefill：
 ```text
 causal_conv1d_fn(... conv_states=conv_state, cache_indices=state_indices_tensor_p)
 mamba_chunk_scan_combined(...) -> varlen_state
-ssm_state[state_indices_tensor_p] = varlen_state
+```
+
+```math
+{\mathrm{ssm\_state}}_{\mathrm{state\_indices\_tensor\_p}}=\mathrm{varlen\_state}
 ```
 
 Decode：
@@ -515,7 +527,7 @@ flowchart TD
 
 读 `mamba.py` 不要被变量名淹没，抓住五个阶段：
 
-1. **投影**：`projected_states = in_proj(hidden_states)`
+1. **投影**：$`\mathrm{projected\_states} = \mathrm{in\_proj}\left(\mathrm{hidden\_states}\right)`$
 2. **拆分**：`gate, hidden_states_B_C, dt = split(...)`
 3. **卷积**：prefill 用 `causal_conv1d_fn`，decode 用 `causal_conv1d_update`
 4. **SSM**：prefill 用 `mamba_chunk_scan_combined`，decode 用 `selective_state_update`

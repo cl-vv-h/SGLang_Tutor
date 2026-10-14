@@ -42,12 +42,16 @@ AllGather 是按 rank 顺序拼接，不做求和。若直接 AllGather 原始�
 
 令 `counts[src][dst]` 为源 rank 发给目标 rank 的记录数。例如：
 
-```text
-counts = [[1, 2],
-          [3, 0]]
+```math
+\mathrm{counts}=\left[\left[1,2\right],\left[3,0\right]\right]
+```
 
-rank 0: input_splits=[1,2], output_splits=[1,3]
-rank 1: input_splits=[3,0], output_splits=[2,0]
+```math
+\text{rank 0}: \mathrm{input\_splits}=\left[1,2\right], \mathrm{output\_splits}=\left[1,3\right]
+```
+
+```math
+\text{rank 1}: \mathrm{input\_splits}=\left[3,0\right], \mathrm{output\_splits}=\left[2,0\right]
 ```
 
 rank 0 的输入有 3 条记录，输出有 4 条；rank 1 的输入有 3 条，输出有 2 条。每个发送方向必须匹配接收端对应来源的长度、dtype 与记录宽度。接收 splits 是 counts 的列，不是把自己的发送 splits 原样复用。零 token rank 也必须遵守协议，不能擅自跳过 collective。
@@ -58,7 +62,7 @@ MoE 的“记录”通常包括 hidden vector、expert id、原 token 索引和�
 
 | 场景 | 分片导致的依赖 | 典型通信 |
 |---|---|---|
-| row-parallel linear | `Y = sum_r X_r W_r` | 局部结果 AllReduce，或下游接受分片时 ReduceScatter |
+| row-parallel linear | $`Y = \sum_{r} X_{r} W_{r}`$ | 局部结果 AllReduce，或下游接受分片时 ReduceScatter |
 | column-parallel linear | `Y_r = X W_r` | 下游需要完整 Y 时 AllGather；可继续分片时不一定通信 |
 | PP 推理 | 下一 stage 需要上一 stage 的激活 | Send/Recv |
 | EP MoE | expert 分布在不同 rank | dispatch → expert compute → combine |
@@ -73,8 +77,8 @@ MoE 的“记录”通常包括 hidden vector、expert id、原 token 索引和�
 
 先用一个可解释的近似：
 
-```text
-t_transfer ≈ n_steps * alpha + bytes_on_critical_link / B_eff
+```math
+t_{\mathrm{transfer}}\approx n_{\mathrm{steps}}\cdot \alpha+\frac{\mathrm{bytes\_on\_critical\_link}}{B_{\mathrm{eff}}}
 ```
 
 `alpha` 是每步启动/协议延迟，`B_eff` 是实际有效带宽；不要将所有网卡标称带宽直接相加。ring AllReduce 在均匀切块、通信均衡、忽略额外规约开销时，可估计为：
@@ -82,21 +86,30 @@ t_transfer ≈ n_steps * alpha + bytes_on_critical_link / B_eff
 ```text
 P = participating ranks
 M = full input bytes per rank
-bytes_sent_per_rank = 2 * (P-1) / P * M
-t_ring ≈ 2 * (P-1) * alpha + bytes_sent_per_rank / B_eff
+```
+
+```math
+\mathrm{bytes\_sent\_per\_rank}=\frac{2\cdot \left(P-1\right)}{P}\cdot M
+```
+
+```math
+t_{\mathrm{ring}}\approx 2\cdot \left(P-1\right)\cdot \alpha+\frac{\mathrm{bytes\_sent\_per\_rank}}{B_{\mathrm{eff}}}
 ```
 
 这里统计**单 rank 发送量**，不是全网字节量，也没有把发送与接收重复相加。ring 是一种算法；tree、分层算法、网络内规约会改变模型，不能把这个公式当成所有后端的实现。
 
-算例：`P=8`、`M=16 MiB`、`alpha=3 us`、`B_eff=50 GB/s`（十进制），每 rank 发送 28 MiB，估计约 **629 us**。若 `M=4 KiB`，则约 **42.14 us**，几乎由启动项决定。以上是手工参数下的教学估算，不是硬件实测。
+算例：$`P=8`$、$`M=16 \mathrm{MiB}`$、$`\alpha=3 \mathrm{us}`$、$`B_{\mathrm{eff}}=50 \mathrm{GB}/s`$（十进制），每 rank 发送 28 MiB，估计约 **629 us**。若 $`M=4 \mathrm{KiB}`$，则约 **42.14 us**，几乎由启动项决定。以上是手工参数下的教学估算，不是硬件实测。
 
 ## 5. 重叠的边界
 
 只有独立的计算与通信才可能重叠：
 
-```text
-serial:  t_step = t_compute + t_comm
-ideal:   t_step >= max(t_compute, t_comm)
+```math
+\mathrm{serial}: t_{\mathrm{step}} = t_{\mathrm{compute}} + t_{\mathrm{comm}}
+```
+
+```math
+\mathrm{ideal}: t_{\mathrm{step}} \ge  \mathrm{max}\left(t_{\mathrm{compute}}, t_{\mathrm{comm}}\right)
 ```
 
 当下一层 GEMM 必须读取 AllReduce 输出时，二者存在真依赖；开两条 stream 不会消除它。重叠还可能争抢 SM/AICore、HBM、NIC，导致计算或通信各自变慢。最后应看端到端 TTFT、ITL、吞吐，而不是只看 trace 上两条彩色条相交。

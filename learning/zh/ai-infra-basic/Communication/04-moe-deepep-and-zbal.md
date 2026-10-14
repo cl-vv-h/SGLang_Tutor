@@ -14,7 +14,7 @@ token A starts on rank 0: experts [0,2], weights [0.25,0.75]
 token B starts on rank 1: experts [2,3], weights [0.50,0.50]
 ```
 
-A 的一条 expert 路径留在 rank 0，另一条去 rank 1；B 的两条路径都在 rank 1。逻辑上有四条 token-expert assignments，却只有 A→expert 2 需要跨 rank dispatch。不能直接把 `tokens * top_k` 当成跨网 token 数。
+A 的一条 expert 路径留在 rank 0，另一条去 rank 1；B 的两条路径都在 rank 1。逻辑上有四条 token-expert assignments，却只有 A→expert 2 需要跨 rank dispatch。不能直接把 $`\mathrm{tokens}\cdot \mathrm{top\_k}`$ 当成跨网 token 数。
 
 ```mermaid
 flowchart LR
@@ -35,7 +35,7 @@ flowchart LR
 | combine | 原 token/rank、逆向索引、top-k 权重的应用位置 |
 | 完成与复用 | 通信和 GEMM 何时读完 buffer、handle 何时可回收 |
 
-最终数学目标是 `y_t = sum_j weight[t,j] * expert_j(x_t)`。权重可能在 expert 路径或 combine 里施加，必须按实现契约做一次，不能漏乘或乘两次。dispatch handle 通常携带后续回排所需信息，不只是一个网络连接。
+最终数学目标是 $`y_{t} = \sum_{j} \mathrm{weight}\left[t,j\right] \cdot  \mathrm{expert\_j}\left(x_{t}\right)`$。权重可能在 expert 路径或 combine 里施加，必须按实现契约做一次，不能漏乘或乘两次。dispatch handle 通常携带后续回排所需信息，不只是一个网络连接。
 
 同一个 token 的多个目标 expert 若位于同一远端 rank/节点，优化实现可能先共享传输，再本地展开；具体字节数受去重、padding、量化和拓扑影响。负载倾斜也很重要：所有 rank 的平均 token 数相同，不代表最忙 expert 的等待时间小。
 
@@ -66,7 +66,7 @@ flowchart LR
 
 | 入口 | 当前代码行为 | 阅读意义 |
 |---|---|---|
-| [parallel_state.py](../../../../python/sglang/srt/distributed/parallel_state.py) | NPU 在 `SGLANG_ZBAL_LOCAL_MEM_SIZE > 0` 时选 `zbal`，否则选 `hccl` | 改变默认设备通信 backend |
+| [parallel_state.py](../../../../python/sglang/srt/distributed/parallel_state.py) | NPU 在 $`\mathrm{SGLANG\_ZBAL\_LOCAL\_MEM\_SIZE} \gt 0`$ 时选 `zbal`，否则选 `hccl` | 改变默认设备通信 backend |
 | [npu/utils.py](../../../../python/sglang/srt/hardware_backend/npu/utils.py) | `init_zbal()`、`switch_to_allocator()`、`lazy_init_zbal_gva_mem()` | allocator、mix mode 与全局地址内存初始化是执行前提 |
 | [deepep.py](../../../../python/sglang/srt/layers/moe/token_dispatcher/deepep.py) | NPU + ZBAL 条件下从 `zbal` 导入 `Config/Buffer`，否则导入 `deep_ep` | 同一 dispatcher 入口可以使用不同实现 |
 
@@ -86,7 +86,7 @@ else:
     from deep_ep import Buffer, Config
 ```
 
-`Scheduler.init_zbal_on_npu()` 在早期执行；mix alloc 模式先切换分配器，ModelRunner 在后续、graph capture 前延迟初始化相关内存。`SGLANG_ZBAL_LOCAL_MEM_SIZE` 在源码中乘 `1024**2` 转成字节；`SGLANG_ZBAL_BOOTSTRAP_URL` 可提供 bootstrap 地址。只设置变量而不安装兼容包、不满足初始化顺序，并不能保证可用。
+`Scheduler.init_zbal_on_npu()` 在早期执行；mix alloc 模式先切换分配器，ModelRunner 在后续、graph capture 前延迟初始化相关内存。`SGLANG_ZBAL_LOCAL_MEM_SIZE` 在源码中乘 $`{1024}^{2}`$ 转成字节；`SGLANG_ZBAL_BOOTSTRAP_URL` 可提供 bootstrap 地址。只设置变量而不安装兼容包、不满足初始化顺序，并不能保证可用。
 
 ## 6. ZBAL 与 HCCL 不是简单二选一
 

@@ -32,38 +32,47 @@ flowchart LR
 
 为同时看清所有轴，使用：
 
-```text
-B=1, Tq=2, Lkv=8
-HI=2, DI=2, k=3
-N=4, Dc=4, Dr=2
+```math
+B=1,\qquad \mathrm{Tq}=2,\qquad \mathrm{Lkv}=8
+```
+
+```math
+\mathrm{HI}=2,\qquad \mathrm{DI}=2,\qquad k=3
+```
+
+```math
+N=4,\qquad \mathrm{Dc}=4,\qquad \mathrm{Dr}=2
 ```
 
 | 张量 | Shape | 轴的含义 |
 |---|---:|---|
-| `QI` | `[2,2,2]` | query token × indexer head × index feature |
-| `KI_cache` | `[8,2]` | 历史 token × index feature；key 在 indexer heads 间共享 |
-| `head_w` | `[2,2]` | query token × indexer head |
-| `index_score` | `[2,8]` | 每个 query 对每个历史位置一个标量 |
-| `topk_idx` | `[2,3]` | 每个 query 三个逻辑 token id |
-| `Ckv_selected` | `[2,3,4]` | query × selected position × latent feature |
-| `Krope_selected` | `[2,3,2]` | query × selected position × position feature |
-| `main_logits` | `[2,4,3]` | query × main head × selected position |
-| `main_prob` | `[2,4,3]` | softmax 只归一化最后的 `k=3` 个位置 |
-| `latent_out` | `[2,4,4]` | query × main head × latent feature |
-| `output` | `[2,H]` | 合并并输出投影后的残差分支 |
+| `QI` | $`\left[2,2,2\right]`$ | query token × indexer head × index feature |
+| `KI_cache` | $`\left[8,2\right]`$ | 历史 token × index feature；key 在 indexer heads 间共享 |
+| `head_w` | $`\left[2,2\right]`$ | query token × indexer head |
+| `index_score` | $`\left[2,8\right]`$ | 每个 query 对每个历史位置一个标量 |
+| `topk_idx` | $`\left[2,3\right]`$ | 每个 query 三个逻辑 token id |
+| `Ckv_selected` | $`\left[2,3,4\right]`$ | query × selected position × latent feature |
+| `Krope_selected` | $`\left[2,3,2\right]`$ | query × selected position × position feature |
+| `main_logits` | $`\left[2,4,3\right]`$ | query × main head × selected position |
+| `main_prob` | $`\left[2,4,3\right]`$ | softmax 只归一化最后的 $`k=3`$ 个位置 |
+| `latent_out` | $`\left[2,4,4\right]`$ | query × main head × latent feature |
+| `output` | $`\left[2,H\right]`$ | 合并并输出投影后的残差分支 |
 
-关键在于 `topk_idx` 没有 main-head 轴。Indexer 在 `HI` 上归约后，每个 query 产生一套共享位置；随后 `N=4` 个主 query heads 都在这同一套位置上计算各自 logits。
+关键在于 `topk_idx` 没有 main-head 轴。Indexer 在 `HI` 上归约后，每个 query 产生一套共享位置；随后 $`N=4`$ 个主 query heads 都在这同一套位置上计算各自 logits。
 
 ### 从逻辑位置到输出的数值演示
 
 假设第一个 query 得到 indexer 分数：
 
+```math
+\mathrm{shape}\left(\mathrm{position}\right)=\left[0,1,2,3,4,5,6,7\right]
+```
+
 ```text
-position: [0,    1,    2,    3,    4,    5,    6,    7]
 score:    [0.2,  1.7, -0.1,  0.8,  2.0,  0.4,  1.1,  0.3]
 ```
 
-`TopK(k=3)` 返回逻辑位置 `[4,1,6]`。假设 paged cache 中它们通过 block table 被映射为物理 slot `[20,9,14]`；**排序值是逻辑 token 位置，kernel 读取的是物理 slot**。以 main head 0 为例，真正的 MLA logits 可能是：
+$`\mathrm{TopK}\left(k=3\right)`$ 返回逻辑位置 $`\left[4,1,6\right]`$。假设 paged cache 中它们通过 block table 被映射为物理 slot $`\left[20,9,14\right]`$；**排序值是逻辑 token 位置，kernel 读取的是物理 slot**。以 main head 0 为例，真正的 MLA logits 可能是：
 
 ```text
 selected logical positions: [4,   1,   6]
@@ -73,15 +82,14 @@ softmax:                    [0.133,0.802,0.066]
 
 若对应 latent 为：
 
-```text
-c_4=[1,0,1,0], c_1=[0,2,0,0], c_6=[0,0,1,3]
+```math
+c_{4}=\left[1,0,1,0\right],\qquad c_{1}=\left[0,2,0,0\right],\qquad c_{6}=\left[0,0,1,3\right]
 ```
 
 则该 head 在 latent 空间先得到：
 
-```text
-z = 0.133*c_4 + 0.802*c_1 + 0.066*c_6
-  = [0.133, 1.604, 0.199, 0.198]       # [Dc=4]
+```math
+z=0.133\cdot c_{4}+0.802\cdot c_{1}+0.066\cdot c_{6}=\left[0.133,1.604,0.199,0.198\right]\qquad\text{[Dc=4]}
 ```
 
 然后才经过吸收后的 value/output 变换。这里 `1.7、2.0、1.1` 这些 indexer score 从未进入主 softmax；它们只决定集合 `{4,1,6}`。
@@ -149,9 +157,9 @@ Indexer 与主 Attention 使用不同投影、承担不同职责。Indexer score
 | `k` | 每 query 选择的 entry 数，`k << L` |
 | `HI` | indexer query head 数 |
 | `DI` | indexer head dimension |
-| `h_t` | query token `t` 的 hidden state，`[H]` |
-| `qI_t,j` | 第 `j` 个 indexer query，`[DI]` |
-| `kI_s` | 历史 token `s` 的共享 indexer key，`[DI]` |
+| `h_t` | query token `t` 的 hidden state，$`\left[H\right]`$ |
+| `qI_t,j` | 第 `j` 个 indexer query，$`\left[\mathrm{DI}\right]`$ |
+| `kI_s` | 历史 token `s` 的共享 indexer key，$`\left[\mathrm{DI}\right]`$ |
 | `wI_t,j` | 第 `j` 个 indexer head 的标量权重 |
 | `I_t,s` | query `t` 与历史 token `s` 的标量 index score |
 | `c_s` | token `s` 的 MLA latent KV entry |
@@ -160,20 +168,34 @@ Indexer 与主 Attention 使用不同投影、承担不同职责。Indexer score
 
 Indexer 计算标量检索分数：
 
-```text
-I_t,s = sum_(j=1..HI) wI_t,j * ReLU(qI_t,j dot kI_s)
+```math
+I_{t},s = \sum_{j=1..\mathrm{HI}} \mathrm{wI\_t},j \cdot  \mathrm{ReLU}\left(\mathrm{qI\_t},j \cdot \mathrm{kI\_s}\right)
 ```
 
 对含 `Tq` 个 query token、`Lkv` 个候选 entry 的 packed batch：
 
-```text
-QI:       [Tq, HI, DI]
-KI_cache: [Lkv, DI]
-head_w:   [Tq, HI]
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]
+```
 
-dot:      [Tq, Lkv, HI]
+```math
+\mathrm{shape}\left(\mathrm{KI\_cache}\right)=\left[\mathrm{Lkv},\mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{head\_w}\right)=\left[\mathrm{Tq},\mathrm{HI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{dot}\right)=\left[\mathrm{Tq},\mathrm{Lkv},\mathrm{HI}\right]
+```
+
+```text
 ReLU + 沿 HI 加权求和
-scores:   [Tq, Lkv]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[\mathrm{Tq},\mathrm{Lkv}\right]
 ```
 
 ### 4.1 逐个投影跟踪 Shape 变化
@@ -182,20 +204,50 @@ indexer 同时接收模型 hidden state 与 MLA 的低秩 query 激活。SGLang 
 
 ```text
 hidden x:   [Tq,Hmodel]
-q_lora:     [Tq,Dq]
+```
 
-QI_flat = q_lora @ WqI^T
-WqI:        [HI*DI,Dq]
-QI_flat:    [Tq,HI*DI]
-QI:         [Tq,HI,DI]
+```math
+\mathrm{shape}\left(q_{\mathrm{lora}}\right)=\left[\mathrm{Tq},\mathrm{Dq}\right]
+```
 
-KI = LayerNorm(x @ WkI^T)
-WkI:        [DI,Hmodel]
+```math
+\mathrm{QI\_flat}=q_{\mathrm{lora}}\,{\mathrm{WqI}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(\mathrm{WqI}\right)=\left[\mathrm{HI}\cdot \mathrm{DI},\mathrm{Dq}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{QI\_flat}\right)=\left[\mathrm{Tq},\mathrm{HI}\cdot \mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]
+```
+
+```math
+\mathrm{KI}=\mathrm{LayerNorm}\left(x\,{\mathrm{WkI}}^{\mathsf T}\right)
+```
+
+```math
+\mathrm{shape}\left(\mathrm{WkI}\right)=\left[\mathrm{DI},\mathrm{Hmodel}\right]
+```
+
+```text
 KI:         [Tq,DI]             # 每个 token 一个共享 key
+```
 
-head_w = x @ WwI^T
-WwI:        [HI,Hmodel]
-head_w:     [Tq,HI]
+```math
+\mathrm{head\_w}=x\,{\mathrm{WwI}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(\mathrm{WwI}\right)=\left[\mathrm{HI},\mathrm{Hmodel}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{head\_w}\right)=\left[\mathrm{Tq},\mathrm{HI}\right]
 ```
 
 indexer query 有 `HI` 个 head，但 key 是共享的。把 key 广播到 query head 后：
@@ -208,9 +260,12 @@ dot 结果:               [Tq,Lkv,HI]
 
 经过 `ReLU`，再乘 `head_w[:,None,:] [Tq,1,HI]`，最后沿 `HI` 归约：
 
-```text
-weighted: [Tq,Lkv,HI]
-scores:   [Tq,Lkv]
+```math
+\mathrm{shape}\left(\mathrm{weighted}\right)=\left[\mathrm{Tq},\mathrm{Lkv},\mathrm{HI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[\mathrm{Tq},\mathrm{Lkv}\right]
 ```
 
 正因为这里归约了 indexer head，top-k 才会为每个 query token 返回一组位置，而不是为每个主 Attention head 分别返回位置。
@@ -219,30 +274,52 @@ scores:   [Tq,Lkv]
 
 indexer head 可以包含位置与非位置两个子空间：
 
-```text
-QI: [Tq,HI,DI]
-  -> QI_rope [Tq,HI,Dr]
-  -> QI_nope [Tq,HI,DI-Dr]
-
-KI: [Tq,DI]
-  -> KI_rope [Tq,Dr]
-  -> KI_nope [Tq,DI-Dr]
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]
 ```
 
-只对指定的 `Dr` 个通道应用 RoPE，再拼接回 `DI`。本仓库可见的 NPU 路径中，一个代表性 shape 是 `HI=64`、`DI=128`、`Dr=64`：投影先得到 `[Tq,64,128]`，拆成两个 64 通道部分，旋转位置部分，再恢复为 `[Tq,64,128]`。
+```text
+-> QI_rope [Tq,HI,Dr]
+-> QI_nope [Tq,HI,DI-Dr]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{KI}\right)=\left[\mathrm{Tq},\mathrm{DI}\right]
+```
+
+```text
+-> KI_rope [Tq,Dr]
+-> KI_nope [Tq,DI-Dr]
+```
+
+只对指定的 `Dr` 个通道应用 RoPE，再拼接回 `DI`。本仓库可见的 NPU 路径中，一个代表性 shape 是 $`\mathrm{HI}=64`$、$`\mathrm{DI}=128`$、$`\mathrm{Dr}=64`$：投影先得到 $`\left[\mathrm{Tq},64,128\right]`$，拆成两个 64 通道部分，旋转位置部分，再恢复为 $`\left[\mathrm{Tq},64,128\right]`$。
 
 ### 4.3 一个小型数值排序例子
 
-设 `HI=2`、`DI=2`，有四个候选 key：
+设 $`\mathrm{HI}=2`$、$`\mathrm{DI}=2`$，有四个候选 key：
 
-```text
-qI_0 = [1, 0]       head weight w_0 = 0.75
-qI_1 = [0, 1]       head weight w_1 = 0.25
+```math
+\mathrm{qI\_0} = \left[1, 0\right] \mathrm{head} \mathrm{weight} w_{0} = 0.75
+```
 
-kI_0 = [ 2, 1]
-kI_1 = [-1, 4]
-kI_2 = [ 1,-2]
-kI_3 = [ 0, 3]
+```math
+\mathrm{qI\_1} = \left[0, 1\right] \mathrm{head} \mathrm{weight} w_{1} = 0.25
+```
+
+```math
+\mathrm{kI\_0}=\left[2,1\right]
+```
+
+```math
+\mathrm{kI\_1}=\left[-1,4\right]
+```
+
+```math
+\mathrm{kI\_2}=\left[1,-2\right]
+```
+
+```math
+\mathrm{kI\_3}=\left[0,3\right]
 ```
 
 逐 head 点积为：
@@ -256,14 +333,23 @@ kI_3 = [ 0, 3]
 
 加权后的标量分数是：
 
-```text
-I_0 = 0.75*2 + 0.25*1 = 1.75
-I_1 = 0.75*0 + 0.25*4 = 1.00
-I_2 = 0.75*1 + 0.25*0 = 0.75
-I_3 = 0.75*0 + 0.25*3 = 0.75
+```math
+I_{0}=0.75\cdot 2+0.25\cdot 1=1.75
 ```
 
-当 `k=2` 时，候选 0 与候选 1 被选中。注意，负证据是在 head 加权归约之前被 ReLU 消除的；把 ReLU 移到归约之后会定义另一个函数。
+```math
+I_{1}=0.75\cdot 0+0.25\cdot 4=1.0
+```
+
+```math
+I_{2}=0.75\cdot 1+0.25\cdot 0=0.75
+```
+
+```math
+I_{3}=0.75\cdot 0+0.25\cdot 3=0.75
+```
+
+当 $`k=2`$ 时，候选 0 与候选 1 被选中。注意，负证据是在 head 加权归约之前被 ReLU 消除的；把 ReLU 移到归约之后会定义另一个函数。
 
 ReLU 是训练期评分函数的一部分，不是可以任意替换的实现细节。Indexer 的 head 更少、维度更小，并可使用低精度，因此完整扫描远比对所有 entry 执行主 Attention 便宜。
 
@@ -271,15 +357,18 @@ ReLU 是训练期评分函数的一部分，不是可以任意替换的实现细
 
 对 query token `t`：
 
-```text
-S_t = TopK(I_t, :, k)
-selected_cache_t = {c_s | s in S_t}
+```math
+S_{t} = \mathrm{TopK}\left(I_{t}, :, k\right)
+```
+
+```math
+\mathrm{selected\_cache}_t=\left\{c_s\mid s\in S_t\right\}
 ```
 
 主路径输出为：
 
-```text
-u_t = MLA_Attention(h_t, selected_cache_t)
+```math
+u_{t} = \mathrm{MLA\_Attention}\left(h_{t}, \mathrm{selected\_cache\_t}\right)
 ```
 
 由此得到四个重要结论：
@@ -295,9 +384,9 @@ u_t = MLA_Attention(h_t, selected_cache_t)
 
 | 组件 | 全序列 Prefill | 单 token Decode |
 |---|---:|---:|
-| 稠密 MLA core | `O(L^2 * Dmain)` | `O(L * Dmain)` |
-| DSA indexer | `O(L^2 * HI * DI)` | `O(L * HI * DI)` |
-| DSA 稀疏主 core | `O(L * k * Dmain)` | `O(k * Dmain)` |
+| 稠密 MLA core | $`O\left({L}^{2}\cdot \mathrm{Dmain}\right)`$ | $`O\left(L\cdot \mathrm{Dmain}\right)`$ |
+| DSA indexer | $`O\left({L}^{2}\cdot \mathrm{HI}\cdot \mathrm{DI}\right)`$ | $`O\left(L\cdot \mathrm{HI}\cdot \mathrm{DI}\right)`$ |
+| DSA 稀疏主 core | $`O\left(L\cdot k\cdot \mathrm{Dmain}\right)`$ | $`O\left(k\cdot \mathrm{Dmain}\right)`$ |
 
 Indexer 对完整序列仍是二次复杂度，单 token decode 仍需线性扫描历史。DSA 有效的原因是 indexer 常数被刻意做得远小于主 MLA，并且昂贵的主 core 只消费 `k` 个 entry。
 
@@ -383,7 +472,7 @@ logical top-k token index
   -> sparse attention metadata
 ```
 
-Graph capture 通常要求输出 buffer 保持固定 `[graph_batch, k]` shape。运行时 sequence length、page table、indexer cache length 与 selected index 必须在不改变已捕获 tensor 地址的前提下刷新；`-1` sentinel 标记无效 top-k slot。
+Graph capture 通常要求输出 buffer 保持固定 $`\left[\mathrm{graph\_batch},k\right]`$ shape。运行时 sequence length、page table、indexer cache length 与 selected index 必须在不改变已捕获 tensor 地址的前提下刷新；`-1` sentinel 标记无效 top-k slot。
 
 ## 12. SGLang 源码地图
 
@@ -430,7 +519,7 @@ sparse main attention + output projection
 
 ## 15. 常见误区
 
-1. **“DSA 让所有 Attention 计算都变成 `O(L*k)`。”** 昂贵主 core 是这样，轻量 indexer 仍扫描全部候选历史。
+1. **“DSA 让所有 Attention 计算都变成 $`O\left(L\cdot k\right)`$。”** 昂贵主 core 是这样，轻量 indexer 仍扫描全部候选历史。
 2. **“Cache 只需保存选中的 entry。”** 未来 query 可能选择过去未被选中的 entry，因此完整 latent 与 indexer 历史必须可寻址。
 3. **“Indexer score 就是 Attention score。”** 它是检索分数；选中 entry 还会进入独立 MLA core 和 softmax。
 4. **“任意稠密 checkpoint 都能无训练加入 DSA。”** 公开方案先 warm up indexer，再继续稀疏训练。
@@ -453,22 +542,22 @@ sparse main attention + output projection
 
 | 阶段 | 张量 | 逻辑 shape | 是否持久化 |
 |---|---|---:|---|
-| 输入 | hidden states | `[Tq,Hmodel]` | 否 |
-| MLA query 降投影 | `q_lora` | `[Tq,Dq]` | 否 |
-| 主 query heads | `Qmain` | `[Tq,Nq,Dmain]` | 否 |
-| 新 MLA latent | `Cnew` | `[Tq,Dc+Dr]` | 是，追加 |
-| Indexer query | `QI` | `[Tq,HI,DI]` | 否 |
-| Indexer head 权重 | `head_w` | `[Tq,HI]` | 否 |
-| 新 index key | `KInew` | `[Tq,DI]` | 是，追加 |
-| Indexer 历史 | `KIcache` | `[Tkv,DI]` 加 request 元数据 | 是 |
-| 概念 score | `scores` | `[Tq,Lmax]` | workspace 或被融合消除 |
-| 选中逻辑 ID | `topk_ids` | `[Tq,k]` | forward 元数据 |
-| 选中物理 ID | `page_ids` | `[Tq,k]` | forward 元数据 |
-| 选中 latent 条目 | `Csel` | `[Tq,k,Dc+Dr]` | 通常直接读取，不物化 |
-| 主 logits | `Alogit` | `[Tq,Nq,k]` | workspace 或分块保存 |
-| 主概率 | `P` | `[Tq,Nq,k]` | 最好 online/分块处理 |
-| Head 输出 | `Ohead` | `[Tq,Nq,Dv]` | 否 |
-| Layer 输出 | `O` | `[Tq,Hmodel]` | 否 |
+| 输入 | hidden states | $`\left[\mathrm{Tq},\mathrm{Hmodel}\right]`$ | 否 |
+| MLA query 降投影 | `q_lora` | $`\left[\mathrm{Tq},\mathrm{Dq}\right]`$ | 否 |
+| 主 query heads | `Qmain` | $`\left[\mathrm{Tq},\mathrm{Nq},\mathrm{Dmain}\right]`$ | 否 |
+| 新 MLA latent | `Cnew` | $`\left[\mathrm{Tq},\mathrm{Dc}+\mathrm{Dr}\right]`$ | 是，追加 |
+| Indexer query | `QI` | $`\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]`$ | 否 |
+| Indexer head 权重 | `head_w` | $`\left[\mathrm{Tq},\mathrm{HI}\right]`$ | 否 |
+| 新 index key | `KInew` | $`\left[\mathrm{Tq},\mathrm{DI}\right]`$ | 是，追加 |
+| Indexer 历史 | `KIcache` | $`\left[\mathrm{Tkv},\mathrm{DI}\right]`$ 加 request 元数据 | 是 |
+| 概念 score | `scores` | $`\left[\mathrm{Tq},\mathrm{Lmax}\right]`$ | workspace 或被融合消除 |
+| 选中逻辑 ID | `topk_ids` | $`\left[\mathrm{Tq},k\right]`$ | forward 元数据 |
+| 选中物理 ID | `page_ids` | $`\left[\mathrm{Tq},k\right]`$ | forward 元数据 |
+| 选中 latent 条目 | `Csel` | $`\left[\mathrm{Tq},k,\mathrm{Dc}+\mathrm{Dr}\right]`$ | 通常直接读取，不物化 |
+| 主 logits | `Alogit` | $`\left[\mathrm{Tq},\mathrm{Nq},k\right]`$ | workspace 或分块保存 |
+| 主概率 | `P` | $`\left[\mathrm{Tq},\mathrm{Nq},k\right]`$ | 最好 online/分块处理 |
+| Head 输出 | `Ohead` | $`\left[\mathrm{Tq},\mathrm{Nq},\mathrm{Dv}\right]`$ | 否 |
+| Layer 输出 | `O` | $`\left[\mathrm{Tq},\mathrm{Hmodel}\right]`$ | 否 |
 
 “逻辑 shape”不代表真的分配了稠密张量。融合 indexer 可以流式读取 key tile，只保留当前 top-k 候选；稀疏注意力 kernel 可以根据物理 page ID 直接读取 latent，而不构造 `Csel`。
 
@@ -509,15 +598,18 @@ def dsa_reference(x, q_lora, latent_cache, index_cache, valid_mask, k):
 
 稠密注意力在全部有效位置 `V_t` 上归一化：
 
-```text
-p_dense(s) = exp(a_s) / sum_(u in V_t) exp(a_u)
+```math
+p_{\mathrm{dense}}\left(s\right) = \mathrm{exp}\left(a_{s}\right) / \sum_{u \in V_{t}} \mathrm{exp}\left(a_{u}\right)
 ```
 
 DSA 先用另一套 score 函数得到选中集合 `S_t`，主核再只在该集合上归一化：
 
-```text
-p_dsa(s) = exp(a_s) / sum_(u in S_t) exp(a_u),  s in S_t
-p_dsa(s) = 0,                                  s not in S_t
+```math
+p_{\mathrm{dsa}}\left(s\right) = \mathrm{exp}\left(a_{s}\right) / \sum_{u \in S_{t}} \mathrm{exp}\left(a_{u}\right), s \in S_{t}
+```
+
+```math
+p_{\mathrm{dsa}}\left(s\right) = 0, s \mathrm{not} \in S_{t}
 ```
 
 即使主 logit `a_s` 不变，移除候选也会改变分母。这既解释了为什么需要稀疏续训，也解释了为什么不能用极严格的逐元素误差，把稀疏结果和稠密 MLA 当成正确性目标。Kernel 正确性应对齐训练后的稀疏参考路径；模型质量则应在任务层面评估。
@@ -529,21 +621,30 @@ p_dsa(s) = 0,                                  s not in S_t
 ```text
 Dc + Dr = 576 个 latent 元素/token，BF16
 DI = 128 个 index 元素/token，INT8 并带 block scale
-L = 128K tokens
-k = 2048
+```
+
+```math
+L = 128K \mathrm{tokens}
+```
+
+```math
+k=2048
 ```
 
 忽略对齐和 scale：
 
-```text
-latent 容量 = 131072 * 576 * 2 bytes ≈ 144 MiB
-index 容量  = 131072 * 128 * 1 byte  ≈ 16 MiB
+```math
+\text{latent 容量}= 131072 \cdot  576 \cdot  2 \mathrm{bytes} \approx  144 \mathrm{MiB}
+```
+
+```math
+\text{index 容量}= 131072 \cdot  128 \cdot  1 \mathrm{byte} \approx  16 \mathrm{MiB}
 ```
 
 完整容量仍随 `L` 增长，但主核每个 query 的 latent 读取被约束在：
 
-```text
-2048 * 576 * 2 bytes ≈ 2.25 MiB
+```math
+2048 \cdot  576 \cdot  2 \mathrm{bytes} \approx  2.25 \mathrm{MiB}
 ```
 
 如果没有 cache/片上局部性复用或分布式扫描，indexer 仍需为这个 query 扫描约 16 MiB 量化 key。这个例子把优化目标讲清楚了：DSA 用便宜、窄的顺序扫描，换取昂贵 latent-attention 读取的大幅减少。
@@ -553,7 +654,7 @@ index 容量  = 131072 * 128 * 1 byte  ≈ 16 MiB
 | 症状 | 首先检查的张量/不变量 |
 |---|---|
 | 单 request 正确，混合长度错误 | `query_start_loc`、sequence length、因果/request mask |
-| `L<=k` 正确，超过 `k` 后错误 | 全量可见 shortcut 与真实 top-k 路径 |
+| $`L \le k`$ 正确，超过 `k` 后错误 | 全量可见 shortcut 与真实 top-k 路径 |
 | eager 正确，graph replay 错误 | lengths/page tables/top-k buffer 是否刷新，地址是否稳定 |
 | index 量化后质量大降 | top-k recall、tie 处理、scale 布局、RoPE 顺序 |
 | indexer 很快但端到端很慢 | index transform、gather 局部性、稀疏主核、stream 同步 |
@@ -562,10 +663,10 @@ index 容量  = 131072 * 128 * 1 byte  ≈ 16 MiB
 
 ## 22. 练习
 
-1. 当 `Tq=32`、`HI=64`、`DI=128`、`Lkv=8192` 时，写出未融合 indexer 的每个中间 shape。
-2. 当 `L=128K`、`k=2048` 时，计算稠密 MLA 与 DSA 主核 logit 数量之比。
+1. 当 $`\mathrm{Tq}=32`$、$`\mathrm{HI}=64`$、$`\mathrm{DI}=128`$、$`\mathrm{Lkv}=8192`$ 时，写出未融合 indexer 的每个中间 shape。
+2. 当 $`L=128K`$、$`k=2048`$ 时，计算稠密 MLA 与 DSA 主核 logit 数量之比。
 3. 解释为什么不能在一次 query 后淘汰所有未选 token。
-4. 设计一个不物化 `[Tq,Lkv]` score 的流式 top-k。
+4. 设计一个不物化 $`\left[\mathrm{Tq},\mathrm{Lkv}\right]`$ score 的流式 top-k。
 5. 对 page size 64 的分页缓存，根据 request block table 推导逻辑 token 130 的物理地址。
 
 ## 23. 参考资料

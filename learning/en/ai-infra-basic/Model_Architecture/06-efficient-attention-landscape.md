@@ -34,19 +34,34 @@ These axes can be composed but must not be confused. MLA may still visit all `S`
 
 Given:
 
-```text
-Q: [B,Nq,Lq,D]
-K: [B,Nkv,Lkv,D]
-V: [B,Nkv,Lkv,Dv]
-group_size = Nq / Nkv
+```math
+\mathrm{shape}\left(Q\right)=\left[B,\mathrm{Nq},\mathrm{Lq},D\right]
+```
+
+```math
+\mathrm{shape}\left(K\right)=\left[B,\mathrm{Nkv},\mathrm{Lkv},D\right]
+```
+
+```math
+\mathrm{shape}\left(V\right)=\left[B,\mathrm{Nkv},\mathrm{Lkv},\mathrm{Dv}\right]
+```
+
+```math
+\mathrm{group\_size}=\frac{\mathrm{Nq}}{\mathrm{Nkv}}
 ```
 
 After mapping each query head to a KV group:
 
-```text
-Scores[b,h,i,j] = <Q[b,h,i,:], K[b,g(h),j,:]> / sqrt(D)
-P = softmax(Scores + Mask)                    [B,Nq,Lq,Lkv]
-O[b,h,i,:] = sum_j P[b,h,i,j] V[b,g(h),j,:] [B,Nq,Lq,Dv]
+```math
+\mathrm{Scores}\left[b,h,i,j\right] = \lt Q\left[b,h,i,:\right], K\left[b,g\left(h\right),j,:\right]\gt  / \mathrm{sqrt}\left(D\right)
+```
+
+```math
+P=\mathrm{softmax}\left(\mathrm{Scores}+\mathrm{Mask}\right)\qquad\mathrm{shape}:\left[B,\mathrm{Nq},\mathrm{Lq},\mathrm{Lkv}\right]
+```
+
+```math
+O\left[b,h,i,:\right] = \sum_{j} P\left[b,h,i,j\right] V\left[b,g\left(h\right),j,:\right] \left[B,\mathrm{Nq},\mathrm{Lq},\mathrm{Dv}\right]
 ```
 
 Logical multiply-add work is approximately:
@@ -56,25 +71,25 @@ QK^T: 2 * B * Nq * Lq * Lkv * D FLOPs
 PV:    2 * B * Nq * Lq * Lkv * Dv FLOPs
 ```
 
-During decode (`Lq=1`), a lower-order estimate of historical bytes read is:
+During decode ($`\mathrm{Lq}=1`$), a lower-order estimate of historical bytes read is:
 
-```text
-B * Lkv * Nkv * (D + Dv) * bytes_per_element
+```math
+B\cdot \mathrm{Lkv}\cdot \mathrm{Nkv}\cdot \left(D+\mathrm{Dv}\right)\cdot \mathrm{bytes\_per\_element}
 ```
 
 Prefill is therefore often dominated by large matrix computation and quadratic logical work, while decode is often dominated by reading a growing historical state. Every optimization should identify which term in these equations it reduces.
 
 ### Step-by-Step Comparison for One Decode Request
 
-Use `B=1, Lq=1, Lkv=32768, Nq=32, Nkv=8, D=Dv=128, BF16`:
+Use $`B=\left[1,\mathrm{Lq}\right]=\left[1,\mathrm{Lkv}\right]=\left[32768,\mathrm{Nq}\right]=\left[32,\mathrm{Nkv}\right]=\left[8,D\right]=\mathrm{Dv}=\left[128,\mathrm{BF16}\right]`$:
 
 | Method | Persistent history | Positions visited now | Approx. history payload/layer/step | Logical temporary before output |
 |---|---|---:|---:|---|
-| GQA | `K,V [Lkv,8,128]` | `32768` | `128 MiB` | score `[32,1,32768]` |
-| MLA, `Dc=512,Dr=64` | `[Lkv,576]` | `32768` | `36 MiB` | content + RoPE score |
-| DSA on MLA, `k=2048` | MLA cache + index key | full index scan, `2048` main entries | about `2.25 MiB` for main core, plus indexer | gathered score `[32,1,2048]` |
-| SWA, `W=4096` | token-level local KV | `4096` | `1/8` of GQA payload | score `[32,1,4096]` |
-| KDA | recurrent matrix + convolution tail | no historical token scan | independent of `Lkv` | state update `[Nk,Dk,Dv]` |
+| GQA | `K,V [Lkv,8,128]` | `32768` | `128 MiB` | score $`\left[32,1,32768\right]`$ |
+| MLA, $`\mathrm{Dc}=512,\qquad \mathrm{Dr}=64`$ | $`\left[\mathrm{Lkv},576\right]`$ | `32768` | `36 MiB` | content + RoPE score |
+| DSA on MLA, $`k=2048`$ | MLA cache + index key | full index scan, `2048` main entries | about `2.25 MiB` for main core, plus indexer | gathered score $`\left[32,1,2048\right]`$ |
+| SWA, $`W=4096`$ | token-level local KV | `4096` | `1/8` of GQA payload | score $`\left[32,1,4096\right]`$ |
+| KDA | recurrent matrix + convolution tail | no historical token scan | independent of `Lkv` | state update $`\left[\mathrm{Nk},\mathrm{Dk},\mathrm{Dv}\right]`$ |
 
 The byte column counts only core cache elements, excluding page metadata, quantization scales, indices, and repeated traffic. It is a shape-derived order-of-magnitude exercise, not a benchmark result.
 
@@ -115,17 +130,20 @@ If these axes are mixed together, it is easy to make incorrect claims such as �
 
 For sequence length `L`, query/key head dimension `Dk`, and value dimension `Dv`:
 
-```text
-score[i,j] = q_i dot k_j / sqrt(Dk),  j <= i
-output[i] = sum_j softmax(score[i,:])[j] * v_j
+```math
+{\mathrm{score}}_{i,j}=\frac{\left\langle q_{i},k_{j}\right\rangle}{\sqrt{\mathrm{Dk}}},\qquad j \le i
+```
+
+```math
+\mathrm{output}\left[i\right] = \sum_{j} \mathrm{softmax}\left(\mathrm{score}\left[i,:\right]\right)\left[j\right] \cdot  v_{j}
 ```
 
 Ignoring projections and head constants:
 
 | Phase | Core attention work | Historical state read by one decode step |
 |---|---:|---:|
-| Full-sequence prefill/training | `O(L^2 * D)` | not applicable |
-| One-token decode | `O(L * D)` | `O(L * Dcache)` |
+| Full-sequence prefill/training | $`O\left({L}^{2}\cdot D\right)`$ | not applicable |
+| One-token decode | $`O\left(L\cdot D\right)`$ | $`O\left(L\cdot \mathrm{Dcache}\right)`$ |
 
 Every efficient design changes one or more terms in this baseline.
 
@@ -200,17 +218,17 @@ Let `k` be the selected-entry count, `w` the local window, `m` a compression rat
 
 | Method | Historical representation | Positions/entries visited per query | Prefill core trend | Decode state growth |
 |---|---|---:|---:|---:|
-| MHA | full K/V per head | `L` | `O(L^2)` | `O(L)` |
-| GQA/MQA | shared/grouped K/V | `L` | `O(L^2)` | `O(L)` with smaller slope |
-| MLA | latent KV + positional key | `L` | `O(L^2)` | `O(L)` with smaller slope |
-| SWA | recent K/V | `w` | `O(L*w)` | `O(w)` if old entries are evicted |
+| MHA | full K/V per head | `L` | $`O\left({L}^{2}\right)`$ | $`O\left(L\right)`$ |
+| GQA/MQA | shared/grouped K/V | `L` | $`O\left({L}^{2}\right)`$ | $`O\left(L\right)`$ with smaller slope |
+| MLA | latent KV + positional key | `L` | $`O\left({L}^{2}\right)`$ | $`O\left(L\right)`$ with smaller slope |
+| SWA | recent K/V | `w` | $`O\left(L\cdot w\right)`$ | $`O\left(w\right)`$ if old entries are evicted |
 | NSA | compressed + selected blocks + window | design-dependent | approximately linear for fixed budgets | usually grows through compressed/selected cache |
-| DSA | MLA entries + indexer keys | main path `k`; indexer scans history | main path `O(L*k)` | `O(L)` cache; bounded main-attention read |
-| CSA | compressed entries + indexer keys + local raw tail | main path `k+w`; indexer scans about `L/m` | main path `O(L*(k+w))` | about `O(L/m)` plus bounded local state |
-| HCA | heavily compressed entries + local raw tail | about `L/m' + w` | `O(L^2/m')` | about `O(L/m')` plus bounded local state |
-| GDN/KDA | recurrent matrix + short-conv state | fixed state | `O(L*Sstate)` | `O(Sstate)` |
+| DSA | MLA entries + indexer keys | main path `k`; indexer scans history | main path $`O\left(L\cdot k\right)`$ | $`O\left(L\right)`$ cache; bounded main-attention read |
+| CSA | compressed entries + indexer keys + local raw tail | main path `k+w`; indexer scans about `L/m` | main path $`O\left(L\cdot \left(k+w\right)\right)`$ | about $`O\left(\frac{L}{m}\right)`$ plus bounded local state |
+| HCA | heavily compressed entries + local raw tail | about `L/m' + w` | $`O\left(L^{2}/m'\right)`$ | about $`O\left(L/m'\right)`$ plus bounded local state |
+| GDN/KDA | recurrent matrix + short-conv state | fixed state | $`O\left(L\cdot \mathrm{Sstate}\right)`$ | $`O\left(\mathrm{Sstate}\right)`$ |
 
-The DSA/CSA indexer still scans a growing history. “Top-k is constant” therefore does not mean the complete layer is strictly `O(1)` per decode token.
+The DSA/CSA indexer still scans a growing history. “Top-k is constant” therefore does not mean the complete layer is strictly $`O\left(1\right)`$ per decode token.
 
 ## 6. The Three Kinds of Compression Are Not Interchangeable
 
@@ -297,84 +315,144 @@ Always validate with a profiler. Lower algorithmic FLOPs do not guarantee lower 
 
 Use one hypothetical decoder layer so the symbols become concrete:
 
-```text
-B = 2                 # active requests
-L = 4096              # cached tokens per request
-Hmodel = 4096
-Nq = 32               # query heads
-Nkv = 8               # GQA KV heads
-Dk = Dv = 128
-Dc = 512, Dr = 64     # MLA latent and RoPE cache widths
-k = 256               # sparse selection budget
-m = 4                 # CSA compression stride
-w = 128               # local window
+```math
+B=2\qquad\text{active requests}
+```
+
+```math
+L=4096\qquad\text{cached tokens per request}
+```
+
+```math
+\mathrm{Hmodel}=4096
+```
+
+```math
+\mathrm{Nq}=32\qquad\text{query heads}
+```
+
+```math
+\mathrm{Nkv}=8\qquad\text{GQA KV heads}
+```
+
+```math
+\mathrm{Dk}=\mathrm{Dv}=128
+```
+
+```math
+\mathrm{Dc}=512,\qquad \mathrm{Dr}=64\qquad\text{MLA latent and RoPE cache widths}
+```
+
+```math
+k=256\qquad\text{sparse selection budget}
+```
+
+```math
+m=4\qquad\text{CSA compression stride}
+```
+
+```math
+w=128\qquad\text{local window}
 ```
 
 ### 12.1 MHA and GQA
 
 For MHA, each token stores:
 
-```text
-K: [Nq,Dk] = [32,128]
-V: [Nq,Dv] = [32,128]
-elements per token = 32 * (128 + 128) = 8192
+```math
+K: \left[\mathrm{Nq},\mathrm{Dk}\right] = \left[32,128\right]
+```
+
+```math
+V: \left[\mathrm{Nq},\mathrm{Dv}\right] = \left[32,128\right]
+```
+
+```math
+\text{elements per token}= 32 \cdot  \left(128 + 128\right) = 8192
 ```
 
 For GQA:
 
-```text
-K/V cache: [B,L,Nkv,D] = [2,4096,8,128]
-elements per token = 8 * (128 + 128) = 2048
+```math
+\text{K/V cache}: \left[B,L,\mathrm{Nkv},D\right] = \left[2,4096,8,128\right]
 ```
 
-The query remains `[B,Nq,D] = [2,32,128]`. Every group of `Nq/Nkv = 4` query heads shares one KV head. The score tensor is still logically `[B,Nq,1,L]`; GQA shrinks cache width, not score length.
+```math
+\text{elements per token}= 8 \cdot  \left(128 + 128\right) = 2048
+```
+
+The query remains $`\left[B,\mathrm{Nq},D\right]=\left[2,32,128\right]`$. Every group of $`\frac{\mathrm{Nq}}{\mathrm{Nkv}}=4`$ query heads shares one KV head. The score tensor is still logically $`\left[B,\mathrm{Nq},1,L\right]`$; GQA shrinks cache width, not score length.
 
 ### 12.2 MLA
 
 The cached state becomes:
 
-```text
-Ckv:    [B,L,Dc] = [2,4096,512]
-K_rope: [B,L,Dr] = [2,4096,64]
-elements per token = 512 + 64 = 576
+```math
+\mathrm{Ckv}: \left[B,L,\mathrm{Dc}\right] = \left[2,4096,512\right]
 ```
 
-The absorbed content query is logically `[B,Nq,Dc]`, and its product with `Ckv` still produces `[B,Nq,L]`. Compared with MHA's 8192 elements, 576 is much narrower, but there are still 4096 historical entries.
+```math
+K_{\mathrm{rope}}: \left[B,L,\mathrm{Dr}\right] = \left[2,4096,64\right]
+```
+
+```math
+\text{elements per token}= 512 + 64 = 576
+```
+
+The absorbed content query is logically $`\left[B,\mathrm{Nq},\mathrm{Dc}\right]`$, and its product with `Ckv` still produces $`\left[B,\mathrm{Nq},L\right]`$. Compared with MHA's 8192 elements, 576 is much narrower, but there are still 4096 historical entries.
 
 ### 12.3 DSA
 
 DSA retains the MLA history and adds a small indexer-key cache:
 
-```text
-QI:       [B,HI,DI]
-KI_cache: [B,L,DI]
-scores:   [B,L]
-topk_ids: [B,k] = [2,256]
-selected latent: [B,k,Dc+Dr] = [2,256,576]
-main logits: [B,Nq,k] = [2,32,256]
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[B,\mathrm{HI},\mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{KI\_cache}\right)=\left[B,L,\mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[B,L\right]
+```
+
+```math
+\mathrm{topk\_ids}: \left[B,k\right] = \left[2,256\right]
+```
+
+```math
+\text{selected latent}: \left[B,k,\mathrm{Dc}+\mathrm{Dr}\right] = \left[2,256,576\right]
+```
+
+```math
+\text{main logits}: \left[B,\mathrm{Nq},k\right] = \left[2,32,256\right]
 ```
 
 The indexer still sees 4096 candidates, but the high-dimensional core sees 256 entries instead of 4096.
 
 ### 12.4 CSA and HCA
 
-With stride `m=4`, CSA has approximately:
+With stride $`m=4`$, CSA has approximately:
+
+```math
+\mathrm{Nc} = \mathrm{ceil}\left(4096 / 4\right) = 1024 \mathrm{compressed} \mathrm{entries}
+```
 
 ```text
-Nc = ceil(4096 / 4) = 1024 compressed entries
 compressed index scores: [B,1024]
 selected compressed entries: [B,256,Dcomp]
 local entries: [B,128,Dlocal]
 ```
 
-HCA with `m'=128` has only `4096/128 = 32` global compressed entries, so it can attend densely to them while also reading the local window.
+HCA with $`m'=128`$ has only $`\frac{4096}{128}=32`$ global compressed entries, so it can attend densely to them while also reading the local window.
 
 ### 12.5 KDA/GDN
 
-Suppose `Hstate=32` and `Dk=Dv=128`:
+Suppose $`\mathrm{Hstate}=32`$ and $`\mathrm{Dk}=\mathrm{Dv}=128`$:
 
-```text
-state: [B,Hstate,Dv,Dk] = [2,32,128,128]
+```math
+\mathrm{state}: \left[B,\mathrm{Hstate},\mathrm{Dv},\mathrm{Dk}\right] = \left[2,32,128,128\right]
 ```
 
 After processing token 4096, the state has exactly the same shape as after token 1. There is no `[L,...]` dimension. The trade-off is that token 137 cannot be gathered explicitly; its effect has been folded into the matrix.
@@ -383,41 +461,36 @@ After processing token 4096, the state has exactly the same shape as after token
 
 Start with one new hidden vector per request:
 
-```text
-X_new: [B,Hmodel]
+```math
+\mathrm{shape}\left(X_{\mathrm{new}}\right)=\left[B,\mathrm{Hmodel}\right]
 ```
 
 The architecture determines the next persistent/read shape:
 
 | Architecture | Projection output | Historical read | Core output |
 |---|---|---|---|
-| GQA | `Q [B,Nq,D]`, new `K/V [B,Nkv,D]` | `K/V [B,L,Nkv,D]` | `[B,Nq,Dv]` |
-| MLA | main Q + new `Ckv/Krope [B,Dc+Dr]` | latent `[B,L,Dc+Dr]` | `[B,Nq,Dv]` |
-| DSA | MLA tensors + `QI [B,HI,DI]` | indexer `[B,L,DI]`, then latent `[B,k,Dc+Dr]` | `[B,Nq,Dv]` |
-| CSA | main/indexer Q + compressor tail update | compressed `[B,L/m,Dcomp]`, then top-k + local | `[B,Nq,Dv]` |
-| KDA | `q/k/v/gates [B,H,*]` | state `[B,H,Dv,Dk]` | `[B,H,Dv]` |
+| GQA | `Q [B,Nq,D]`, new `K/V [B,Nkv,D]` | `K/V [B,L,Nkv,D]` | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| MLA | main Q + new `Ckv/Krope [B,Dc+Dr]` | latent $`\left[B,L,\mathrm{Dc}+\mathrm{Dr}\right]`$ | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| DSA | MLA tensors + `QI [B,HI,DI]` | indexer $`\left[B,L,\mathrm{DI}\right]`$, then latent $`\left[B,k,\mathrm{Dc}+\mathrm{Dr}\right]`$ | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| CSA | main/indexer Q + compressor tail update | compressed $`\left[B,\frac{L}{m},\mathrm{Dcomp}\right]`$, then top-k + local | $`\left[B,\mathrm{Nq},\mathrm{Dv}\right]`$ |
+| KDA | `q/k/v/gates [B,H,*]` | state $`\left[B,H,\mathrm{Dv},\mathrm{Dk}\right]`$ | $`\left[B,H,\mathrm{Dv}\right]`$ |
 
-All rows eventually return `[B,Hmodel]` after head merge and output projection, so the surrounding decoder block can stay structurally similar even though its state manager is completely different.
+All rows eventually return $`\left[B,\mathrm{Hmodel}\right]`$ after head merge and output projection, so the surrounding decoder block can stay structurally similar even though its state manager is completely different.
 
 ## 14. A More Useful Performance Model
 
 Wall-clock latency is better approximated by a sum of stage costs than by one asymptotic label:
 
-```text
-T_layer = T_projection
-        + T_state_read_or_index
-        + T_selection_or_recurrence
-        + T_attention_core
-        + T_output
-        + T_metadata_and_launch
+```math
+T_{\mathrm{layer}}=T_{\mathrm{projection}}+\mathrm{T\_state\_read\_or\_index}+\mathrm{T\_selection\_or\_recurrence}+\mathrm{T\_attention\_core}+T_{\mathrm{output}}+\mathrm{T\_metadata\_and\_launch}
 ```
 
 For dense decode, `T_state_read` often dominates. For DSA/CSA, index scan, top-k, address transform, and irregular reads can dominate. For KDA/GDN, recurrent-state read/write traffic can dominate. A kernel benchmark that excludes these stages cannot predict serving throughput.
 
 Use arithmetic intensity as a second lens:
 
-```text
-arithmetic_intensity = operations / bytes moved from HBM
+```math
+\mathrm{arithmetic\_intensity} = \mathrm{operations} / \mathrm{bytes} \mathrm{moved} \mathrm{from} \mathrm{HBM}
 ```
 
 - large prefill matrix products can be compute-bound;

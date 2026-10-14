@@ -267,7 +267,7 @@ ServerArgs._handle_npu_backends
 
 ### 6.2 运行证据
 
-- 启动日志显示 `device=npu` 和 `attention_backend=ascend`。
+- 启动日志显示 $`\mathrm{device}=\mathrm{npu}`$ 和 $`\mathrm{attention\_backend}=\mathrm{ascend}`$。
 - 在最小复现环境临时加日志或断点。
 - profiling 中出现对应 NPU kernel。
 - 关闭该特性后，调用链发生预期变化。

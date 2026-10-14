@@ -24,8 +24,8 @@
 
 DP 切的是：
 
-```text
-请求 / batch / 数据
+```math
+\frac{\frac{\text{请求}}{\mathrm{batch}}}{\text{数据}}
 ```
 
 DP 不切模型。
@@ -185,19 +185,26 @@ TP 主要解决：
 
 例如：
 
-```text
-hidden_size = 8192
-intermediate_size = 28672
+```math
+\mathrm{hidden\_size}=8192
+```
+
+```math
+\mathrm{intermediate\_size}=28672
 ```
 
 FFN 权重很大：
 
-```text
 up_proj:
-    [8192, 28672]
+
+```math
+\left[8192,28672\right]
+```
 
 down_proj:
-    [28672, 8192]
+
+```math
+\left[28672,8192\right]
 ```
 
 如果用 TP=2，可以让两个 rank 各保存一部分权重、计算一部分结果。
@@ -225,40 +232,56 @@ Row Parallel:
 
 普通 Linear：
 
-```text
-Y = X @ W
+```math
+Y=X\,W
 ```
 
 假设：
 
-```text
-X.shape = [B, S, H]
-W.shape = [H, O]
-Y.shape = [B, S, O]
+```math
+X.\mathrm{shape} = \left[B, S, H\right]
+```
+
+```math
+W.\mathrm{shape} = \left[H, O\right]
+```
+
+```math
+Y.\mathrm{shape} = \left[B, S, O\right]
 ```
 
 Column Parallel 按输出维度 `O` 切：
 
-```text
-W = [W0 | W1]
+```math
+W = \left[\mathrm{W0} \mid  \mathrm{W1}\right]
 ```
 
 于是：
 
-```text
 rank 0:
-    Y0 = X @ W0
-    Y0.shape = [B, S, O/2]
+
+```math
+\mathrm{Y0}=X\,\mathrm{W0}
+```
+
+```math
+\mathrm{Y0}.\mathrm{shape} = \left[B, S, O/2\right]
+```
 
 rank 1:
-    Y1 = X @ W1
-    Y1.shape = [B, S, O/2]
+
+```math
+\mathrm{Y1}=X\,\mathrm{W1}
+```
+
+```math
+\mathrm{Y1}.\mathrm{shape} = \left[B, S, O/2\right]
 ```
 
 完整输出：
 
-```text
-Y = concat(Y0, Y1)
+```math
+Y=\mathrm{concat}\left(\mathrm{Y0},\mathrm{Y1}\right)
 ```
 
 如果后续需要完整输出，就要：
@@ -275,38 +298,46 @@ Row Parallel 按输入维度切。
 
 完整计算：
 
-```text
-Y = X @ W
+```math
+Y=X\,W
 ```
 
 如果：
 
-```text
-X = [X0 | X1]
+```math
+X = \left[\mathrm{X0} \mid  \mathrm{X1}\right]
+```
 
-W =
-[
-  W0
-  W1
-]
+```math
+W = \left[ \mathrm{W0} \mathrm{W1} \right]
 ```
 
 那么：
 
-```text
-Y = X0 @ W0 + X1 @ W1
+```math
+Y=\mathrm{X0}\,\mathrm{W0}+\mathrm{X1}\,\mathrm{W1}
 ```
 
 每个 rank：
 
-```text
 rank 0:
-    partial_Y0 = X0 @ W0
-    partial_Y0.shape = [B, S, O]
+
+```math
+\mathrm{partial\_Y0}=\mathrm{X0}\,\mathrm{W0}
+```
+
+```math
+\mathrm{partial\_Y0}.\mathrm{shape} = \left[B, S, O\right]
+```
 
 rank 1:
-    partial_Y1 = X1 @ W1
-    partial_Y1.shape = [B, S, O]
+
+```math
+\mathrm{partial\_Y1}=\mathrm{X1}\,\mathrm{W1}
+```
+
+```math
+\mathrm{partial\_Y1}.\mathrm{shape} = \left[B, S, O\right]
 ```
 
 注意：
@@ -319,8 +350,8 @@ partial_Y0 和 partial_Y1 的 shape 都是完整输出维度 [B, S, O]
 
 所以完整输出是：
 
-```text
-Y = partial_Y0 + partial_Y1
+```math
+Y=\mathrm{partial\_Y0}+\mathrm{partial\_Y1}
 ```
 
 因此通信方式是：
@@ -358,27 +389,54 @@ down_proj:
 
 具体来说：
 
-```text
 rank 0:
-    local_intermediate_0 = x @ W_up_0
-    local_intermediate_0.shape = [B, S, I/2]
 
-    local_intermediate_0 = activation(local_intermediate_0)
+```math
+\mathrm{local\_intermediate\_0}=x\,\mathrm{W\_up\_0}
+```
 
-    partial_out_0 = local_intermediate_0 @ W_down_0
-    partial_out_0.shape = [B, S, H]
+```math
+\mathrm{local\_intermediate\_0}.\mathrm{shape} = \left[B, S, I/2\right]
+```
+
+```math
+\mathrm{local\_intermediate\_0} = \mathrm{activation}\left(\mathrm{local\_intermediate\_0}\right)
+```
+
+```math
+\mathrm{partial\_out\_0}=\mathrm{local\_intermediate\_0}\,\mathrm{W\_down\_0}
+```
+
+```math
+\mathrm{partial\_out\_0}.\mathrm{shape} = \left[B, S, H\right]
+```
 
 rank 1:
-    local_intermediate_1 = x @ W_up_1
-    local_intermediate_1.shape = [B, S, I/2]
 
-    local_intermediate_1 = activation(local_intermediate_1)
+```math
+\mathrm{local\_intermediate\_1}=x\,\mathrm{W\_up\_1}
+```
 
-    partial_out_1 = local_intermediate_1 @ W_down_1
-    partial_out_1.shape = [B, S, H]
+```math
+\mathrm{local\_intermediate\_1}.\mathrm{shape} = \left[B, S, I/2\right]
+```
+
+```math
+\mathrm{local\_intermediate\_1} = \mathrm{activation}\left(\mathrm{local\_intermediate\_1}\right)
+```
+
+```math
+\mathrm{partial\_out\_1}=\mathrm{local\_intermediate\_1}\,\mathrm{W\_down\_1}
+```
+
+```math
+\mathrm{partial\_out\_1}.\mathrm{shape} = \left[B, S, H\right]
+```
 
 all_reduce:
-    out = partial_out_0 + partial_out_1
+
+```math
+\mathrm{out}=\mathrm{partial\_out\_0}+\mathrm{partial\_out\_1}
 ```
 
 所以 FFN 中的 TP 规律是：
@@ -395,11 +453,17 @@ all_reduce:
 
 ```text
 x
- ↓
-q_proj / k_proj / v_proj
- ↓
+↓
+```
+
+```math
+\frac{\frac{q_{\mathrm{proj}}}{k_{\mathrm{proj}}}}{v_{\mathrm{proj}}}
+```
+
+```text
+↓
 multi-head attention
- ↓
+↓
 o_proj
 ```
 
@@ -418,10 +482,16 @@ o_proj:
 
 例如：
 
-```text
-hidden_size = 128
-num_heads = 8
-TP = 2
+```math
+\mathrm{hidden\_size}=128
+```
+
+```math
+\mathrm{num\_heads}=8
+```
+
+```math
+\mathrm{TP}=2
 ```
 
 那么：
@@ -436,27 +506,38 @@ rank 1:
 
 每个 rank 只生成自己的 Q/K/V heads：
 
-```text
 rank 0:
-    q0/k0/v0.shape = [B, 4, S, head_dim]
+
+```math
+\mathrm{q0}/\mathrm{k0}/\mathrm{v0}.\mathrm{shape} = \left[B, 4, S, \mathrm{head\_dim}\right]
+```
 
 rank 1:
-    q1/k1/v1.shape = [B, 4, S, head_dim]
+
+```math
+\mathrm{q1}/\mathrm{k1}/\mathrm{v1}.\mathrm{shape} = \left[B, 4, S, \mathrm{head\_dim}\right]
 ```
 
 然后各自本地做 attention。
 
 最后经过 `o_proj` 时，每个 rank 计算一部分输出贡献：
 
-```text
 rank 0:
-    partial_out_0.shape = [B, S, hidden_size]
+
+```math
+\mathrm{partial\_out\_0}.\mathrm{shape} = \left[B, S, \mathrm{hidden\_size}\right]
+```
 
 rank 1:
-    partial_out_1.shape = [B, S, hidden_size]
+
+```math
+\mathrm{partial\_out\_1}.\mathrm{shape} = \left[B, S, \mathrm{hidden\_size}\right]
+```
 
 all_reduce:
-    out = partial_out_0 + partial_out_1
+
+```math
+\mathrm{out}=\mathrm{partial\_out\_0}+\mathrm{partial\_out\_1}
 ```
 
 ## 2.8 TP 的典型通信
@@ -557,9 +638,10 @@ logits
 
 stage 间传递的是：
 
-```text
 hidden states
-shape = [B, S, H]
+
+```math
+\mathrm{shape}=\left[B,S,H\right]
 ```
 
 ## 3.4 PP 自回归推理流程
@@ -728,20 +810,28 @@ sequence length / context length
 
 完整 hidden：
 
-```text
-x.shape = [B, S, H]
+```math
+x.\mathrm{shape} = \left[B, S, H\right]
 ```
 
 SP=2 后：
 
 ```text
 rank 0:
-    x[:, 0:S/2, :]
-    shape = [B, S/2, H]
+x[:, 0:S/2, :]
+```
 
+```math
+\mathrm{shape}=\left[B,\frac{S}{2},H\right]
+```
+
+```text
 rank 1:
-    x[:, S/2:S, :]
-    shape = [B, S/2, H]
+x[:, S/2:S, :]
+```
+
+```math
+\mathrm{shape}=\left[B,\frac{S}{2},H\right]
 ```
 
 ## 4.3 SP/CP 解决什么问题？
@@ -763,10 +853,16 @@ rank 1:
 
 例如：
 
-```text
+```math
 S = 128K
-H = 8192
-layers = 80
+```
+
+```math
+H=8192
+```
+
+```math
+\mathrm{layers}=80
 ```
 
 如果每个 rank 都持有完整 context 的 KV Cache，显存压力会非常大。
@@ -831,18 +927,36 @@ all-gather 所有 rank 的 K/V；
 
 也就是：
 
-```text
 rank 0:
-    local_q0
-    local_k0 / local_v0
-    all_gather -> full_k / full_v
-    output0 = Attention(local_q0, full_k, full_v)
+
+local_q0
+
+```math
+\frac{\mathrm{local\_k0}}{\mathrm{local\_v0}}
+```
+
+```text
+all_gather -> full_k / full_v
+```
+
+```math
+\mathrm{output0}=\mathrm{Attention}\left(\mathrm{local\_q0},\mathrm{full\_k},\mathrm{full\_v}\right)
+```
 
 rank 1:
-    local_q1
-    local_k1 / local_v1
-    all_gather -> full_k / full_v
-    output1 = Attention(local_q1, full_k, full_v)
+
+local_q1
+
+```math
+\frac{\mathrm{local\_k1}}{\mathrm{local\_v1}}
+```
+
+```text
+all_gather -> full_k / full_v
+```
+
+```math
+\mathrm{output1}=\mathrm{Attention}\left(\mathrm{local\_q1},\mathrm{full\_k},\mathrm{full\_v}\right)
 ```
 
 优点：
@@ -870,61 +984,78 @@ KV 按 sequence 分片保留在各 rank；
 
 完整 attention：
 
-```text
-Out = softmax(QK^T)V
+```math
+\mathrm{Out} = \mathrm{softmax}\left(\mathrm{QK}^{\mathsf T}\right)V
 ```
 
 如果：
 
-```text
-K = [K0; K1]
-V = [V0; V1]
+```math
+K=\mathrm{concat}_{\mathrm{context}}(K_0,K_1),\qquad V=\mathrm{concat}_{\mathrm{context}}(V_0,V_1)
 ```
 
 那么：
 
-```text
-QK^T = [QK0^T, QK1^T]
+```math
+{\mathrm{QK}}^{\mathsf T}=\left[{\mathrm{QK0}}^{\mathsf T},{\mathrm{QK1}}^{\mathsf T}\right]
 ```
 
 最终：
 
-```text
-Out = P0V0 + P1V1
+```math
+\mathrm{Out}=\mathrm{P0V0}+\mathrm{P1V1}
 ```
 
 其中：
 
-```text
-P = softmax([QK0^T, QK1^T])
+```math
+P=\mathrm{softmax}\left(\left[{\mathrm{QK0}}^{\mathsf T},{\mathrm{QK1}}^{\mathsf T}\right]\right)
 ```
 
 每个 rank 可以计算局部贡献：
 
-```text
 rank 0:
-    local_scores0 = Q @ K0^T
-    local_out0 = exp(local_scores0 - global_max) @ V0
+
+```math
+\mathrm{local\_scores0}=Q\,{\mathrm{K0}}^{\mathsf T}
+```
+
+```math
+\mathrm{local\_out0}=\mathrm{exp}\left(\mathrm{local\_scores0}-\mathrm{global\_max}\right)\,\mathrm{V0}
+```
 
 rank 1:
-    local_scores1 = Q @ K1^T
-    local_out1 = exp(local_scores1 - global_max) @ V1
+
+```math
+\mathrm{local\_scores1}=Q\,{\mathrm{K1}}^{\mathsf T}
+```
+
+```math
+\mathrm{local\_out1}=\mathrm{exp}\left(\mathrm{local\_scores1}-\mathrm{global\_max}\right)\,\mathrm{V1}
 ```
 
 然后：
 
-```text
-global_max = all_reduce_max(local_max)
-global_sum = all_reduce_sum(local_sum)
-global_out = all_reduce_sum(local_out)
+```math
+\mathrm{global\_max} = \mathrm{all\_reduce\_max}\left(\mathrm{local\_max}\right)
+```
 
-context = global_out / global_sum
+```math
+\mathrm{global\_sum} = \mathrm{all\_reduce\_sum}\left(\mathrm{local\_sum}\right)
+```
+
+```math
+\mathrm{global\_out} = \mathrm{all\_reduce\_sum}\left(\mathrm{local\_out}\right)
+```
+
+```math
+\mathrm{context}=\frac{\mathrm{global\_out}}{\mathrm{global\_sum}}
 ```
 
 这里用 all-reduce 是因为：
 
-```text
-Out = local_out0 + local_out1
+```math
+\mathrm{Out}=\mathrm{local\_out0}+\mathrm{local\_out1}
 ```
 
 也就是不同 rank 算的是同一个输出的加法贡献。
@@ -933,14 +1064,14 @@ Out = local_out0 + local_out1
 
 Decode 阶段每次只处理最新 token：
 
-```text
-Q_new.shape = [B, heads, 1, head_dim]
+```math
+Q_{\mathrm{new}}.\mathrm{shape} = \left[B, \mathrm{heads}, 1, \mathrm{head\_dim}\right]
 ```
 
 历史 KV 很长：
 
-```text
-KV_cache.shape = [B, heads, history_len, head_dim]
+```math
+\mathrm{KV}_{\mathrm{cache}}.\mathrm{shape} = \left[B, \mathrm{heads}, \mathrm{history\_len}, \mathrm{head\_dim}\right]
 ```
 
 如果 KV Cache 按 context 分片：
@@ -978,9 +1109,12 @@ Q_new 很小，历史 KV 很大。
 
 ### all-gather KV
 
-```text
-K_full = concat(K0, K1)
-V_full = concat(V0, V1)
+```math
+K_{\mathrm{full}}=\mathrm{concat}\left(\mathrm{K0},\mathrm{K1}\right)
+```
+
+```math
+V_{\mathrm{full}}=\mathrm{concat}\left(\mathrm{V0},\mathrm{V1}\right)
 ```
 
 这是拼接关系，所以使用：
@@ -993,18 +1127,22 @@ all-gather
 
 每个 rank 计算：
 
-```text
 rank 0:
-    local_out0 = P0 @ V0
+
+```math
+\mathrm{local\_out0}=\mathrm{P0}\,\mathrm{V0}
+```
 
 rank 1:
-    local_out1 = P1 @ V1
+
+```math
+\mathrm{local\_out1}=\mathrm{P1}\,\mathrm{V1}
 ```
 
 完整输出：
 
-```text
-Out = local_out0 + local_out1
+```math
+\mathrm{Out}=\mathrm{local\_out0}+\mathrm{local\_out1}
 ```
 
 这是加法贡献关系，所以使用：
@@ -1080,18 +1218,25 @@ EP 把这些 Experts 分布到不同 rank 上。
 
 例如：
 
-```text
-num_experts = 4
-EP = 2
+```math
+\mathrm{num\_experts}=4
+```
+
+```math
+\mathrm{EP}=2
+```
 
 rank 0:
-    Expert 0
-    Expert 1
+
+Expert 0
+
+Expert 1
 
 rank 1:
-    Expert 2
-    Expert 3
-```
+
+Expert 2
+
+Expert 3
 
 ## 5.2 EP 解决什么问题？
 
@@ -1113,10 +1258,15 @@ MoE 的特点是：
 
 EP 让每张 GPU 只保存一部分 Experts：
 
-```text
-EP = 8
-num_experts = 64
+```math
+\mathrm{EP}=8
+```
 
+```math
+\mathrm{num\_experts}=64
+```
+
+```text
 每个 rank 只保存 8 个 experts。
 ```
 
@@ -1209,30 +1359,37 @@ token -> expert 3
 
 假设当前 rank 本地有一些 token hidden：
 
-```text
-x.shape = [T, H]
+```math
+x.\mathrm{shape} = \left[T, H\right]
 ```
 
 EP 流程：
 
 ```text
 1. Router:
-    expert_ids = router(x)
+```
 
+```math
+\mathrm{expert\_ids} = \mathrm{router}\left(x\right)
+```
+
+```text
 2. 根据 expert_id 找 expert 所在 rank:
-    dst_rank = expert_id // experts_per_rank
+```
 
+```math
+\mathrm{dst\_rank}=\left\lfloor\frac{\mathrm{expert\_id}}{\mathrm{experts\_per\_rank}}\right\rfloor
+```
+
+```text
 3. Dispatch:
-    all-to-all 把 token 发到 expert rank
-
+all-to-all 把 token 发到 expert rank
 4. Local Expert Compute:
-    每个 rank 用本地 experts 处理收到的 tokens
-
+每个 rank 用本地 experts 处理收到的 tokens
 5. Combine:
-    all-to-all 把 expert output 发回 token 原 owner rank
-
+all-to-all 把 expert output 发回 token 原 owner rank
 6. Restore:
-    owner rank 根据 token 原始 index 恢复顺序
+owner rank 根据 token 原始 index 恢复顺序
 ```
 
 ## 5.6 为什么 EP 要 all-to-all？
@@ -1325,11 +1482,20 @@ expert3: token0
 
 所以输出不能简单 concat，而要根据原始 index scatter 回去：
 
-```text
-out[0] = token0_output
-out[1] = token1_output
-out[2] = token2_output
-out[3] = token3_output
+```math
+{\mathrm{out}}_{0}=\mathrm{token0\_output}
+```
+
+```math
+{\mathrm{out}}_{1}=\mathrm{token1\_output}
+```
+
+```math
+{\mathrm{out}}_{2}=\mathrm{token2\_output}
+```
+
+```math
+{\mathrm{out}}_{3}=\mathrm{token3\_output}
 ```
 
 这就是为什么需要 `send_indices`。
@@ -1383,10 +1549,16 @@ MoE 输出后还回到哪个 rank。
 
 假设：
 
-```text
-DP = 2
-EP = 2
-world_size = 4
+```math
+\mathrm{DP}=2
+```
+
+```math
+\mathrm{EP}=2
+```
+
+```math
+\mathrm{world\_size}=4
 ```
 
 可以组织为：
@@ -1411,14 +1583,15 @@ rank 0, rank 1
 
 在 EP group 内，最简单方式是按 token 平均切分：
 
+```math
+\text{request A tokens}= \left[\mathrm{t0},\mathrm{t1},\mathrm{t2},\mathrm{t3},\mathrm{t4},\mathrm{t5},\mathrm{t6},\mathrm{t7}\right]
+```
+
 ```text
-request A tokens = [t0,t1,t2,t3,t4,t5,t6,t7]
-
 rank 0:
-    t0,t1,t2,t3
-
+t0,t1,t2,t3
 rank 1:
-    t4,t5,t6,t7
+t4,t5,t6,t7
 ```
 
 然后每个 rank 对自己手里的 tokens 做 Router，再 all-to-all 到 expert rank。
@@ -1462,29 +1635,50 @@ DP × PP × TP × EP × SP/CP
 
 例如：
 
-```text
-DP = 2
-PP = 2
-TP = 2
-EP = 4
+```math
+\mathrm{DP}=2
+```
+
+```math
+\mathrm{PP}=2
+```
+
+```math
+\mathrm{TP}=2
+```
+
+```math
+\mathrm{EP}=4
 ```
 
 总进程数可能是：
 
-```text
-2 × 2 × 2 × 4 = 32
+```math
+2\cdot 2\cdot 2\cdot 4=32
 ```
 
 每个 global rank 都有多个逻辑身份：
 
-```text
-global_rank = 17
+```math
+\mathrm{global\_rank}=17
+```
 
 可能对应:
-    dp_rank = 1
-    pp_rank = 0
-    tp_rank = 1
-    ep_rank = 2
+
+```math
+\mathrm{dp\_rank}=1
+```
+
+```math
+\mathrm{pp\_rank}=0
+```
+
+```math
+\mathrm{tp\_rank}=1
+```
+
+```math
+\mathrm{ep\_rank}=2
 ```
 
 不同层使用不同 process group：
@@ -1512,21 +1706,21 @@ MoE dispatch:
 
 ## 7.1 从“切什么”看
 
-```text
 DP:
-    切请求 / batch
 
+```math
+\frac{\text{切请求}}{\mathrm{batch}}
+```
+
+```text
 TP:
-    切矩阵 / hidden 维度
-
+切矩阵 / hidden 维度
 PP:
-    切 Transformer 层
-
+切 Transformer 层
 SP/CP:
-    切 sequence / context 维度
-
+切 sequence / context 维度
 EP:
-    切 MoE experts
+切 MoE experts
 ```
 
 ## 7.2 从“通信什么”看
@@ -1617,8 +1811,8 @@ PP
 
 优先考虑：
 
-```text
-SP / CP
+```math
+\frac{\mathrm{SP}}{\mathrm{CP}}
 ```
 
 原因：
@@ -1647,23 +1841,44 @@ EP
 
 假设部署一个 MoE LLM：
 
-```text
 模型:
-    64 layers
-    hidden_size = 8192
-    num_experts = 64
-    每层 MoE top-2
-    context length = 128K
+
+64 layers
+
+```math
+\mathrm{hidden\_size}=8192
+```
+
+```math
+\mathrm{num\_experts}=64
+```
+
+每层 MoE top-2
+
+```math
+\text{context length}= 128K
 ```
 
 可能配置：
 
-```text
-DP = 2
-PP = 4
-TP = 4
-EP = 8
-CP = 2
+```math
+\mathrm{DP}=2
+```
+
+```math
+\mathrm{PP}=4
+```
+
+```math
+\mathrm{TP}=4
+```
+
+```math
+\mathrm{EP}=8
+```
+
+```math
+\mathrm{CP}=2
 ```
 
 可以理解为：

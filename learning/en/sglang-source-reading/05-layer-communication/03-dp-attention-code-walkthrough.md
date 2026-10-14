@@ -29,7 +29,7 @@ flowchart TD
     OUT --> TRIM["Remove padding; sample and update local requests"]
 ```
 
-There are two kinds of communication. Scheduler synchronization exchanges small **execution metadata**; layer communication moves or reduces `[tokens,H]` activations and expert data. The former makes ranks enter compatible execution rounds; the latter gives submodules the correct tensors.
+There are two kinds of communication. Scheduler synchronization exchanges small **execution metadata**; layer communication moves or reduces $`\left[\mathrm{tokens},H\right]`$ activations and expert data. The former makes ranks enter compatible execution rounds; the latter gives submodules the correct tensors.
 
 ## 2. Source Map and Reading Order
 
@@ -57,12 +57,18 @@ Running configuration:
 
 ```text
 tp_size=4, dp_size=2, enable_dp_attention=True
-pp_size=1, attn_cp_size=1
+```
+
+```math
+\mathrm{pp\_size}=1,\qquad \mathrm{attn\_cp\_size}=1
+```
+
+```text
 No dedicated MoE A2A backend; moe_dense_tp_size=None
 No CP, TBO, or communication fusion in the baseline example
 ```
 
-This uses **four compute ranks**, split into two attention-DP subgroups, each with attention TP of two. Regular DP with the flag disabled and the same `tp_size=4,dp_size=2` instead uses two complete TP replicas and eight compute ranks.
+This uses **four compute ranks**, split into two attention-DP subgroups, each with attention TP of two. Regular DP with the flag disabled and the same $`\mathrm{tp\_size}=4,\qquad \mathrm{dp\_size}=2`$ instead uses two complete TP replicas and eight compute ranks.
 
 Excerpt from `ServerArgs._handle_data_parallelism()`:
 
@@ -203,10 +209,16 @@ In `prepare_mlp_sync_batch_raw()`:
 
 Logical shapes of `all_gather()`:
 
-```text
-local_info: [6]
-global_info: [DP, ATTN_TP*ATTN_CP, 6]
-tp0_info = global_info[:,0,:]: [DP,6]
+```math
+\mathrm{shape}\left(\mathrm{local\_info}\right)=\left[6\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{global\_info}\right)=\left[\mathrm{DP},\mathrm{ATTN\_TP}\cdot \mathrm{ATTN\_CP},6\right]
+```
+
+```math
+\mathrm{tp0\_info} = \mathrm{global\_info}\left[:,0,:\right]: \left[\mathrm{DP},6\right]
 ```
 
 Subgroup ranks represent the same DP workload, so the first entry is selected per subgroup. Inactive ranks also receive fallback values. Aggregation includes:
@@ -279,18 +291,21 @@ else:
     buffer_len = sum(global_num_tokens)
 ```
 
-Real decode counts `[4,2]` already satisfy both alignments for `T=2,C=1`. Eager MAX_LEN uses communication lengths `[4,4]` and a global `[8,H]` buffer. DP1 still has only two real requests; its last two rows are padding.
+Real decode counts $`\left[4,2\right]`$ already satisfy both alignments for $`T=2,\qquad C=1`$. Eager MAX_LEN uses communication lengths $`\left[4,4\right]`$ and a global $`\left[8,H\right]`$ buffer. DP1 still has only two real requests; its last two rows are padding.
 
 `_pad_inputs_to_size()` processes `input_ids`, `positions`, `req_pool_indices`, `seq_lens`, `out_cache_loc`, and other fields using backend-specific fill values. Padding hidden tensors alone while retaining old KV-write/request-index lengths breaks the contract.
 
 `get_dp_local_info()` uses prefix sums of communication lengths:
 
-```text
-start_d = sum(global_num_tokens_gpu[:d])
-length_d = global_num_tokens_gpu[d]
+```math
+\mathrm{start\_d} = \sum\left(\mathrm{global\_num\_tokens\_gpu}\left[:d\right]\right)
 ```
 
-For MAX_LEN `[4,4]`, DP1 starts at row 4; for SUM_LEN `[4,2]`, it also starts at 4, while total lengths are 8 and 6. Real `[3,1]` first aligns to `[4,2]`; the unaligned 3 is not the correct DP1 offset.
+```math
+\mathrm{length\_d}={\mathrm{global\_num\_tokens\_gpu}}_{d}
+```
+
+For MAX_LEN $`\left[4,4\right]`$, DP1 starts at row 4; for SUM_LEN $`\left[4,2\right]`$, it also starts at 4, while total lengths are 8 and 6. Real $`\left[3,1\right]`$ first aligns to $`\left[4,2\right]`$; the unaligned 3 is not the correct DP1 offset.
 
 ## 8. Model Projection Uses Attention TP Rank for Attention Weights
 
@@ -305,17 +320,17 @@ self.num_local_heads = num_heads // attn_tp_size
 
 Rank0 and rank2 own the same numbered attention-head shard but handle different DP requests; likewise rank1 and rank3. Low-rank down projections include `ReplicatedLinear`.
 
-Use teaching dimensions `H=4096,N=32,Dcq=1536,Dc=512,Dh=128,Dr=64,Dv=128`, with `m=4` padded tokens per DP:
+Use teaching dimensions $`H=4096,\qquad N=32,\qquad \mathrm{Dcq}=1536,\qquad \mathrm{Dc}=512,\qquad \mathrm{Dh}=128,\qquad \mathrm{Dr}=64,\qquad \mathrm{Dv}=128`$, with $`m=4`$ padded tokens per DP:
 
 | Operation | Per-rank logical shape | Ownership |
 |---|---:|---|
-| Layer input | `[4,4096]` | same on the two ranks of one DP |
-| Query latent | `[4,1536]` | replicated down projection |
-| Query up projection | `[4,16*(128+64)] = [4,3072]` | 16 local heads |
-| Query reshape | `[4,16,192]` | split into content/RoPE slices |
-| Content latent / position key | `[4,512]`, `[4,64]` | written to the local DP's MLA cache |
-| Head output | `[4,16,128]` | reads the request's visible history |
-| Output projection | `[4,4096]` | `reduce_results=False`: partial values |
+| Layer input | $`\left[4,4096\right]`$ | same on the two ranks of one DP |
+| Query latent | $`\left[4,1536\right]`$ | replicated down projection |
+| Query up projection | $`\left[4,16\cdot \left(128+64\right)\right]=\left[4,3072\right]`$ | 16 local heads |
+| Query reshape | $`\left[4,16,192\right]`$ | split into content/RoPE slices |
+| Content latent / position key | $`\left[4,512\right]`$, $`\left[4,64\right]`$ | written to the local DP's MLA cache |
+| Head output | $`\left[4,16,128\right]`$ | reads the request's visible history |
+| Output projection | $`\left[4,4096\right]`$ | `reduce_results=False`: partial values |
 
 Absorbed/expanded MLA paths and backends can hide intermediates; see [MLA mathematics](../../ai-infra-basic/Model_Architecture/04-multi-head-latent-attention.md). DP Attention changes placement of requests and head work, not that attention formula.
 
@@ -347,7 +362,7 @@ if not should_allreduce_fusion:
 |---|---|---|
 | Sparse layer without dedicated A2A | `FULL` | gather global rows, run FFN/expert work, return DP rows |
 | Sparse layer with dedicated A2A or the designated special all-gather MoE path | `SCATTERED` | dispatcher handles exchange outside the communicator |
-| Dense layer, `moe_dense_tp_size=1` | `SCATTERED` | each rank runs its complete dense MLP on local rows |
+| Dense layer, $`\mathrm{moe\_dense\_tp\_size}=1`$ | `SCATTERED` | each rank runs its complete dense MLP on local rows |
 | Dense layer, ordinary configuration | `FULL` | global TP MLP |
 | Specific CP/MoE-DP combinations | `MOE_FULL` | additional CP/MoE layout; see the common guide |
 
@@ -372,9 +387,9 @@ if not use_layer_norm_before_gather:
         hidden_states = layernorm(hidden_states)
 ```
 
-For attention TP of two, the two `A_partial` tensors must be summed. Subgroup rank0 adds residual `X` once. Gathering produces global `R=concat_d(X_d+sum_a A_da)`. The local DP portion of `R` is copied into residual, and globally normalized hidden rows enter the MLP.
+For attention TP of two, the two `A_partial` tensors must be summed. Subgroup rank0 adds residual `X` once. Gathering produces global $`R=\mathrm{concat\_d}\left(X_{d}+\sum_{a} A_{\mathrm{da}}\right)`$. The local DP portion of `R` is copied into residual, and globally normalized hidden rows enter the MLP.
 
-**Residual remains local `[m,H]`; MLP hidden is global `[D*m,H]`.** They need not have equal shapes at this point: hidden rows return to local layout after MLP.
+**Residual remains local $`\left[m,H\right]`$; MLP hidden is global $`\left[D\cdot m,H\right]`$.** They need not have equal shapes at this point: hidden rows return to local layout after MLP.
 
 ### 10.1 SUM_LEN All-Reduce
 
@@ -410,13 +425,13 @@ get_attention_tp_group().reduce_scatter_tensor(scattered_local_tokens, local_tok
 get_tp_group().all_gather_into_tensor(global_tokens, scattered_local_tokens)
 ```
 
-Our `[4,H]` partial inputs reduce-scatter to `[2,H]` complete token slices per rank, then a four-rank all-gather gives `[8,H]`. Rank order produces DP0's two pieces followed by DP1's two pieces.
+Our $`\left[4,H\right]`$ partial inputs reduce-scatter to $`\left[2,H\right]`$ complete token slices per rank, then a four-rank all-gather gives $`\left[8,H\right]`$. Rank order produces DP0's two pieces followed by DP1's two pieces.
 
 `local_tokens.fill_(0)` and reduce-scatter output views can modify input storage. The helpers assume specific buffer lifetimes and non-aliasing constraints; copying their logic into a demo does not justify assuming every input remains intact.
 
 ## 11. After MLP: Local Scatter versus Collective Reduce-Scatter
 
-Global TP FFN/non-A2A MoE produces `[N,H]` outputs. Partial values still need reduction. `use_reduce_scatter` tells the MLP whether to skip its normal output all-reduce.
+Global TP FFN/non-A2A MoE produces $`\left[N,H\right]`$ outputs. Partial values still need reduction. `use_reduce_scatter` tells the MLP whether to skip its normal output all-reduce.
 
 In `CommunicateSummableTensorPairFn._scatter_hidden_states()`:
 
@@ -435,7 +450,7 @@ Two basic cases:
 - **MLP already all-reduced**: complete global results are identical across ranks. `dp_scatter()` locally copies the DP interval; no network scatter is required.
 - **MLP skipped all-reduce**: values remain partial. `dp_reduce_scatter_tensor()` sums and returns local rows, avoiding replication of the complete global output first.
 
-When `P==D`, attention TP is one and world reduce-scatter is sufficient. For `P>D`, world reduce-scatter first returns a smaller row block per rank, then attention-TP all-gather reconstructs the full local-DP rows on subgroup ranks.
+When `P==D`, attention TP is one and world reduce-scatter is sufficient. For $`P \gt D`$, world reduce-scatter first returns a smaller row block per rank, then attention-TP all-gather reconstructs the full local-DP rows on subgroup ranks.
 
 ```text
 MLP partial: [8,H] per rank
@@ -460,7 +475,7 @@ if hidden_states.shape[0] != 0:
     hidden_states, residual = layernorm(hidden_states, residual)
 ```
 
-Each rank now has `[m/T,H]` with complete values. Residual is sliced consistently, and normalization runs on local rows.
+Each rank now has $`\left[\frac{m}{T},H\right]`$ with complete values. Residual is sliced consistently, and normalization runs on local rows.
 
 `DeepseekV2MoE.forward()` selects `forward_normal()` or the dedicated-communication path named `forward_deepep()` through `_enable_a2a_moe`. That name does not imply the backend must be DeepEP; this snapshot supports other configured A2A backends through the path.
 
@@ -479,7 +494,7 @@ Source-token positions and expert-owner ranks are different mappings. Combine re
 
 Output may remain local if the next layer accepts `SCATTERED`. At an attention entrance needing `TP_ATTN_FULL`, `CommunicateSimpleFn._scattered_to_tp_attn_full()` all-gathers within attention TP. The final layer also restores the required model-output layout.
 
-For empty input, `forward_deepep()` builds an empty top-k output and still enters the required expert calls. An external early return based solely on `n_source=0` can skip required communication.
+For empty input, `forward_deepep()` builds an empty top-k output and still enters the required expert calls. An external early return based solely on $`n_{\mathrm{source}}=0`$ can skip required communication.
 
 ## 13. LM Head: DP Attention and DP LM Head Are Separate Flags
 
@@ -552,28 +567,28 @@ Rank formulas and token ownership do not change between NCCL/HCCL. Actual collec
 
 This chapter statically verifies source and uses a CPU simulator for layout/mathematical invariants. It does not report multi-device GPU/NPU serving or HCCL performance tests. See [Ascend sharding](./02-tp-dp-ep-sharding-and-ascend-npu.md) for device-specific TP/EP weights and FuseEP details.
 
-## 16. Trace One `[4,2]` Decode Round End to End
+## 16. Trace One $`\left[4,2\right]`$ Decode Round End to End
 
-The ledger below uses the baseline configuration, MAX_LEN, no dedicated A2A, and no extra fusion, with `H=4096,T=2`. DP0 owns four requests; DP1 owns two; ordinary decode has one token per request.
+The ledger below uses the baseline configuration, MAX_LEN, no dedicated A2A, and no extra fusion, with $`H=4096,\qquad T=2`$. DP0 owns four requests; DP1 owns two; ordinary decode has one token per request.
 
 | Stage | rank0/1 | rank2/3 | Meaning |
 |---|---|---|---|
 | Local Scheduler | 4 requests | 2 requests | identical within subgroup, independent across DPs |
-| Sync metadata | global `[4,2]` | global `[4,2]` | one coordinated round |
+| Sync metadata | global $`\left[4,2\right]`$ | global $`\left[4,2\right]`$ | one coordinated round |
 | Eager padding | `input_ids [4]` | `input_ids [4]` | last two DP1 rows are padding |
-| Embedding/layer input | `[4,4096]` | `[4,4096]` | local DP rows, replicated within subgroup |
-| Attention output | `[4,4096]` partial | `[4,4096]` partial | different local-head contributions |
-| ATTN_TP reduce-scatter | `[2,4096]` per rank | `[2,4096]` per rank | summed values, half the rows |
-| Global all-gather | `[8,4096]` per rank | `[8,4096]` per rank | four DP0 rows + four DP1 rows |
-| Post-attention norm | hidden `[8,4096]` | hidden `[8,4096]` | complete MLP inputs |
-| Local residual | `[4,4096]` | `[4,4096]` | only the local DP residual stream |
-| TP FFN/MoE | `[8,4096]` partial or reduced | same | depends on `use_reduce_scatter` |
-| Return to DP layout | `[4,4096]` | `[4,4096]` | collective reduction or local copy |
+| Embedding/layer input | $`\left[4,4096\right]`$ | $`\left[4,4096\right]`$ | local DP rows, replicated within subgroup |
+| Attention output | $`\left[4,4096\right]`$ partial | $`\left[4,4096\right]`$ partial | different local-head contributions |
+| ATTN_TP reduce-scatter | $`\left[2,4096\right]`$ per rank | $`\left[2,4096\right]`$ per rank | summed values, half the rows |
+| Global all-gather | $`\left[8,4096\right]`$ per rank | $`\left[8,4096\right]`$ per rank | four DP0 rows + four DP1 rows |
+| Post-attention norm | hidden $`\left[8,4096\right]`$ | hidden $`\left[8,4096\right]`$ | complete MLP inputs |
+| Local residual | $`\left[4,4096\right]`$ | $`\left[4,4096\right]`$ | only the local DP residual stream |
+| TP FFN/MoE | $`\left[8,4096\right]`$ partial or reduced | same | depends on `use_reduce_scatter` |
+| Return to DP layout | $`\left[4,4096\right]`$ | $`\left[4,4096\right]`$ | collective reduction or local copy |
 | Next layer | repeat these boundaries | repeat these boundaries | histories remain local to DP requests |
 | Output/logits | real local-DP rows | real local-DP rows | may include a separate LM-head DP gather |
 | Sampling after trimming | 4 results | 2 results | no padding tokens generated |
 
-Internal attention-score shape additionally depends on visible history per request. A packed `[4,H]` input does not imply equal KV lengths for all four requests.
+Internal attention-score shape additionally depends on visible history per request. A packed $`\left[4,H\right]`$ input does not imply equal KV lengths for all four requests.
 
 ## 17. Debugging Symptoms and Invariants
 
@@ -603,9 +618,9 @@ The standard-library simulator models SUM_LEN zero-buffer all-reduce, MAX_LEN su
 Reading tasks:
 
 1. Follow `get_next_batch_to_run()` and identify how a None local batch becomes IDLE.
-2. Explain through `prepare_mlp_sync_batch()` why real `[3,1]` is not a valid direct MAX_LEN communication size.
+2. Explain through `prepare_mlp_sync_batch()` why real $`\left[3,1\right]`$ is not a valid direct MAX_LEN communication size.
 3. Find one caller each of `dp_gather_partial()` and `dp_gather_replicate()` and establish whether its input has already been reduced.
-4. Explain why norm cannot independently process two attention partials for `T=2`.
+4. Explain why norm cannot independently process two attention partials for $`T=2`$.
 5. Find the all-reduce skip condition in `DeepseekV2MoE.forward_normal()` and its matching communicator branch.
 6. Draw source-token → expert-owner → source-token mappings for the A2A path.
 7. Use LogitsProcessor to demonstrate that DP Attention does not automatically enable DP LM head.

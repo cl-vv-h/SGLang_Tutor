@@ -6,7 +6,7 @@
 
 本讲目标：
 
-- 看懂 `disaggregation_mode = prefill / decode / null` 分别代表什么。
+- 看懂 $`\mathrm{disaggregation\_mode}=\frac{\frac{\mathrm{prefill}}{\mathrm{decode}}}{\mathrm{null}}`$ 分别代表什么。
 - 看懂 PD 分离中一个请求的生命周期。
 - 看懂 prefill server 的 Bootstrap Queue、Waiting Queue、Inflight Queue。
 - 看懂 decode server 的 PreallocQueue、TransferQueue、WaitingQueue、RunningBatch。
@@ -217,7 +217,7 @@ Decode 侧也会创建自己的 `KVManager`，但它的角色是 receiver：告�
 | `Transferring` | KV 正在传输。 |
 | `Success` | KV 已传输完成，decode 可继续。 |
 
-### 5.3 `BaseKVManager / BaseKVSender / BaseKVReceiver`
+### 5.3 $`\frac{\frac{\mathrm{BaseKVManager}}{\mathrm{BaseKVSender}}}{\mathrm{BaseKVReceiver}}`$
 
 ```mermaid
 classDiagram
@@ -392,15 +392,14 @@ flowchart TD
 
 普通 `ReqToTokenPool` 的容量约束是：
 
-```text
-#pre-allocated + #transfer + #running <= max_running_requests
+```math
+N_{\mathrm{preallocated}}+N_{\mathrm{transfer}}+N_{\mathrm{running}}\le\mathrm{max\_running\_requests}
 ```
 
 decode 侧为了让 prefill 尽早开始，需要提前预分配一些还没进入 running batch 的请求。因此 `DecodeReqToTokenPool` 扩展了容量：
 
-```text
-#running <= max_running_requests
-#pre-allocated + #transfer <= pre_alloc_size
+```math
+N_{\mathrm{running}}\le\mathrm{max\_running\_requests},\qquad N_{\mathrm{preallocated}}+N_{\mathrm{transfer}}\le\mathrm{pre\_alloc\_size}
 ```
 
 这也是 decode 侧和普通 Scheduler 最大的内存池差异之一：decode server 需要容纳“正在等 KV transfer 的请求”。

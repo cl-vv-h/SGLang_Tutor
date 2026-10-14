@@ -8,7 +8,7 @@ This topic covers the principles and serving of efficient fine-tuning methods: L
 
 | Method | Key Idea | Inference Impact |
 |---|---|---|
-| LoRA | Decomposes weight updates into low-rank matrices: `ΔW = B·A` with `B ∈ R^{d×r}`, `A ∈ R^{r×k}` | Adapter weights merged as `Wx + B(Ax)`, can be pre-merged or computed online |
+| LoRA | Decomposes weight updates into low-rank matrices: $`\text{ΔW}=B\cdot A`$ with `B ∈ R^{d×r}`, `A ∈ R^{r×k}` | Adapter weights merged as `Wx + B(Ax)`, can be pre-merged or computed online |
 | QLoRA | LoRA + NF4 quantization of base model weights | Base weights dequantized during forward, adapters kept in FP16/BF16 |
 | DoRA | Decomposes pre-trained weights into magnitude + direction; applies LoRA only to direction | Slightly different merge formula |
 | AdaLoRA | Adaptive rank allocation across weight matrices | Ranks vary per layer, harder to batch efficiently |

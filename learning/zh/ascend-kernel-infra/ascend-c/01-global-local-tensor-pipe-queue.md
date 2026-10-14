@@ -78,7 +78,7 @@ AscendC::DataCopy(xLocal, xGm[globalOffset], tileLength);
 AscendC::LocalTensor<half> xLocal = inQueue.AllocTensor<half>();
 ```
 
-左侧的 C++ 静态类型与 `AllocTensor<half>()` 的模板实参一致。`xLocal` 自身是轻量 view/handle，真实容量由 `pipe.InitBuffer(inQueue, bufferCount, bytesPerBuffer)` 事先分配。离开 C++ 作用域不等于 buffer 已归还；必须遵循 Queue 的 `FreeTensor` 生命周期。
+左侧的 C++ 静态类型与 $`\mathrm{AllocTensor} \lt \mathrm{half} \gt \left[\right]`$ 的模板实参一致。`xLocal` 自身是轻量 view/handle，真实容量由 `pipe.InitBuffer(inQueue, bufferCount, bytesPerBuffer)` 事先分配。离开 C++ 作用域不等于 buffer 已归还；必须遵循 Queue 的 `FreeTensor` 生命周期。
 
 LocalTensor 生命周期要和 buffer/queue 匹配：
 

@@ -6,7 +6,7 @@ SGLang's KV Cache is managed through two key pools:
 
 | Pool | Purpose | Shape Mapping |
 |---|---|---|
-| `req_to_token_pool` | Maps request slot → token slots | `[max_reqs, max_tokens_per_req]` |
+| `req_to_token_pool` | Maps request slot → token slots | $`\left[\mathrm{max\_reqs},\mathrm{max\_tokens\_per\_req}\right]`$ |
 | `token_to_kv_pool` | Maps token slot → KV cache memory | `[max_total_tokens, ...]` per layer |
 
 ## 2. Paged KV Cache

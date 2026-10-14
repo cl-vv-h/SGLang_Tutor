@@ -42,10 +42,16 @@ flowchart TB
 
 [MemFabricBoostrap::CreateSHMSpace()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/bootstrap/memory/memfabric/zbal_mem_mf_bootstrap.cpp#L85) 依次调用 `SmemShmInit()`、`SmemShmCreate()`、`SmemShmGetSymmetricSize()`，取得 GVA 基址和每个 rank 的对称地址跨度。源码计算可概括为：
 
+```math
+A=\mathrm{deviceGva}
+```
+
 ```text
-A = deviceGva
 S = symmetric address-space stride per world rank
-local_base(world_rank) = A + world_rank * S
+```
+
+```math
+\mathrm{local\_base}\left(\mathrm{world\_rank}\right) = A + \mathrm{world\_rank} \cdot  S
 ```
 
 `S` 是查询得到的地址空间跨度，不应直接拿某个 tensor 的长度或用户配置的已用字节量替代。
@@ -62,13 +68,19 @@ local_base(world_rank) = A + world_rank * S
 
 [zbal_ptr()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/operators/npu/device/common/zbal_kernel_utils.h#L88) 的核心地址换算是：
 
-```text
-remote_meta = local_meta + (world_dst - world_src) * S
-world_src = peerRanks[group_src]
-world_dst = peerRanks[group_dst]
+```math
+\mathrm{remote\_meta}=\mathrm{local\_meta}+\left(\mathrm{world\_dst}-\mathrm{world\_src}\right)\cdot S
 ```
 
-这个公式适用于通信协议中按同偏移布置的区域，例如 metadata。若 subgroup 成员是 world ranks `[1,3]`，从 group rank 0 找 group rank 1，应跨 `2*S`，不是 `1*S`。
+```math
+\mathrm{world\_src}={\mathrm{peerRanks}}_{\mathrm{group\_src}}
+```
+
+```math
+\mathrm{world\_dst}={\mathrm{peerRanks}}_{\mathrm{group\_dst}}
+```
+
+这个公式适用于通信协议中按同偏移布置的区域，例如 metadata。若 subgroup 成员是 world ranks $`\left[1,3\right]`$，从 group rank 0 找 group rank 1，应跨 $`2\cdot S`$，不是 $`1\cdot S`$。
 
 **业务 tensor 可以是非对称分配。**Normal dispatch 的 `PutShareAddr()/GetShareAddr()` 会发布和读取 `x`、`expandx_out` 等实际地址，而不是假设“对端结果 tensor 的偏移一定和本地一样”。对称 metadata 帮助找到地址表，地址表再帮助找到不同 rank 的实际 payload。
 
@@ -98,7 +110,7 @@ flowchart LR
 
 ### 4.1 Host 端直接把 tensor 的 data_ptr 交给算子
 
-连续输出接口的 [ProcessGroupZBAL::_allgather_base()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/adaptor/pytorch_npu/zbal_pytorch_process_group.cpp#L468) 检查 `output.numel = P * input.numel`，取得输入/输出 `data_ptr()`，调用 `zbal_all_gather()`。它的 post 回调为空。
+连续输出接口的 [ProcessGroupZBAL::_allgather_base()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/adaptor/pytorch_npu/zbal_pytorch_process_group.cpp#L468) 检查 $`\mathrm{output}.\mathrm{numel} = P \cdot  \mathrm{input}.\mathrm{numel}`$，取得输入/输出 `data_ptr()`，调用 `zbal_all_gather()`。它的 post 回调为空。
 
 ### 4.2 Device 端把结果 tensor 兼作 ring 数据传播区域
 
@@ -116,7 +128,7 @@ flowchart LR
 7. BarrierAll before completion
 ```
 
-例如两个 rank，输入均为 `[m]`、输出均为 `[2*m]`：
+例如两个 rank，输入均为 $`\left[m\right]`$、输出均为 $`\left[2\cdot m\right]`$：
 
 ```mermaid
 flowchart LR
@@ -155,11 +167,20 @@ flowchart LR
 
 kernel 的 [PutShareAddr/GetShareAddr](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/operators/npu/device/dispatch_combine_normal/zbal_kernel_dispatch_normal.h#L292) 交换各 rank 的输入、路由、offset、结果和 scale 地址。对直接发送分支 `InputToDstOutput()`，目的行的核心计算是：
 
-```text
-dst_rank = expert_id // experts_per_rank
-base_row = put_offset_flat[expert_id * P + src_rank]
-row = base_row + send_token_idx[token_assignment]
-dst_addr = shared_expandx_out_addr[dst_rank] + aligned_row_bytes * row
+```math
+\mathrm{dst\_rank}=\left\lfloor\frac{\mathrm{expert\_id}}{\mathrm{experts\_per\_rank}}\right\rfloor
+```
+
+```math
+\mathrm{base\_row}={\mathrm{put\_offset\_flat}}_{\mathrm{expert\_id}\cdot P+\mathrm{src\_rank}}
+```
+
+```math
+\mathrm{row}=\mathrm{base\_row}+{\mathrm{send\_token\_idx}}_{\mathrm{token\_assignment}}
+```
+
+```math
+\mathrm{dst\_addr}={\mathrm{shared\_expandx\_out\_addr}}_{\mathrm{dst\_rank}}+\mathrm{aligned\_row\_bytes}\cdot \mathrm{row}
 ```
 
 这里明确使用 kernel 的**扁平索引**；不要从 host 分配的二维 shape 自行推断另一套索引顺序。`aligned_row_bytes` 对应实现中的 `hUBAlignSize`，不能忽略对齐。
@@ -219,7 +240,7 @@ SGLang 的 [init_zbal()/lazy_init_zbal_gva_mem()](../../../../python/sglang/srt/
 
 所以“权重/KV 走 DMA/VMM、激活走 GVA”是**通过分配时机实现的预期用法**，不是分配器识别出 tensor 的语义标签。初始化后再创建的其他 tensor 也受当前分配路径影响。
 
-当前 SGLang helper 还包含 `total_memory = 61.2` 的估算、预算扣减与 128 MiB 对齐。这是实现基线里的平台假设，不是任意 NPU 都应照抄的容量参数。`SGLANG_ZBAL_LOCAL_MEM_SIZE` 对应内存预算，不是要求另外保留同样大小的 send/recv staging。
+当前 SGLang helper 还包含 $`\mathrm{total\_memory}=61.2`$ 的估算、预算扣减与 128 MiB 对齐。这是实现基线里的平台假设，不是任意 NPU 都应照抄的容量参数。`SGLANG_ZBAL_LOCAL_MEM_SIZE` 对应内存预算，不是要求另外保留同样大小的 send/recv staging。
 
 ## 8. 从源码确认仍然存在的内存、复制与同步
 

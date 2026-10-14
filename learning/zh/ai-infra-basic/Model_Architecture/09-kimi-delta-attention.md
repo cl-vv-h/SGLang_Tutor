@@ -6,13 +6,16 @@
 
 Softmax Attention 把每个历史 `(k_s,v_s)` 原样保留，查询时再逐个比较；KDA 则把历史写入一个矩阵 `M`。对一个 head：
 
+```math
+\mathrm{shape}\left(M\right)=\left[\mathrm{Dv},\mathrm{Dk}\right]
+```
+
 ```text
-M: [Dv,Dk]
 写入：v outer k -> [Dv,1] @ [1,Dk] = [Dv,Dk]
 读取：M @ q     -> [Dv,Dk] @ [Dk]   = [Dv]
 ```
 
-外积 `v k^T` 可以直观理解为：“当查询方向接近 `k` 时，读出 `v`”。但不同 token 的 key 方向会重叠，朴素相加会不断积累冲突。Delta rule 先读出旧预测 `v_hat=Mk`，只把误差 `v-v_hat` 写回；KDA 又在写入前让不同 key 通道按各自的 `alpha[c]` 遗忘。
+外积 `v k^T` 可以直观理解为：“当查询方向接近 `k` 时，读出 `v`”。但不同 token 的 key 方向会重叠，朴素相加会不断积累冲突。Delta rule 先读出旧预测 $`v_{\mathrm{hat}}=\mathrm{Mk}`$，只把误差 `v-v_hat` 写回；KDA 又在写入前让不同 key 通道按各自的 `alpha[c]` 遗忘。
 
 ```mermaid
 flowchart LR
@@ -36,34 +39,57 @@ flowchart LR
 
 对每个 request、layer、head，状态更新严格按以下顺序：
 
-```text
-1. 遗忘：M_decay[:,c] = alpha[c] * M_prev[:,c]
-2. 预测：v_hat = M_decay @ k
-3. 纠错：M_new = M_decay + beta * (v-v_hat) outer k
-4. 读取：o = M_new @ (q/sqrt(Dk))
+1. 遗忘
+
+```math
+M_{\mathrm{decay}}=M_{\mathrm{prev}}\mathrm{Diag}(\alpha)
 ```
 
-若交换顺序，函数会改变。例如用 `M_prev @ k` 而不是 `M_decay @ k` 计算预测，等于用“遗忘前的记忆”决定纠错量；这不是等价优化。
+2. 预测
+
+```math
+\widehat v=M_{\mathrm{decay}}k
+```
+
+3. 纠错
+
+```math
+M_{\mathrm{new}}=M_{\mathrm{decay}}+\beta(v-\widehat v)k^{\mathsf T}
+```
+
+4. 读取
+
+```math
+o=M_{\mathrm{new}}\frac{q}{\sqrt{D_k}}
+```
+
+若交换顺序，函数会改变。例如用 $`M_{\mathrm{prev}}\,k`$ 而不是 $`M_{\mathrm{decay}}\,k`$ 计算预测，等于用“遗忘前的记忆”决定纠错量；这不是等价优化。
 
 ### 贯穿全文的 Shape 例子
 
-```text
-B=8, decode 时 T=B=8
-Hmodel=4096, Hk=16, Dk=128, Dv=128
-短卷积宽度 C=4
+```math
+B=8, \mathrm{decode} \text{时} T=B=8
+```
+
+```math
+\mathrm{Hmodel}=4096,\qquad \mathrm{Hk}=16,\qquad \mathrm{Dk}=128,\qquad \mathrm{Dv}=128
+```
+
+```math
+\text{短卷积宽度 C}=4
 ```
 
 | 阶段 | Tensor | Shape | 跨 step 保留？ |
 |---|---|---:|---|
-| 输入 | `X` | `[8,4096]` | 否 |
-| Q/K | `q,k` | `[8,16,128]` | 否 |
-| V/输出门 | `v,z` | `[8,16,128]` | 否 |
-| 遗忘门 | `alpha` | `[8,16,128]` | 否 |
-| 写入门 | `beta` | `[8,16]` | 否 |
-| 卷积尾部 | `conv_state` | `[slots,16*(128+128+128),3]` | **是** |
-| 递归矩阵 | `M` | `[slots,16,128,128]` | **是** |
-| 主核输出 | `Ocore` | `[8,16,128]` | 否 |
-| 层输出 | `O` | `[8,4096]` | 否 |
+| 输入 | `X` | $`\left[8,4096\right]`$ | 否 |
+| Q/K | `q,k` | $`\left[8,16,128\right]`$ | 否 |
+| V/输出门 | `v,z` | $`\left[8,16,128\right]`$ | 否 |
+| 遗忘门 | `alpha` | $`\left[8,16,128\right]`$ | 否 |
+| 写入门 | `beta` | $`\left[8,16\right]`$ | 否 |
+| 卷积尾部 | `conv_state` | $`\left[\mathrm{slots},16\cdot \left(128+128+128\right),3\right]`$ | **是** |
+| 递归矩阵 | `M` | $`\left[\mathrm{slots},16,128,128\right]`$ | **是** |
+| 主核输出 | `Ocore` | $`\left[8,16,128\right]`$ | 否 |
+| 层输出 | `O` | $`\left[8,4096\right]`$ | 否 |
 
 这里 `slots` 不是 batch size，而是状态池容量。`cache_indices [8]` 把本轮第 `b` 行映射到某个 request slot。连续批处理中 batch 行会变化，slot 身份必须稳定。
 
@@ -96,15 +122,14 @@ Kimi Delta Attention（KDA）是 Kimi Linear 中的递归线性注意力组件�
 
 普通因果注意力保存过去的 key 和 value：
 
-```text
-o_t = softmax(q_t K_{<=t}^T) V_{<=t}
+```math
+o_t=\mathrm{softmax}\left(q_tK_{\le t}^{\mathsf T}\right)V_{\le t}
 ```
 
 其缓存随序列长度增长。线性注意力则用矩阵概括历史。采用便于实现的矩阵方向：
 
-```text
-M_t in R[d_v, d_k]
-o_t = M_t q_t
+```math
+M_t\in\mathbb{R}^{d_v\times d_k},\qquad o_t=M_tq_t
 ```
 
 状态大小取决于 head 维度，而不取决于已经处理的 token 数量。
@@ -113,16 +138,22 @@ o_t = M_t q_t
 
 朴素的累加状态会不断写入外积：
 
-```text
-M_t = M_{t-1} + v_t outer k_t
+```math
+M_{t}={M}_{t-1}+v_{t}\,{k_{t}}^{\mathsf T}
 ```
 
 这种写法难以正确覆盖旧信息，因为新 key 可能和状态中已经存储的相近方向发生冲突。Delta rule 先询问当前状态对 `k_t` 的预测，再只写入残差：
 
-```text
-v_hat_t = M_{t-1} k_t
-r_t = v_t - v_hat_t
-M_t = M_{t-1} + beta_t * (r_t outer k_t)
+```math
+\mathrm{v\_hat\_t} = M_{t-1} k_{t}
+```
+
+```math
+r_{t}=v_{t}-\mathrm{v\_hat\_t}
+```
+
+```math
+M_{t}={M}_{t-1}+\beta_{t}\cdot r_{t}\,{k_{t}}^{\mathsf T}
 ```
 
 `beta_t` 控制写入强度。
@@ -151,30 +182,50 @@ GDN 在 delta 更新前加入衰减，但其衰减门对每个 token、每个 he
 - `M_t in R[d_v, d_k]`：递归状态；
 - `o_t in R[d_v]`：归一化与输出门之前的输出。
 
-对一批 token，实现通常把张量排布为 `[T, H, D]`；递归状态由每个 request、layer 与 KV head 独立持有。
+对一批 token，实现通常把张量排布为 $`\left[T,H,D\right]`$；递归状态由每个 request、layer 与 KV head 独立持有。
 
 ## 5. KDA 递归公式
 
 采用 SGLang 便于存储的状态方向，计算步骤为：
 
-```text
-g_t       = -exp(A_log) * softplus(a_t + dt_bias)
-alpha_t   = exp(g_t)
-M_decay   = M_{t-1} * alpha_t[None, :]
-v_hat_t   = M_decay k_t
-r_t       = v_t - v_hat_t
-M_t       = M_decay + beta_t * (r_t outer k_t)
-o_t       = M_t (q_t / sqrt(d_k))
+```math
+g_{t}=-\mathrm{exp}\left(A_{\mathrm{log}}\right)\cdot \mathrm{softplus}\left(a_{t}+\mathrm{dt\_bias}\right)
 ```
 
-由于 `g_t <= 0`，`alpha_t` 位于 `(0, 1]`。`M` 的每一列都会获得不同的保留因子。
+```math
+\alpha_{t}=\mathrm{exp}\left(g_{t}\right)
+```
+
+```math
+M_{\mathrm{decay}}=M_{t-1}\mathrm{Diag}(\alpha_t)
+```
+
+```math
+\widehat{v}_t=M_{\mathrm{decay}}k_t
+```
+
+```math
+r_{t}=v_{t}-\mathrm{v\_hat\_t}
+```
+
+```math
+M_{t}=M_{\mathrm{decay}}+\beta_{t}\cdot r_{t}\,{k_{t}}^{\mathsf T}
+```
+
+```math
+o_{t}=M_{t}\left(\frac{q_{t}}{\sqrt{d_{k}}}\right)
+```
+
+由于 $`g_{t} \le 0`$，`alpha_t` 位于 `(0, 1]`。`M` 的每一列都会获得不同的保留因子。
 
 KDA 技术报告使用转置后的方向 `S_t in R[d_k, d_v]`：
 
-```text
-S_t = (I - beta_t k_t k_t^T) Diag(alpha_t) S_{t-1}
-      + beta_t k_t v_t^T
-o_t = S_t^T q_t
+```math
+S_{t} = \left(I - \beta_{t} k_{t} k_{t}^{\mathsf T}\right) \mathrm{Diag}\left(\alpha_{t}\right) S_{t-1} + \beta_{t} k_{t} v_{t}^{\mathsf T}
+```
+
+```math
+o_{t} = S_{t}^{\mathsf T} q_{t}
 ```
 
 两种形式转置后等价。比较代码与公式之前，必须先确认状态矩阵的方向。
@@ -185,28 +236,26 @@ o_t = S_t^T q_t
 
 从技术报告的 `S[d_k,d_v]` 公式开始：
 
-```text
-S_t = (I - beta k k^T) Diag(alpha) S_prev + beta k v^T
+```math
+S_{t} = \left(I - \beta k k^{\mathsf T}\right) \mathrm{Diag}\left(\alpha\right) S_{\mathrm{prev}} + \beta k v^{\mathsf T}
 ```
 
 对每个因子转置，并反转乘法顺序：
 
-```text
-M_t = S_t^T
-    = M_prev Diag(alpha) (I - beta k k^T) + beta v k^T
+```math
+M_{t} = S_{t}^{\mathsf T} = M_{\mathrm{prev}} \mathrm{Diag}\left(\alpha\right) \left(I - \beta k k^{\mathsf T}\right) + \beta v k^{\mathsf T}
 ```
 
 定义逐列衰减后的状态：
 
-```text
-M_decay = M_prev Diag(alpha)
+```math
+M_{\mathrm{decay}} = M_{\mathrm{prev}} \mathrm{Diag}\left(\alpha\right)
 ```
 
 展开可得：
 
-```text
-M_t = M_decay - beta (M_decay k) k^T + beta v k^T
-    = M_decay + beta (v - M_decay k) k^T
+```math
+M_{t} = M_{\mathrm{decay}} - \beta \left(M_{\mathrm{decay}} k\right) k^{\mathsf T} + \beta v k^{\mathsf T} = M_{\mathrm{decay}} + \beta \left(v - M_{\mathrm{decay}} k\right) k^{\mathsf T}
 ```
 
 这正是便于存储的“衰减 → 预测 → 残差 → 外积更新”顺序。改变矩阵方向没有引入近似。
@@ -215,15 +264,18 @@ M_t = M_decay - beta (M_decay k) k^T + beta v k^T
 
 对 value 行 `r` 与 key 列 `c`：
 
-```text
-M_decay[r,c] = M_prev[r,c] * alpha[c]
-M_t[r,c] = M_decay[r,c] + beta * residual[r] * k[c]
+```math
+{M_{\mathrm{decay}}}_{r,c}={M_{\mathrm{prev}}}_{r,c}\cdot {\alpha}_{c}
+```
+
+```math
+{M_{t}}_{r,c}={M_{\mathrm{decay}}}_{r,c}+\beta\cdot {\mathrm{residual}}_{r}\cdot {k}_{c}
 ```
 
 因此 KDA 有两个独立控制轴：
 
 - `alpha[c]` 决定历史 key 特征 `c` 保留多少；
-- `residual[r] * k[c]` 决定当前 token 如何改变矩阵单元 `(r,c)`。
+- $`{\mathrm{residual}}_{r}\cdot {k}_{c}`$ 决定当前 token 如何改变矩阵单元 `(r,c)`。
 
 GDN 的标量 `alpha` 无法为不同列选择不同生命周期。
 
@@ -249,8 +301,8 @@ hidden states
 
 设 `Hk` 为 KDA head 数，`Dk` 为 q/k head 宽度，`Dv` 为 value 宽度，`C` 为短卷积 kernel size。从 packed hidden states 开始：
 
-```text
-X: [T,Hmodel]
+```math
+\mathrm{shape}\left(X\right)=\left[T,\mathrm{Hmodel}\right]
 ```
 
 逻辑投影输出为：
@@ -266,10 +318,16 @@ output_gate:  [T,Hk*Dv]  -> z [T,Hk,Dv]
 
 源码中的 forget gate 与 output gate 使用分解投影。以 forget 路径为例：
 
-```text
-f_a = X @ Wfa^T:       [T,Dk]
-a_flat = f_a @ Wfb^T:  [T,Hk*Dk]
-a = reshape(a_flat):   [T,Hk,Dk]
+```math
+f_{a} = X \, \mathrm{Wfa}^{\mathsf T}: \left[T,\mathrm{Dk}\right]
+```
+
+```math
+a_{\mathrm{flat}} = f_{a} \, \mathrm{Wfb}^{\mathsf T}: \left[T,\mathrm{Hk}\cdot \mathrm{Dk}\right]
+```
+
+```math
+a = \mathrm{reshape}\left(a_{\mathrm{flat}}\right): \left[T,\mathrm{Hk},\mathrm{Dk}\right]
 ```
 
 这样可以减少投影成本，同时仍为每个 token、head 与 key 通道产生一个遗忘激活。融合投影可以一次生成 q/k/v、`beta` 与低秩 gate 中间量，但逻辑张量不变。
@@ -296,20 +354,41 @@ Prefill 对每条 packed 序列执行因果卷积。Decode 使用旧的 `C-1` �
 
 ```text
 q/k:       [1,T,Hk,Dk]
-v:         [1,T,Hk,Dv]
-a:         [1,T,Hk,Dk]
-beta:      [1,T,Hk]
+```
+
+```math
+\mathrm{shape}\left(v\right)=\left[1,T,\mathrm{Hk},\mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(a\right)=\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]
+```
+
+```math
+\mathrm{shape}\left(\beta\right)=\left[1,T,\mathrm{Hk}\right]
+```
+
+```text
 state pool:[slots,Hk,Dv,Dk]
 core out:  [1,T,Hk,Dv]
 ```
 
-输出门与归一化保持 `[T,Hk,Dv]`，随后展平并投影：
+输出门与归一化保持 $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$，随后展平并投影：
 
-```text
-gated: [T,Hk,Dv]
-flat:  [T,Hk*Dv]
-Wout:  [Hmodel,Hk*Dv]
-out:   [T,Hmodel]
+```math
+\mathrm{shape}\left(\mathrm{gated}\right)=\left[T,\mathrm{Hk},\mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{flat}\right)=\left[T,\mathrm{Hk}\cdot \mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Wout}\right)=\left[\mathrm{Hmodel},\mathrm{Hk}\cdot \mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{out}\right)=\left[T,\mathrm{Hmodel}\right]
 ```
 
 ## 7. 内存与计算复杂度
@@ -321,7 +400,7 @@ KDA 状态：H_kv * d_v * d_k 个元素
 卷积状态：projected_channels * (kernel_size - 1) 个元素
 ```
 
-它与序列长度无关。每 token 的递归工作量为 `O(H_kv * d_v * d_k)`，而不是扫描所有历史 token。
+它与序列长度无关。每 token 的递归工作量为 $`O\left(H_{\mathrm{kv}}\cdot d_{v}\cdot d_{k}\right)`$，而不是扫描所有历史 token。
 
 这并不代表 KDA 会自动变快。状态矩阵可能很大，性能取决于能否让它在片上停留足够久、把逐元素门控与矩阵/向量运算融合，以及避免大量微小 kernel launch。
 
@@ -461,33 +540,42 @@ KDA head 可以在张量并行 rank 间划分。每个 rank 持有本地 Q/K/V �
 
 | 阶段 | 张量 | 逻辑 shape | 是否持久化 |
 |---|---|---:|---|
-| Layer 输入 | `X` | `[T,Hmodel]` | 否 |
-| Q/K 投影 | `q/k` | `[T,Hk,Dk]` | 否 |
-| V 投影 | `v` | `[T,Hk,Dv]` | 否 |
-| 写入门激活 | `beta_raw` | `[T,Hk]` | 否 |
-| 遗忘激活 | `a` | `[T,Hk,Dk]` | 否 |
-| 输出门激活 | `z` | `[T,Hk,Dv]` | 否 |
+| Layer 输入 | `X` | $`\left[T,\mathrm{Hmodel}\right]`$ | 否 |
+| Q/K 投影 | `q/k` | $`\left[T,\mathrm{Hk},\mathrm{Dk}\right]`$ | 否 |
+| V 投影 | `v` | $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$ | 否 |
+| 写入门激活 | `beta_raw` | $`\left[T,\mathrm{Hk}\right]`$ | 否 |
+| 遗忘激活 | `a` | $`\left[T,\mathrm{Hk},\mathrm{Dk}\right]`$ | 否 |
+| 输出门激活 | `z` | $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$ | 否 |
 | Packed conv 输入 | `mixed_qkv` | `[T,Hk*(2Dk+Dv)]` | 否 |
 | 卷积缓存 | `conv_state` | `[slots,Hk*(2Dk+Dv),C-1]` | 是 |
-| 保留率 log | `g` | `[1,T,Hk,Dk]` | 否，可被融合 |
-| 保留率 | `alpha=exp(g)` | `[1,T,Hk,Dk]` | 否，可被融合 |
-| Delta gate | `beta` | `[1,T,Hk]` | 否，可被融合 |
-| 递归缓存 | `M` | `[slots,Hk,Dv,Dk]` | 是 |
-| 主核输出 | `Ocore` | `[1,T,Hk,Dv]` | 否 |
-| 门控/归一化输出 | `Onorm` | `[T,Hk,Dv]` | 否 |
-| Layer 输出 | `O` | `[T,Hmodel]` | 否 |
+| 保留率 log | `g` | $`\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]`$ | 否，可被融合 |
+| 保留率 | $`\alpha=\mathrm{exp}\left(g\right)`$ | $`\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]`$ | 否，可被融合 |
+| Delta gate | `beta` | $`\left[1,T,\mathrm{Hk}\right]`$ | 否，可被融合 |
+| 递归缓存 | `M` | $`\left[\mathrm{slots},\mathrm{Hk},\mathrm{Dv},\mathrm{Dk}\right]`$ | 是 |
+| 主核输出 | `Ocore` | $`\left[1,T,\mathrm{Hk},\mathrm{Dv}\right]`$ | 否 |
+| 门控/归一化输出 | `Onorm` | $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$ | 否 |
+| Layer 输出 | `O` | $`\left[T,\mathrm{Hmodel}\right]`$ | 否 |
 
-Decode 时 `T=B`，`cache_indices [B]` 把第 `b` 行映射到持久 slot。Packed prefill 时，`query_start_loc [R+1]` 标识 `R` 个 request 各自的 token 区间。
+Decode 时 $`T=B`$，`cache_indices [B]` 把第 `b` 行映射到持久 slot。Packed prefill 时，`query_start_loc [R+1]` 标识 `R` 个 request 各自的 token 区间。
 
 ## 19. 为什么 Prefill 需要 Chunk 代数
 
 递归具有因果依赖：
 
+```math
+M_{1}=F\left(M_{0},\mathrm{token\_1}\right)
+```
+
+```math
+M_{2}=F\left(M_{1},\mathrm{token\_2}\right)
+```
+
 ```text
-M_1 = F(M_0, token_1)
-M_2 = F(M_1, token_2)
 ...
-M_L = F(M_(L-1), token_L)
+```
+
+```math
+M_{L}=F\left({M}_{L-1},\mathrm{token\_L}\right)
 ```
 
 直接循环会启动或执行 `L` 个相互依赖的小更新。Chunk 算法保留 chunk 之间的依赖，同时暴露 chunk 内矩阵计算：
@@ -509,69 +597,87 @@ chunk_final_state == recurrent_reference_final_state
 
 ## 20. 数值更新实例
 
-设 `Dk=Dv=2`：
+设 $`\mathrm{Dk}=\mathrm{Dv}=2`$：
 
-```text
-M_prev = [[ 1.0, 0.5],
-          [-0.5, 1.0]]
-alpha  = [0.8, 0.25]
-k      = [0.6, 0.8]
-v      = [1.0,-0.5]
-beta   = 0.5
-q      = [0.8, 0.6]
+```math
+M_{\mathrm{prev}}=\left[\left[1.0,0.5\right],\left[-0.5,1.0\right]\right]
+```
+
+```math
+\alpha=\left[0.8,0.25\right]
+```
+
+```math
+k=\left[0.6,0.8\right]
+```
+
+```math
+v=\left[1.0,-0.5\right]
+```
+
+```math
+\beta=0.5
+```
+
+```math
+q=\left[0.8,0.6\right]
 ```
 
 逐列衰减：
 
-```text
-M_decay = [[ 0.8, 0.125],
-           [-0.4, 0.250]]
+```math
+M_{\mathrm{decay}}=\left[\left[0.8,0.125\right],\left[-0.4,0.25\right]\right]
 ```
 
 预测与残差：
 
-```text
-v_hat = M_decay @ k = [0.58,-0.04]
-r = v - v_hat       = [0.42,-0.46]
+```math
+v_{\mathrm{hat}}=M_{\mathrm{decay}}\,k=\left[0.58,-0.04\right]
+```
+
+```math
+r=v-v_{\mathrm{hat}}=\left[0.42,-0.46\right]
 ```
 
 Delta 与新状态：
 
-```text
-beta * (r outer k)
-  = [[ 0.126, 0.168],
-     [-0.138,-0.184]]
+```math
+\beta\cdot r\,{k}^{\mathsf T}=\left[\left[0.126,0.168\right],\left[-0.138,-0.184\right]\right]
+```
 
-M = [[ 0.926, 0.293],
-     [-0.538, 0.066]]
+```math
+M=\left[\left[0.926,0.293\right],\left[-0.538,0.066\right]\right]
 ```
 
 在后续输出门/归一化之前读出：
 
-```text
-o = M @ (q / sqrt(2)) ≈ [0.648,-0.276]
+```math
+o=M\,\frac{q}{\sqrt{2}}\approx \left[0.648,-0.276\right]
 ```
 
 这个例子清楚展示了两个动作：旧状态列按不同因子缩小，然后用一个 rank-one 矩阵写入预测误差。
 
 ## 21. 内存与带宽实例
 
-当 `Hk=32`、`Dk=Dv=128`：
+当 $`\mathrm{Hk}=32`$、$`\mathrm{Dk}=\mathrm{Dv}=128`$：
 
-```text
-每 request/layer 状态元素数 = 32 * 128 * 128 = 524,288
-BF16 状态容量               = 1 MiB/request/layer
+```math
+\text{每 request/layer 状态元素数}= 32 \cdot  128 \cdot  128 = 524,288
 ```
 
-当 `B=64` 时，一层拥有 64 MiB 活跃状态容量。朴素 decode 若为衰减、预测、更新与输出分别读写完整矩阵，会把流量放大多次。融合递归 kernel 的目标是读入一个状态 tile，完成全部计算，再只写回一次。
+```math
+\text{BF16 状态容量}= 1 \mathrm{MiB}/\mathrm{request}/\mathrm{layer}
+```
+
+当 $`B=64`$ 时，一层拥有 64 MiB 活跃状态容量。朴素 decode 若为衰减、预测、更新与输出分别读写完整矩阵，会把流量放大多次。融合递归 kernel 的目标是读入一个状态 tile，完成全部计算，再只写回一次。
 
 状态大小不随序列长度变化，但不代表状态本身很小。可以和 KV layer 比较交叉长度：
 
-```text
-L_cross * Nkv * (Dk + Dv) = Hk * Dv * Dk
+```math
+L_{\mathrm{cross}}\cdot \mathrm{Nkv}\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)=\mathrm{Hk}\cdot \mathrm{Dv}\cdot \mathrm{Dk}
 ```
 
-当 `Nkv=Hk` 且 `Dk=Dv=128` 时，按元素数计算的 `L_cross=64` token。长上下文优势来自不再继续线性增长；实际字节数取决于 KV/state dtype 与混合层数量。
+当 $`\mathrm{Nkv}=\mathrm{Hk}`$ 且 $`\mathrm{Dk}=\mathrm{Dv}=128`$ 时，按元素数计算的 $`L_{\mathrm{cross}}=64`$ token。长上下文优势来自不再继续线性增长；实际字节数取决于 KV/state dtype 与混合层数量。
 
 ## 22. 递归参考伪代码
 
@@ -614,7 +720,7 @@ def kda_step(M, q, k, v, a, beta_raw, A_log, dt_bias):
 练习：
 
 1. 从报告的 `S[d_k,d_v]` 形式开始，逐步转置得到 `M[d_v,d_k]`。
-2. 对 `Hk=16`、`Dk=128`、`Dv=128`，计算 BF16 与 FP32 状态字节数。
+2. 对 $`\mathrm{Hk}=16`$、$`\mathrm{Dk}=128`$、$`\mathrm{Dv}=128`$，计算 BF16 与 FP32 状态字节数。
 3. 展开两个 KDA step，指出 token 1 在何处影响 token 2 的输出。
 4. 解释为什么保存 `M` 但不保存卷积尾部，无法复现下一个 token。
 5. 为 draft length 4 设计推测状态 checkpoint，并避免复制无关 request 的整个状态池。

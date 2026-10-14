@@ -43,21 +43,29 @@ LLM 每生成下一个 token 前，模型会输出一行或多行 `logits`。`lo
 
 **token id**，也叫 vocabulary index，是 tokenizer 把文本切成 token 后得到的整数编号，范围通常是 `[0, vocab_size)`。例如词表大小是 32000，那么 token id 可能是 0、1、2、……、31999。
 
-`bitmask` 没有为每个 token id 存一个完整 `bool` 或 `int32`，而是把 32 个 token 的许可状态打包进一个 `INT32`。源码里用常量 `BITS_PER_INT32 = 32` 表达这个协议。
+`bitmask` 没有为每个 token id 存一个完整 `bool` 或 `int32`，而是把 32 个 token 的许可状态打包进一个 `INT32`。源码里用常量 $`\mathrm{BITS\_PER\_INT32}=32`$ 表达这个协议。
 
 对第 `b` 行、第 `token_id` 个词表位置：
 
-```text
-word_id = token_id / 32
-bit_id  = token_id % 32
+```math
+\mathrm{word\_id}=\left\lfloor\frac{\mathrm{token\_id}}{32}\right\rfloor
+```
 
-packed  = bitmask[b, word_id]
+```math
+\mathrm{bit\_id}=\mathrm{token\_id}\bmod 32
+```
+
+```math
+\mathrm{packed}={\mathrm{bitmask}}_{b,\mathrm{word\_id}}
+```
+
+```text
 allowed = ((packed >> bit_id) & 1) == 1
 ```
 
-举一个很小的例子，假设 `vocab_size=10`，那么每行只需要 `ceil(10/32)=1` 个 `INT32`。如果第 0 行只允许 token `{2, 5, 9}`，那么这个 `INT32` 的第 2、5、9 个 bit 是 1，其他 bit 是 0。kernel 遍历 logits 的时候，发现 bit=0 就把对应 logit 写成 `-inf`。
+举一个很小的例子，假设 $`\mathrm{vocab\_size}=10`$，那么每行只需要 $`\mathrm{ceil}\left(\frac{10}{32}\right)=1`$ 个 `INT32`。如果第 0 行只允许 token $`\{2,5,9\}`$，那么这个 `INT32` 的第 2、5、9 个 bit 是 1，其他 bit 是 0。kernel 遍历 logits 的时候，发现 $`\mathrm{bit}=0`$ 就把对应 logit 写成 `-inf`。
 
-这也是为什么 Device 侧 CopyIn 里 bitmask 的偏移是 `vocabOffset / 32`：logits 的偏移单位是“一个 token 位置”，bitmask 的偏移单位却是“一个 packed INT32 word”，两者不是同一个物理元素单位。
+这也是为什么 Device 侧 CopyIn 里 bitmask 的偏移是 $`\frac{\mathrm{vocabOffset}}{32}`$：logits 的偏移单位是“一个 token 位置”，bitmask 的偏移单位却是“一个 packed INT32 word”，两者不是同一个物理元素单位。
 
 ### 1.3 `indices` 是什么：这里是 batch 行号，不是 token id
 
@@ -66,7 +74,7 @@ AI 推理代码里经常出现 `indices`，它的字面意思只是“索引”�
 | 场景 | `indices` 可能表示什么 |
 |---|---|
 | tokenizer / embedding | token id，表示去 embedding 表里取第几个词表项 |
-| top-k | 候选 token 的词表下标，例如 `topk_idx=[13, 502, 998]` |
+| top-k | 候选 token 的词表下标，例如 $`\mathrm{topk\_idx}=\left[13,502,998\right]`$ |
 | KV Cache | cache slot 或 block id，表示读写 KV cache 的位置 |
 | MoE | expert id，表示 token 被路由到哪个专家 |
 | gather/scatter | 行号、列号或任意维度的位置 |
@@ -76,10 +84,16 @@ AI 推理代码里经常出现 `indices`，它的字面意思只是“索引”�
 
 例如：
 
-```text
-logits.shape = [4, vocab_size]
-batch 行号    = 0, 1, 2, 3
-indices      = [1, 3]
+```math
+\mathrm{logits}.\mathrm{shape} = \left[4, \mathrm{vocab\_size}\right]
+```
+
+```math
+\text{batch 行号}= 0, 1, 2, 3
+```
+
+```math
+\mathrm{indices}=\left[1,3\right]
 ```
 
 含义是：只对第 1 行和第 3 行应用 bitmask，第 0 行和第 2 行不处理。Host 会先把 `logits[indices]` 和 `bitmask[indices]` gather 成一个较小的连续 tensor，kernel 只处理这个小 tensor；kernel 完成后，Host 再把结果 scatter 回原 `logits` 的第 1、3 行。
@@ -133,9 +147,21 @@ apply_token_bitmask(Tensor logits, Tensor bitmask, Tensor? indices=None) -> Tens
 ```text
 hasIndices      = indices 存在、defined 且 numel > 0
 rowIndices      = indices -> int64 -> contiguous
-selectedBitmask = bitmask.index({rowIndices}).contiguous()
-selectedLogits  = logits.index({rowIndices})
-result          = 对 selectedLogits / selectedBitmask 启动 NPU kernel
+```
+
+```math
+\mathrm{selectedBitmask} = \mathrm{bitmask}.\mathrm{index}\left({\mathrm{rowIndices}}\right).\mathrm{contiguous}\left(\right)
+```
+
+```math
+\mathrm{selectedLogits} = \mathrm{logits}.\mathrm{index}\left({\mathrm{rowIndices}}\right)
+```
+
+```math
+\mathrm{result} = \text{对} \mathrm{selectedLogits} / \mathrm{selectedBitmask} \text{启动} \mathrm{NPU} \mathrm{kernel}
+```
+
+```text
 logits.index_put_({rowIndices}, result)
 ```
 
@@ -145,8 +171,8 @@ logits.index_put_({rowIndices}, result)
 |---|---|---|
 | `indices` | `c10::optional<at::Tensor>` | Python 传入的可选索引张量；可能为空 |
 | `rowIndices` | `at::Tensor`，1D，`int64` | Host 规范化后的 batch 行号 |
-| `selectedBitmask` | `at::Tensor`，`[num_indices, padded_bitmask_width]` 或原 bitmask view/contiguous tensor | 被选中的 bitmask 行 |
-| `selectedLogits` | `at::Tensor`，`[num_indices, padded_vocab_size]` 或原 logits view/contiguous tensor | 被选中的 logits 行 |
+| `selectedBitmask` | `at::Tensor`，$`\left[\mathrm{num\_indices},\mathrm{padded\_bitmask\_width}\right]`$ 或原 bitmask view/contiguous tensor | 被选中的 bitmask 行 |
+| `selectedLogits` | `at::Tensor`，$`\left[\mathrm{num\_indices},\mathrm{padded\_vocab\_size}\right]`$ 或原 logits view/contiguous tensor | 被选中的 logits 行 |
 | `numIndices` | `int64_t` | 实际需要处理的行数；没有 indices 时等于 batch |
 | `result` | `at::Tensor` | kernel 修改后的选中行结果 |
 
@@ -177,17 +203,25 @@ bitmask：256 bits = 8 × int32 = 32B
 
 Host 查询 AIV 核数：
 
-```text
-coreNum = GetCoreNumAiv()
-blockDim = min(numRows, coreNum)
+```math
+\mathrm{coreNum} = \mathrm{GetCoreNumAiv}\left(\right)
+```
+
+```math
+\mathrm{blockDim}=\mathrm{min}\left(\mathrm{numRows},\mathrm{coreNum}\right)
 ```
 
 行数多于核数时，均匀分配：
 
-```text
-baseRows = numRows // blockDim
-extraCores = numRows % blockDim
+```math
+\mathrm{baseRows}=\left\lfloor\frac{\mathrm{numRows}}{\mathrm{blockDim}}\right\rfloor
+```
 
+```math
+\mathrm{extraCores}=\mathrm{numRows}\bmod \mathrm{blockDim}
+```
+
+```text
 前 extraCores 个核：baseRows + 1 行
 其他核：baseRows 行
 ```
@@ -261,7 +295,7 @@ AscendC::DataCopy(bitmaskLocal, bitmaskGm[bitmaskGmOffset], alignedBitmaskElems)
 inQueueBitmask.EnQue(bitmaskLocal);
 ```
 
-Bitmask offset 使用 `vocabOffset / 32`，长度使用 `ceil(curTileLen/32)` 并向 8 个 INT32 对齐，即 32 字节。
+Bitmask offset 使用 $`\frac{\mathrm{vocabOffset}}{32}`$，长度使用 `ceil(curTileLen/32)` 并向 8 个 INT32 对齐，即 32 字节。
 
 `batchId/vocabOffset/curTileLen/logitsGmOffset/bitmaskGmOffset/bitmaskElems/alignedBitmaskElems` 都是 Device Scalar 的 `uint32_t`。其中 logits offset/length 的单位是 `T` 元素，bitmask offset/length 的单位是 `int32_t` word；`logitsLocal` 是 `LocalTensor<T>`，`bitmaskLocal` 是 `LocalTensor<int32_t>`。`AllocTensor` 与 `global[offset]` 只取得 view，两个 `DataCopy` 才是真实 GM→local 搬运。
 
@@ -357,9 +391,9 @@ Reference 不需要快，它需要简单、独立、容易审查。
 
 这些问题的最终答案依赖硬件、shape 和 CANN 版本，但并不意味着只能留下问号。下面先给出源码静态分析能确定的机制，再说明需要怎样测量。
 
-### 1. `numRows < coreNum` 时，仅按行分核是否让大 vocab 单行缺少并行？
+### 1. $`\mathrm{numRows} \lt \mathrm{coreNum}`$ 时，仅按行分核是否让大 vocab 单行缺少并行？
 
-**分析答案：**会限制可用的核间并行度。当前 `blockDim=min(numRows,coreNum)`，每个 block 负责完整的一行；若只有 1 行，即使 vocab 很大，也只启动 1 个 block，再由该核沿 vocab 方向串行处理多个 tile。
+**分析答案：**会限制可用的核间并行度。当前 $`\mathrm{blockDim}=\mathrm{min}\left(\mathrm{numRows},\mathrm{coreNum}\right)`$，每个 block 负责完整的一行；若只有 1 行，即使 vocab 很大，也只启动 1 个 block，再由该核沿 vocab 方向串行处理多个 tile。
 
 因为各 vocab 位置的 bitmask 应用彼此独立，可以评估二维切分 `(row, vocab_chunk)`，让多核共同处理同一行的互不重叠区间。代价是 block 数、地址计算和尾块增多，极小行或较短 vocab 可能反而更慢。
 
@@ -379,7 +413,7 @@ Reference 不需要快，它需要简单、独立、容易审查。
 
 Padding 的元素浪费上界小于每行 255 个 logits，但固定的分配/launch 开销在小 batch、小 vocab 时可能比新增字节更显著。大 vocab 时相对字节比例很小，额外全 tensor copy 却仍可能可见。
 
-验证应把 Host/wrapper 总时间与纯 device kernel 时间分开，成对测试 `vocab=256k` 和 `256k±1`，并覆盖冷 allocator、预热 allocator 与 graph capture。若只计 kernel 内部，就会完全漏掉 padding 创建成本。
+验证应把 Host/wrapper 总时间与纯 device kernel 时间分开，成对测试 $`\mathrm{vocab}=256k`$ 和 `256k±1`，并覆盖冷 allocator、预热 allocator 与 graph capture。若只计 kernel 内部，就会完全漏掉 padding 创建成本。
 
 ### 4. Optional indices 的 gather/scatter 成本何时超过少算的收益？
 
@@ -387,9 +421,12 @@ Padding 的元素浪费上界小于每行 255 个 logits，但固定的分配/la
 
 可以用近似成本模型理解：
 
-```text
-indices 路径 = gather + selected_rows_kernel + scatter
-全量路径    = all_rows_kernel
+```math
+\text{indices 路径}= \mathrm{gather} + \mathrm{selected\_rows\_kernel} + \mathrm{scatter}
+```
+
+```math
+\text{全量路径}=\mathrm{all\_rows\_kernel}
 ```
 
 对每个真实 batch/vocab 扫描选中比例 `{1%,10%,25%,50%,75%,100%}`，同时记录 wrapper 总时间、额外显存和 kernel 时间。交叉点必须用端到端 wrapper 测量，不能只比较中心 kernel。
@@ -416,7 +453,7 @@ indices 路径 = gather + selected_rows_kernel + scatter
 
 **答案：**它同时让 logits 和 packed bitmask 的一段数据满足 32 字节搬运粒度。
 
-Bitmask 每个 INT32 表示 32 个 vocabulary position。256 个 position 对应 `256/32=8` 个 INT32，也就是 `8×4=32` 字节。Logits 一侧，256 个 FP16/BF16 是 512 字节，FP32 是 1024 字节，也都能被 32 字节整除。
+Bitmask 每个 INT32 表示 32 个 vocabulary position。256 个 position 对应 $`\frac{256}{32}=8`$ 个 INT32，也就是 $`8\cdot 4=32`$ 字节。Logits 一侧，256 个 FP16/BF16 是 512 字节，FP32 是 1024 字节，也都能被 32 字节整除。
 
 所以 256 是两种输入表示的公共友好粒度，而不是 NPU 对所有 tensor 的普适 tile。换一种 bit packing 或 dtype 集合，合适的共同对齐单元可能不同。
 
@@ -469,9 +506,9 @@ Kernel launch 提交到 stream 后会立即返回 Host。局部 `workingLogits`/
 
 **答案：**因为 token 维度的允许/禁止信息已经由 `bitmask` 表达，`indices` 只在 batch 维度选择哪些行要处理。
 
-看 shape 就能分清职责：`logits` 是 `[batch, vocab_size]`，`bitmask` 是 `[batch, ceil(vocab_size/32)]`。每一行 bitmask 覆盖这一行 logits 的整个 vocab 维度，某个 token id 是否允许由 `word_id=token_id/32` 和 `bit_id=token_id%32` 定位到具体 bit。也就是说，“屏蔽哪些 token”是 `bitmask` 的工作。
+看 shape 就能分清职责：`logits` 是 $`\left[\mathrm{batch},\mathrm{vocab\_size}\right]`$，`bitmask` 是 `[batch, ceil(vocab_size/32)]`。每一行 bitmask 覆盖这一行 logits 的整个 vocab 维度，某个 token id 是否允许由 $`\mathrm{word\_id}=\frac{\mathrm{token\_id}}{32}`$ 和 $`\mathrm{bit\_id}=\mathrm{token\_id}\bmod 32`$ 定位到具体 bit。也就是说，“屏蔽哪些 token”是 `bitmask` 的工作。
 
-`indices` 的 Host 代码则是 `bitmask.index({rowIndices})`、`logits.index({rowIndices})` 和最后的 `logits.index_put_({rowIndices}, result)`。这些操作都发生在第 0 维，也就是 batch 行维度。若 `indices=[1,3]`，它表示只处理 batch 第 1、3 行，而不是处理 token id 1 和 token id 3。
+`indices` 的 Host 代码则是 `bitmask.index({rowIndices})`、`logits.index({rowIndices})` 和最后的 `logits.index_put_({rowIndices}, result)`。这些操作都发生在第 0 维，也就是 batch 行维度。若 $`\mathrm{indices}=\left[1,3\right]`$，它表示只处理 batch 第 1、3 行，而不是处理 token id 1 和 token id 3。
 
 AI 推理里 `indices` 这个词很泛：top-k indices 通常是 token id，MoE indices 可能是 expert id，KV cache indices 可能是 cache slot，gather/scatter indices 可能是行号或列号。读源码时不要靠变量名猜语义，要同时看 shape、使用位置和后续 gather/scatter 的维度。
 

@@ -14,12 +14,20 @@ Every NPU kernel follows this pattern:
 
 ```text
 Without pipeline:
-  [CopyIn_0][Compute_0][CopyOut_0][CopyIn_1][Compute_1][CopyOut_1]...
-  Total time = N × (T_copyin + T_compute + T_copyout)
+[CopyIn_0][Compute_0][CopyOut_0][CopyIn_1][Compute_1][CopyOut_1]...
+```
 
+```math
+\text{Total time}= N \times  \left(T_{\mathrm{copyin}} + T_{\mathrm{compute}} + T_{\mathrm{copyout}}\right)
+```
+
+```text
 With double-buffer pipeline:
-  [CopyIn_0][CopyIn_1 | Compute_0][CopyIn_2 | Compute_1 | CopyOut_0][Compute_2 | CopyOut_1]...
-  Total time ≈ max(T_copyin, T_compute, T_copyout) × N (ideal)
+[CopyIn_0][CopyIn_1 | Compute_0][CopyIn_2 | Compute_1 | CopyOut_0][Compute_2 | CopyOut_1]...
+```
+
+```math
+\mathrm{Total} \mathrm{time} \approx  \mathrm{max}\left(T_{\mathrm{copyin}}, T_{\mathrm{compute}}, T_{\mathrm{copyout}}\right) \times  N \left(\mathrm{ideal}\right)
 ```
 
 ## Ascend C Queue (TQue)

@@ -22,29 +22,36 @@ Transformer 每层 attention 都会产生 Key 和 Value。decode 第 `t` 步不�
 
 粗略估算：
 
-```text
-KV bytes =
-    num_layers
-  * num_tokens
-  * kv_heads
-  * head_dim
-  * 2           # K 和 V
-  * dtype_bytes
+```math
+\text{KV bytes}= \mathrm{num\_layers} \cdot  \mathrm{num\_tokens} \cdot  \mathrm{kv\_heads} \cdot  \mathrm{head\_dim} \cdot  2 \qquad\text{K 和 V * dtype\_bytes}
 ```
 
 如果是 GQA/MQA，`kv_heads` 会小于 `num_attention_heads`，KV Cache 压力会明显降低。
 
 例子：
 
-```text
-layers = 32
-tokens = 4096
-kv_heads = 32
-head_dim = 128
-dtype = fp16 = 2 bytes
+```math
+\mathrm{layers}=32
+```
 
-KV = 32 * 4096 * 32 * 128 * 2 * 2
-   = 2 GB 左右
+```math
+\mathrm{tokens}=4096
+```
+
+```math
+\mathrm{kv\_heads}=32
+```
+
+```math
+\mathrm{head\_dim}=128
+```
+
+```text
+dtype = fp16 = 2 bytes
+```
+
+```math
+\mathrm{KV} = 32 \cdot  4096 \cdot  32 \cdot  128 \cdot  2 \cdot  2 = 2 \mathrm{GB} \text{左右}
 ```
 
 这只是单请求。如果 batch 中有很多长上下文请求，KV Cache 会迅速成为主瓶颈。

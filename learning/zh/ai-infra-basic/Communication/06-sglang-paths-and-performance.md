@@ -6,12 +6,15 @@
 
 ### 1.1 TP / 层边界 collective
 
+```math
+\frac{\mathrm{model}}{\mathrm{LayerCommunicator}}
+```
+
 ```text
-model / LayerCommunicator
-  -> communication_op.py
-  -> GroupCoordinator + selected TP/attention/MoE group
-  -> NpuCommunicator / PyNccl / custom all-reduce / other path
-  -> device backend / kernel
+-> communication_op.py
+-> GroupCoordinator + selected TP/attention/MoE group
+-> NpuCommunicator / PyNccl / custom all-reduce / other path
+-> device backend / kernel
 ```
 
 入口：[communicator.py](../../../../python/sglang/srt/layers/communicator.py)、[communication_op.py](../../../../python/sglang/srt/distributed/communication_op.py)、[parallel_state.py](../../../../python/sglang/srt/distributed/parallel_state.py)。NPU wrapper 见 [npu_communicator.py](../../../../python/sglang/srt/distributed/device_communicators/npu_communicator.py)。
@@ -53,9 +56,8 @@ prefill/decode queues -> destination allocation + request metadata
 
 一个实用分解是：
 
-```text
-t_observed = t_queue + t_pack + t_wait_for_peers
-           + t_transfer + t_unpack + t_consumer_dependency
+```math
+t_{\mathrm{observed}}=t_{\mathrm{queue}}+t_{\mathrm{pack}}+\mathrm{t\_wait\_for\_peers}+t_{\mathrm{transfer}}+t_{\mathrm{unpack}}+\mathrm{t\_consumer\_dependency}
 ```
 
 各项可能重叠，这只是定位账本，不能把重叠区间重复相加当成总耗时。
@@ -68,9 +70,12 @@ t_observed = t_queue + t_pack + t_wait_for_peers
 
 ## 4. 带宽数字要写清口径
 
-```text
-algorithm bandwidth = logical payload bytes / elapsed time
-ring AllReduce bus bandwidth ≈ algorithm bandwidth * 2*(P-1)/P
+```math
+\text{algorithm bandwidth}= \mathrm{logical} \mathrm{payload} \mathrm{bytes} / \mathrm{elapsed} \mathrm{time}
+```
+
+```math
+\mathrm{ring} \mathrm{AllReduce} \mathrm{bus} \mathrm{bandwidth} \approx  \mathrm{algorithm} \mathrm{bandwidth} \cdot  2\cdot \left(P-1\right)/P
 ```
 
 后一项是 [nccl-tests 的 AllReduce 统计口径](https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md)，不是“实际捕获到了这么多 NIC 字节”，也不应直接套到 MoE 或 KV transfer。分清 per-rank / aggregate、单向 / 双向、GB/s / GiB/s、Gb/s，100 Gb/s 的理论换算是 12.5 GB/s，尚未扣协议损耗。

@@ -46,13 +46,13 @@ Gated Delta Rule 可以先把它想成“带遗忘门的线性注意力更新规
 
 ### 3.4 `packed B=1`
 
-`packed B=1` 的直觉是：别把不同样本硬摆成真正的批次维，而是把所有 token 先摊平成一条长带，只保留一个假的 `B=1` 外壳，再用额外索引告诉系统“哪些 token 属于哪条样本”。这样做的价值是：后端 kernel 只需要面对一条连续 token 轴，切块和调度更简单。
+`packed B=1` 的直觉是：别把不同样本硬摆成真正的批次维，而是把所有 token 先摊平成一条长带，只保留一个假的 $`B=1`$ 外壳，再用额外索引告诉系统“哪些 token 属于哪条样本”。这样做的价值是：后端 kernel 只需要面对一条连续 token 轴，切块和调度更简单。
 
 它和“普通 `[B, T, ...]` batch”不同。普通 batch 的样本边界写在张量形状里；`packed B=1` 需要靠额外的 `cu_seqlens` 恢复边界。
 
 ### 3.5 `cu_seqlens`
 
-`cu_seqlens` 是 cumulative sequence lengths，累计序列长度数组。例如 `[0, 22, 1333]` 表示有两条样本，第一条是 token `0:22`，第二条是 token `22:1333`。为什么它重要？因为 kernel 在 `packed B=1` 布局下已经看不见原始 batch 维了，必须靠这个数组知道每条样本从哪里开始、在哪里结束。
+`cu_seqlens` 是 cumulative sequence lengths，累计序列长度数组。例如 $`\left[0,22,1333\right]`$ 表示有两条样本，第一条是 token `0:22`，第二条是 token `22:1333`。为什么它重要？因为 kernel 在 `packed B=1` 布局下已经看不见原始 batch 维了，必须靠这个数组知道每条样本从哪里开始、在哪里结束。
 
 它和“每条样本单独传一个长度”不同。累计前缀和更适合在 device 侧快速定位分段边界，也是 FlashAttention 风格变长接口的常见约定。术语表入口见 [`reference/glossary.md`](../reference/glossary.md)。
 
@@ -96,9 +96,18 @@ mega kernel 可以先理解成“把多道原本拆开的工序，尽量装进�
 ```text
 q, k : [B, T, H_g, K] 或 packed 后 [1, total_tokens, H_g, K]
 v    : [B, T, H, V]   或 packed 后 [1, total_tokens, H, V]
-g    : [B, T, H]
-beta : [B, T, H]
-state: [N, H, K, V]
+```
+
+```math
+\mathrm{shape}\left(g\right)=\left[B,T,H\right]
+```
+
+```math
+\mathrm{shape}\left(\beta\right)=\left[B,T,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{state}\right)=\left[N,H,K,V\right]
 ```
 
 这里最容易卡住初学者的是 `H_g` 和 `H` 不一定相等。源码明确允许 “`NumValueHeads` 是 `NumKeyHeads` 的整数倍”，也就是常见的 grouped-query 风格头配比；mega 路径的 Host 校验把它进一步收紧成一组固定支持组合，见 [`mega_chunk_gdn.cpp#L18-L23`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L18-L23)。
@@ -159,7 +168,7 @@ flowchart LR
 
 它们对应的直觉是：
 
-- 逻辑工作量由 `num_chunks * num_value_heads` 决定；
+- 逻辑工作量由 $`\mathrm{num\_chunks}\cdot \mathrm{num\_value\_heads}`$ 决定；
 - 物理并行度先按设备 `cube_core_num` 估一个 `block_dim`；
 - 所有中间物料一次性交给 custom op，尽量减少 Host 反复介入。
 
@@ -227,7 +236,7 @@ Host 入口 [`mega_chunk_gdn()`](https://github.com/sgl-project/sgl-kernel-npu/b
 Host 实现在 [`tri_inv.cpp`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/tri_inv/op_host/tri_inv.cpp#L39-L67)。它会：
 
 - 检查输入至少 2 维且最后两维是方阵；
-- 用 `num_elems / (matrix_size * matrix_size)` 算 `block_dim`；
+- 用 $`\frac{\mathrm{num\_elems}}{\mathrm{matrix\_size}\cdot \mathrm{matrix\_size}}`$ 算 `block_dim`；
 - 序列化一份很小的 tiling 数据；
 - 按 `fp16/fp32` 分别 launch 对应 kernel。
 
@@ -265,11 +274,11 @@ o, final_state, h = chunk_gated_delta_rule_npu(
 
 读这段时最该盯住三件事：
 
-- 虽然逻辑上有两条样本，但张量外层仍是 `B=1`；
-- `cu_seqlens=[0, 22, 1333]` 才是恢复样本边界的关键；
+- 虽然逻辑上有两条样本，但张量外层仍是 $`B=1`$；
+- $`\mathrm{cu\_seqlens}=\left[0,22,1333\right]`$ 才是恢复样本边界的关键；
 - `initial_state.shape[0]` 必须等于样本数 `len(cu_seqlens) - 1`。
 
-逐类型看：`total_tokens/num_*_heads/head_dim` 是 Python `int`；`q/k/v/beta/initial_state` 是 NPU `torch.Tensor` 且元素 dtype 为 FP16；`g` 是 FP32 tensor；`cu_seqlens` 是 `torch.int64` tensor，shape 为 `[3]`，其两个相邻差值给出每条序列长度；`o/final_state/h` 仍是 Python `torch.Tensor` 返回对象。这里没有 Triton `tl.tensor`：只有继续进入 `chunk_gated_delta_rule_npu` 选择到 Triton 路径后，wrapper 才把这些高层 tensor 转换为 kernel pointer 实参。
+逐类型看：`total_tokens/num_*_heads/head_dim` 是 Python `int`；`q/k/v/beta/initial_state` 是 NPU `torch.Tensor` 且元素 dtype 为 FP16；`g` 是 FP32 tensor；`cu_seqlens` 是 `torch.int64` tensor，shape 为 $`\left[3\right]`$，其两个相邻差值给出每条序列长度；`o/final_state/h` 仍是 Python `torch.Tensor` 返回对象。这里没有 Triton `tl.tensor`：只有继续进入 `chunk_gated_delta_rule_npu` 选择到 Triton 路径后，wrapper 才把这些高层 tensor 转换为 kernel pointer 实参。
 
 ## 14. 测试如何把两条路径钉到同一语义
 
@@ -290,7 +299,7 @@ o, final_state, h = chunk_gated_delta_rule_npu(
 
 最常见的误判，是把 Triton 路径的问题和 mega 路径的问题混在一起。排查前先回答：
 
-- 当前是不是设置了 `GDN_USE_MEGA_GDN=1`？
+- 当前是不是设置了 $`\mathrm{GDN\_USE\_MEGA\_GDN}=1`$？
 - 输入是不是走了 `packed B=1 + cu_seqlens`？
 - 当前失败点是在 Python wrapper、`torch.ops` 注册、Host `TORCH_CHECK`，还是 device 执行？
 
@@ -306,7 +315,7 @@ mega 路径的 Host 已经把 shape/dtype/layout 说得很死。只要你不先�
 
 ### 15.3 看 `block_dim` 与 `num_chunks` 是否匹配你的直觉
 
-`block_dim` 来自设备 `cube_core_num`，而逻辑工作量来自 `num_chunks * num_value_heads`。如果 `num_chunks` 很小，mega kernel 未必能把所有核喂饱；如果 `num_chunks` 很大，分段 Triton 与 mega 路径谁更占优，就更需要 profiler，而不是只靠猜。
+`block_dim` 来自设备 `cube_core_num`，而逻辑工作量来自 $`\mathrm{num\_chunks}\cdot \mathrm{num\_value\_heads}`$。如果 `num_chunks` 很小，mega kernel 未必能把所有核喂饱；如果 `num_chunks` 很大，分段 Triton 与 mega 路径谁更占优，就更需要 profiler，而不是只靠猜。
 
 ### 15.4 不要把“少 launch”误解成“零中间成本”
 
@@ -337,7 +346,7 @@ mega 路径虽然把很多 stage 塞进一次 launch，但 wrapper 仍显式分�
 
 **答案：**真实 batch 中各序列长度不同。若强行放进规则 `[B,T,...]`，通常要 padding 到本批最长序列，既浪费计算和显存，也让 chunk 边界包含大量无效 token。Packed 布局把所有有效 token 连续拼接，使后端围绕一条紧凑 token 轴切块。
 
-外层 `B=1` 只是当前 kernel 接口的布局壳，不表示业务上只有一条序列；`cu_seqlens=[0,l_0,l_0+l_1,...]` 才保存每条样本的真实边界。Kernel 或 wrapper 用相邻前缀和之差恢复长度，避免状态和归约跨序列串台。
+外层 $`B=1`$ 只是当前 kernel 接口的布局壳，不表示业务上只有一条序列；`cu_seqlens=[0,l_0,l_0+l_1,...]` 才保存每条样本的真实边界。Kernel 或 wrapper 用相邻前缀和之差恢复长度，避免状态和归约跨序列串台。
 
 代价是 shape 本身不再包含 batch 边界，所有使用者必须正确携带、验证和转换 `cu_seqlens`。这是一种为连续访问和减少 padding 选择的 ABI，不是所有算法都必须采用的普遍格式。
 
@@ -351,7 +360,7 @@ Gated Delta Rule 的 state 会按每个 token 的门控与更新公式递推，�
 
 ### 3. Mega 路径里的 `block_dim` 为什么更像“固定物理核数”，而不是“总逻辑块数”？
 
-**答案：**Wrapper 的 `block_dim` 来自设备 `cube_core_num` 一类 Platform 属性，而总逻辑工作量来自 `num_chunks * num_value_heads`。两者的来源已经说明：前者描述本次要启用多少核心实例，后者描述 kernel 内必须覆盖多少 chunk/head 任务。
+**答案：**Wrapper 的 `block_dim` 来自设备 `cube_core_num` 一类 Platform 属性，而总逻辑工作量来自 $`\mathrm{num\_chunks}\cdot \mathrm{num\_value\_heads}`$。两者的来源已经说明：前者描述本次要启用多少核心实例，后者描述 kernel 内必须覆盖多少 chunk/head 任务。
 
 Mega kernel 把七个 stage 和跨核同步放进一次 launch。如果逻辑 chunk 很多，不能简单为每一份工作都发一个独立 program；更常见的是按可用核心数启动固定 blockDim，再由 device 状态机/循环分配逻辑任务和 workspace。
 
@@ -361,7 +370,7 @@ Mega kernel 把七个 stage 和跨核同步放进一次 launch。如果逻辑 ch
 
 **答案：**Binding 只需把一个语言入口接到另一个函数；本章 Host 还在决定“哪些输入合法、使用哪条实现、设备入口收到什么 ABI、需要多少中间资源以及怎样异步执行”。这些决策直接定义了 Python 与 mega kernel 之间的协议。
 
-具体包括：限制 packed B=1、head 比例、`head_dim=128`、dtype 与 contiguous；把 `cu_seqlens` 转成 int32；计算序列/chunk/matrix 数量；选择 `block_dim`；分配多组输出与 workspace；把 Python `int64/bool` 安全转换为 kernel 的固定宽度标量；最后按确定顺序 launch 并维护 storage 生命周期。
+具体包括：限制 packed B=1、head 比例、$`\mathrm{head\_dim}=128`$、dtype 与 contiguous；把 `cu_seqlens` 转成 int32；计算序列/chunk/matrix 数量；选择 `block_dim`；分配多组输出与 workspace；把 Python `int64/bool` 安全转换为 kernel 的固定宽度标量；最后按确定顺序 launch 并维护 storage 生命周期。
 
 任一环节错误都可能让 device 按错误 shape 或 offset 解释内存，即使 pybind 函数签名本身完全正确。因此 Host 是“动态模型世界 → 静态 kernel 契约”的策略和 ABI 层，不是可随意删掉的胶水。
 

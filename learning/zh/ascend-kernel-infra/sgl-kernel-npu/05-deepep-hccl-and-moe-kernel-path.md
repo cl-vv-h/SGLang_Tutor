@@ -176,8 +176,8 @@ pybind 暴露点在 [`csrc/deepep/pybind_extension.cpp`](https://github.com/sgl-
 
 - `topk_idx` 必须是 2 维；
 - `topk_idx` 必须 contiguous；
-- `num_experts > 0`；
-- token 数不能超过 `round * per_round_tokens`。
+- $`\mathrm{num\_experts} \gt 0`$；
+- token 数不能超过 $`\mathrm{round}\cdot \mathrm{per\_round\_tokens}`$。
 
 这里的直觉很重要：router 给你的不是“已经整理好的车次表”，只是“每个 token 想去哪些 expert”的路由意图。layout 阶段的职责，是把它整理成后续 dispatch 要吃的统计表。
 
@@ -388,9 +388,9 @@ def communication_roundtrip(
 | `num_tokens/hidden/num_experts/num_topk` | `int` | Host shape/配置标量 |
 | `buffer` | `deep_ep.Buffer` | 包装通信 buffer 与运行时状态的 pybind 对象 |
 | `config` | `deep_ep.Config` | dispatch/combine 调优配置，不是 tensor |
-| `x` | NPU `torch.Tensor` | `[num_tokens,hidden]`, BF16 |
+| `x` | NPU `torch.Tensor` | $`\left[\mathrm{num\_tokens},\mathrm{hidden}\right]`$, BF16 |
 | `scores/topk_weights` | NPU `torch.Tensor` | FP32 router 值 |
-| `topk_idx` | NPU `torch.Tensor` | `[num_tokens,num_topk]`，整数索引 |
+| `topk_idx` | NPU `torch.Tensor` | $`\left[\mathrm{num\_tokens},\mathrm{num\_topk}\right]`$，整数索引 |
 | layout 命名返回值 | NPU tensor/接口定义对象 | rank/expert 计数与 membership map |
 | `recv_x` | NPU tensor 或量化 tuple（依配置） | dispatch 后按本地 expert 排列的数据 |
 | `handle` | tuple-like 路由元数据 | combine 恢复来源与权重所需，不能直接当数值 tensor 计算 |
@@ -437,7 +437,7 @@ def communication_roundtrip(
 ## 16. 常见错误
 
 - 把 `get_dispatch_layout()` 误解成“已经把 token 发出去了”。它只是先生成路线图。
-- 以为 `HCCL = DeepEP`。错，DeepEP 站在 HCCL 之上，还额外管理 MoE 路由协议。
+- 以为 $`\mathrm{HCCL}=\mathrm{DeepEP}`$。错，DeepEP 站在 HCCL 之上，还额外管理 MoE 路由协议。
 - 只盯 `x` 的 shape，不检查 `topk_weights` 必须是 `float32`、`topk_idx` 要 contiguous。
 - 看到 `fused_deep_moe` 就断言“一定比 normal path 快”。没有真实 profiler 前不能这么说。
 - 看见 `AICPU` / `MTE` server type 就过度脑补底层实现细节。源码只告诉你“有不同执行标签”，没有授权你无证据推导更多。

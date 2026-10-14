@@ -98,9 +98,14 @@ CodeGraph 对 `python/sglang/srt/lora` 的结构分析显示，`LoRAMemoryPool` 
 TokenizerControlMixin / HTTP control
 -> LoRARegistry
 -> LoRAManager.load_lora_adapter() / unload_lora_adapter()
-
 执行面:
-ScheduleBatch / ForwardBatch
+```
+
+```math
+\frac{\mathrm{ScheduleBatch}}{\mathrm{ForwardBatch}}
+```
+
+```text
 -> LoRAManager.prepare_lora_batch()
 -> LoRAMemoryPool
 -> LoRABatchInfo
@@ -160,7 +165,7 @@ lora_drain_wait_threshold
 
 1. 如果传了 `--lora-paths`，默认打开 `enable_lora`。
 2. 把 `lora_paths` 解析成 `LoRARef`，包括 `lora_name`、`lora_path`、`lora_id`、`pinned`。
-3. 校验 `max_loaded_loras >= max_loras_per_batch`。
+3. 校验 $`\mathrm{max\_loaded\_loras} \ge \mathrm{max\_loras\_per\_batch}`$。
 4. 如果没有初始 adapter，就要求用户显式提供 `max_lora_rank` 和 `lora_target_modules`，因为系统仍然需要提前知道要包装哪些模型层。
 5. 限制 LoRA 和 speculative decoding 的组合，目前只兼容 NGRAM speculative decoding。
 6. 校验 overlap loading 的额外限制：它需要把 adapter 权重 pin 在 CPU 内存中，因此 `max_loaded_loras` 不能过大。
@@ -509,7 +514,10 @@ flowchart TD
 
 ```text
 running_loras = {None, adapter_A, adapter_B}
-max_loras_per_batch = 3
+```
+
+```math
+\mathrm{max\_loras\_per\_batch}=3
 ```
 
 此时：
@@ -656,13 +664,14 @@ python/sglang/srt/lora/lora_manager.py
 
 ```text
 ForwardBatch.lora_ids = [None, adapter_A, adapter_B, adapter_A]
-
 LoRAMemoryPool.uid_to_buffer_id:
 None      -> 0
 adapter_A -> 1
 adapter_B -> 2
+```
 
-weight_indices = [0, 1, 2, 1]
+```math
+\mathrm{weight\_indices}=\left[0,1,2,1\right]
 ```
 
 后续 kernel 不需要知道 adapter 名称，只需要知道每条 request 应该读第几个 buffer slot。
@@ -700,7 +709,7 @@ moe_lora_info
 - `weight_indices`：每条 request 使用哪个 adapter slot。
 - `lora_ranks`：每个 slot 对应 rank。
 - `scalings`：每个 slot 对应缩放系数。
-- `seg_lens / seg_indptr`：prefill 阶段每条 request 的 token 段边界。
+- $`\frac{\mathrm{seg\_lens}}{\mathrm{seg\_indptr}}`$：prefill 阶段每条 request 的 token 段边界。
 - `permutation`：某些 backend 为了更高效计算会重排 token。
 - `moe_lora_info`：MoE LoRA 的额外路由信息。
 
@@ -764,7 +773,7 @@ flowchart TD
 - `FusedMoEWithLoRA`：还要处理 expert routing 和 MoE LoRA buffer；
 - `VocabParallelEmbeddingWithLoRA` / `ParallelLMHeadWithLoRA`：涉及词表并行和 embedding/lm_head 的特殊形状。
 
-所以 SGLang 不是写一个通用 `x @ A @ B` 就完事，而是按模型并行和层类型分别实现。
+所以 SGLang 不是写一个通用 $`x\,A\,B`$ 就完事，而是按模型并行和层类型分别实现。
 
 ---
 

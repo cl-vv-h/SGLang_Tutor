@@ -383,28 +383,41 @@ capture_one_shape(size=4, forward)
 
 - **Batch size** 是一次 forward 中的请求/序列数量，源码常缩写为 `bs`。
 - **Batch-size bucket** 是预先选择的某个可复用执行规格；这个规格以一个离散的 batch size 作为键。
-- `capture_bs` 是“需要捕获的 batch size 列表”，例如 `[1, 2, 4, 8]`。列表中的每个值对应一张普通 decode 图。
+- `capture_bs` 是“需要捕获的 batch size 列表”，例如 $`\left[1,2,4,8\right]`$。列表中的每个值对应一张普通 decode 图。
 
 所以 `bs` 的展开是 **batch size**，不是 `bucket size`。在 `for bs in capture_bs` 里，同一个整数同时扮演两个角色：
 
+```math
+\mathrm{bs}=8
+```
+
 ```text
-bs = 8
-  语义 1：这次图按 batch size 8 执行
-  语义 2：用数值 8 查找“batch-size=8”这个 bucket/ShapeKey
+语义 1：这次图按 batch size 8 执行
+语义 2：用数值 8 查找“batch-size=8”这个 bucket/ShapeKey
 ```
 
 更精确的例子是：
 
-```text
 live batch:
-  raw_bs = 5                 # 线上真实请求数
+
+```math
+\mathrm{raw\_bs}=5\qquad\text{线上真实请求数}
+```
 
 captured batch-size buckets:
-  capture_bs = [1, 2, 4, 8]
+
+```math
+\mathrm{capture\_bs}=\left[1,2,4,8\right]
+```
 
 选择结果:
-  bs = 8                     # 捕获/补齐后的 batch size
-  graph_key = ShapeKey(size=8)
+
+```math
+\mathrm{bs}=8\qquad\text{捕获/补齐后的 batch size}
+```
+
+```math
+\mathrm{graph\_key} = \mathrm{ShapeKey}\left(\mathrm{size}=8\right)
 ```
 
 真实 batch 5 被 padding 到 captured batch size 8，然后复用以 `8` 为键的图。“bucket”不是另外装着 8 个 batch 的容器，“bucket size”也不是 8 个 batch；这里的 8 就是这张图支持的 batch size。
@@ -433,7 +446,7 @@ captured batch-size buckets:
 
 ### 6.3 warmup 为什么在 capture 前
 
-这一节改用一个具体例子贯穿始终：当前正在为 `bs=4` 的普通 decode bucket 建图，且 `4 in self.compile_bs`，所以这个 bucket 开启 `torch.compile`。先不要记 Dynamo、FX、TorchAir 这些名字，先认清调用链里真正存在的五个对象：
+这一节改用一个具体例子贯穿始终：当前正在为 $`\mathrm{bs}=4`$ 的普通 decode bucket 建图，且 `4 in self.compile_bs`，所以这个 bucket 开启 `torch.compile`。先不要记 Dynamo、FX、TorchAir 这些名字，先认清调用链里真正存在的五个对象：
 
 | 名字 | 运行时类型 | 谁创建它 | 它是不是一张图 |
 |---|---|---|---|
@@ -597,12 +610,20 @@ compile_bs = (
 
 例如：
 
-```text
-capture_bs = [1, 2, 4, 8, 16]
-torch_compile_max_bs = 8
-enable_torch_compile = True
+```math
+\mathrm{capture\_bs}=\left[1,2,4,8,16\right]
+```
 
-得到 compile_bs = [1, 2, 4, 8]
+```math
+\mathrm{torch\_compile\_max\_bs}=8
+```
+
+```text
+enable_torch_compile = True
+```
+
+```math
+\text{得到 compile\_bs}= \left[1, 2, 4, 8\right]
 ```
 
 这意味着 size 1/2/4/8 的 capture forward 先经过 `torch.compile`，size 16 仍直接调用原始 `model.forward`；但五个 bucket 最后都可以被外层 NPUGraph capture。**`compile_bs` 决定是否使用 compiler，`capture_bs` 决定是否建立 launch graph，它们不是同一个集合概念。**
@@ -1225,10 +1246,10 @@ Python context manager 有进入和退出两个边界。这里可以读成：
 |---|---|---|
 | `graph = torch.npu.NPUGraph()` | 创建 Python/runtime handle | 尚未执行模型 |
 | 进入 `graph_ctx(...)` | 调用 context manager 入口 | 指定 stream 开始 capture，绑定 pool |
-| `out = forward_fn()` | 执行 metadata 准备、Python 模型路径和 dispatcher 调用 | 算子 task 被提交并被 runtime 记录 |
+| $`\mathrm{out} = \mathrm{forward\_fn}\left(\right)`$ | 执行 metadata 准备、Python 模型路径和 dispatcher 调用 | 算子 task 被提交并被 runtime 记录 |
 | 退出 `graph_ctx` | 调用 context manager 退出逻辑 | 结束 capture，形成可 replay 图 |
-| `_graphs[key] = graph` | 把 handle 放进 Python 字典 | 不重新执行 Device 计算 |
-| `_outputs[key] = out` | 保存输出 storage 的 Python handle | 不复制一份输出数值快照 |
+| $`{\mathrm{\_graphs}}_{\mathrm{key}}=\mathrm{graph}`$ | 把 handle 放进 Python 字典 | 不重新执行 Device 计算 |
+| $`{\mathrm{\_outputs}}_{\mathrm{key}}=\mathrm{out}`$ | 保存输出 storage 的 Python handle | 不复制一份输出数值快照 |
 
 这也解释了 warmup #2 为什么不能“顺便成为图”：它调用 `forward_fn()` 时位于 `graph_ctx` 外，runtime 没有处在 capture 状态，第三次必须重新执行完整 forward。
 
@@ -1455,17 +1476,20 @@ not self.enable_torch_compile
 
 假设：
 
-```text
-raw_bs = 5
-capture_bs = [1, 2, 4, 8]
+```math
+\mathrm{raw\_bs}=5
 ```
 
-`_pad_to_bucket` 选择 `bs=8`。Runner：
+```math
+\mathrm{capture\_bs}=\left[1,2,4,8\right]
+```
 
-1. 保存 `raw_bs=5`；
+`_pad_to_bucket` 选择 $`\mathrm{bs}=8`$。Runner：
+
+1. 保存 $`\mathrm{raw\_bs}=5`$；
 2. 将 5 条有效请求 copy 到静态 buffer 前 5 行；
 3. 填充后 3 行的 input/metadata；
-4. 用 `ShapeKey(size=8)` replay；
+4. 用 $`\mathrm{ShapeKey}\left(\mathrm{size}=8\right)`$ replay；
 5. 输出只取前 5 行。
 
 Padding 改变执行规格，不改变有效请求数。
@@ -1530,21 +1554,26 @@ def replay(self, shape_key, static_forward_batch, **kwargs):
 
 ```text
 capture 时：
-  input_ids storage 地址 = 0x1000
-  captured FIA Host keyword actual_seq_lengths_kv = [8, 16]
-
-下一轮 replay 前：
-  新 input_ids 写进同一个 0x1000
-  新序列长度应为 [9, 17]
+input_ids storage 地址 = 0x1000
 ```
 
-对于 `input_ids`，普通 `copy_()` 足够，因为 graph 读取的是地址 `0x1000`，里面的值已经变了。但 `actual_seq_lengths_kv=[8,16]` 可能是捕获 FIA task 时复制保存的 Host 参数，并不位于 `0x1000` 这样的固定 Device storage 中。若此时只调用：
+```math
+\text{captured FIA Host keyword actual\_seq\_lengths\_kv}= \left[8, 16\right]
+```
+
+```text
+下一轮 replay 前：
+新 input_ids 写进同一个 0x1000
+新序列长度应为 [9, 17]
+```
+
+对于 `input_ids`，普通 `copy_()` 足够，因为 graph 读取的是地址 `0x1000`，里面的值已经变了。但 $`\mathrm{actual\_seq\_lengths\_kv}=\left[8,16\right]`$ 可能是捕获 FIA task 时复制保存的 Host 参数，并不位于 `0x1000` 这样的固定 Device storage 中。若此时只调用：
 
 ```python
 graph.replay()
 ```
 
-attention task 仍可能按旧长度 `[8,16]` 执行。`replay_with_input_update()` 就是在 replay 前把这一份受支持的 captured Host 参数修补为 `[9,17]`。
+attention task 仍可能按旧长度 $`\left[8,16\right]`$ 执行。`replay_with_input_update()` 就是在 replay 前把这一份受支持的 captured Host 参数修补为 $`\left[9,17\right]`$。
 
 真实实现完整展示了两种输入合同：
 
@@ -2280,7 +2309,7 @@ NPU 覆盖的 [`execute()`](https://github.com/sgl-project/sglang/blob/9a03bebf1
 
 **第一步：选择 bucket。**
 
-继承的 `load_batch()` 用 `_pad_to_bucket(raw_bs, capture_bs)` 得到 `bs`。例如 live batch 为 5、已捕获 `[1, 2, 4, 8]`，则 `raw_bs=5`、`bs=8`、graph key 为 size 8。
+继承的 `load_batch()` 用 `_pad_to_bucket(raw_bs, capture_bs)` 得到 `bs`。例如 live batch 为 5、已捕获 $`\left[1,2,4,8\right]`$，则 $`\mathrm{raw\_bs}=5`$、$`\mathrm{bs}=8`$、graph key 为 size 8。
 
 **第二步：把 live 值写入静态地址。**
 
@@ -2434,7 +2463,7 @@ Warmup 是普通执行，目的在于让惰性初始化、编译、kernel 加载
 
 ### 11. `bs` 是 batch size 还是 bucket size？
 
-是 batch size。Bucket 是以某个离散 batch size 为键的捕获规格。`raw_bs=5` 映射到 `bs=8` 时，含义是“把 5 个真实请求补齐到 captured batch size 8，并选择 batch-size=8 的图”，不是“桶里装了 8 个 batch”。
+是 batch size。Bucket 是以某个离散 batch size 为键的捕获规格。$`\mathrm{raw\_bs}=5`$ 映射到 $`\mathrm{bs}=8`$ 时，含义是“把 5 个真实请求补齐到 captured batch size 8，并选择 batch-size=8 的图”，不是“桶里装了 8 个 batch”。
 
 ### 12. `replay_with_input_update` 与 `replay` 的本质区别是什么？
 

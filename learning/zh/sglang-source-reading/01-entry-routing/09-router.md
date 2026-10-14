@@ -341,21 +341,42 @@ experimental/sgl-router/src/server/app.rs
 
 注册接口：
 
-```text
-GET  /healthz
-GET  /readyz
-GET  /metrics
-GET  /v1/models
-POST /v1/tokenize
-POST /v1/detokenize
-POST /v1/chat/completions
-POST /flush_cache
+```math
+\frac{\mathrm{GET}}{\mathrm{healthz}}
+```
+
+```math
+\frac{\mathrm{GET}}{\mathrm{readyz}}
+```
+
+```math
+\frac{\mathrm{GET}}{\mathrm{metrics}}
+```
+
+```math
+\frac{\frac{\mathrm{GET}}{\mathrm{v1}}}{\mathrm{models}}
+```
+
+```math
+\frac{\frac{\mathrm{POST}}{\mathrm{v1}}}{\mathrm{tokenize}}
+```
+
+```math
+\frac{\frac{\mathrm{POST}}{\mathrm{v1}}}{\mathrm{detokenize}}
+```
+
+```math
+\frac{\frac{\frac{\mathrm{POST}}{\mathrm{v1}}}{\mathrm{chat}}}{\mathrm{completions}}
+```
+
+```math
+\frac{\mathrm{POST}}{\mathrm{flush\_cache}}
 ```
 
 其中主业务路径是：
 
-```text
-POST /v1/chat/completions
+```math
+\frac{\frac{\frac{\mathrm{POST}}{\mathrm{v1}}}{\mathrm{chat}}}{\mathrm{completions}}
 ```
 
 它被加了两个 layer：
@@ -1302,14 +1323,24 @@ PD 分离里的 `/route` 可以理解成：
 
 MoE router 的输入输出是：
 
-```text
 输入：
-hidden_states: [num_tokens, hidden_dim]
-router_weight: [num_experts, hidden_dim]
+
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[\mathrm{num\_tokens},\mathrm{hidden\_dim}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{router\_weight}\right)=\left[\mathrm{num\_experts},\mathrm{hidden\_dim}\right]
+```
 
 输出：
-topk_weights: [num_tokens, topk]
-topk_ids: [num_tokens, topk]
+
+```math
+\mathrm{shape}\left(\mathrm{topk\_weights}\right)=\left[\mathrm{num\_tokens},\mathrm{topk}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{topk\_ids}\right)=\left[\mathrm{num\_tokens},\mathrm{topk}\right]
 ```
 
 含义：
@@ -1454,10 +1485,16 @@ python/sglang/srt/layers/moe/router.py
 
 它把 router 计算看成矩阵乘：
 
-```text
-A = hidden_states       [bs, hidden_dim]
-B = router_weight       [num_experts, hidden_dim]
-logits = A @ B.T        [bs, num_experts]
+```math
+A=\mathrm{hidden\_states}\qquad\mathrm{shape}:\left[\mathrm{bs},\mathrm{hidden\_dim}\right]
+```
+
+```math
+B=\mathrm{router\_weight}\qquad\mathrm{shape}:\left[\mathrm{num\_experts},\mathrm{hidden\_dim}\right]
+```
+
+```math
+\mathrm{logits}=A\,{B}^{\mathsf T}\qquad\mathrm{shape}:\left[\mathrm{bs},\mathrm{num\_experts}\right]
 ```
 
 kernel 以 block 为单位处理多个 token 和多个 expert：
@@ -1479,7 +1516,7 @@ kernel 以 block 为单位处理多个 token 和多个 expert：
 8. 写出 topk_ids / topk_weights
 ```
 
-这个路径目前只支持 `topk <= 2`。因此 `fused_moe_router_tensorcore()` 里有：
+这个路径目前只支持 $`\mathrm{topk} \le 2`$。因此 `fused_moe_router_tensorcore()` 里有：
 
 ```text
 assert topk <= 2
@@ -1489,9 +1526,12 @@ assert topk <= 2
 
 router logits 可能过大，softcap 会把它压到一个受控范围：
 
-```text
-logits_scaled = logits / moe_softcapping
-logits_softcapped = tanh(logits_scaled) * moe_softcapping
+```math
+\mathrm{logits\_scaled}=\frac{\mathrm{logits}}{\mathrm{moe\_softcapping}}
+```
+
+```math
+\mathrm{logits\_softcapped}=\mathrm{tanh}\left(\mathrm{logits\_scaled}\right)\cdot \mathrm{moe\_softcapping}
 ```
 
 源码中用指数形式近似实现：
@@ -1583,7 +1623,10 @@ if (cap := get_global_experts_capturer()) is not None:
 
 ```text
 return_routed_experts = True
-routed_experts_start_len = N
+```
+
+```math
+\mathrm{routed\_experts\_start\_len}=N
 ```
 
 SGLang 可以把每个 token 在每层 MoE 中被路由到的 experts 返回。
@@ -1614,7 +1657,10 @@ python/sglang/srt/model_executor/model_runner.py
 ```text
 num_layers = model_config.hf_text_config.num_hidden_layers
 topk_size = model_config.hf_text_config.num_experts_per_tok
-max_batch_size = max(chunked_prefill_size * dp_size, max_running_requests * dp_size)
+```
+
+```math
+\mathrm{max\_batch\_size}=\mathrm{max}\left(\mathrm{chunked\_prefill\_size}\cdot \mathrm{dp\_size},\mathrm{max\_running\_requests}\cdot \mathrm{dp\_size}\right)
 ```
 
 ### 9.3 Capturer 捕获流程

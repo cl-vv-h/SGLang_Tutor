@@ -32,38 +32,47 @@ DSA is therefore neither “top-k over MLA weights” nor “delete old KV.” I
 
 To expose every axis, use:
 
-```text
-B=1, Tq=2, Lkv=8
-HI=2, DI=2, k=3
-N=4, Dc=4, Dr=2
+```math
+B=1,\qquad \mathrm{Tq}=2,\qquad \mathrm{Lkv}=8
+```
+
+```math
+\mathrm{HI}=2,\qquad \mathrm{DI}=2,\qquad k=3
+```
+
+```math
+N=4,\qquad \mathrm{Dc}=4,\qquad \mathrm{Dr}=2
 ```
 
 | Tensor | Shape | Axis meaning |
 |---|---:|---|
-| `QI` | `[2,2,2]` | query token × indexer head × index feature |
-| `KI_cache` | `[8,2]` | historical token × index feature; key shared by indexer heads |
-| `head_w` | `[2,2]` | query token × indexer head |
-| `index_score` | `[2,8]` | one scalar for every query/history pair |
-| `topk_idx` | `[2,3]` | three logical token IDs per query |
-| `Ckv_selected` | `[2,3,4]` | query × selected position × latent feature |
-| `Krope_selected` | `[2,3,2]` | query × selected position × positional feature |
-| `main_logits` | `[2,4,3]` | query × main head × selected position |
-| `main_prob` | `[2,4,3]` | softmax normalizes only the last `k=3` positions |
-| `latent_out` | `[2,4,4]` | query × main head × latent feature |
-| `output` | `[2,H]` | merged, output-projected residual branch |
+| `QI` | $`\left[2,2,2\right]`$ | query token × indexer head × index feature |
+| `KI_cache` | $`\left[8,2\right]`$ | historical token × index feature; key shared by indexer heads |
+| `head_w` | $`\left[2,2\right]`$ | query token × indexer head |
+| `index_score` | $`\left[2,8\right]`$ | one scalar for every query/history pair |
+| `topk_idx` | $`\left[2,3\right]`$ | three logical token IDs per query |
+| `Ckv_selected` | $`\left[2,3,4\right]`$ | query × selected position × latent feature |
+| `Krope_selected` | $`\left[2,3,2\right]`$ | query × selected position × positional feature |
+| `main_logits` | $`\left[2,4,3\right]`$ | query × main head × selected position |
+| `main_prob` | $`\left[2,4,3\right]`$ | softmax normalizes only the last $`k=3`$ positions |
+| `latent_out` | $`\left[2,4,4\right]`$ | query × main head × latent feature |
+| `output` | $`\left[2,H\right]`$ | merged, output-projected residual branch |
 
-`topk_idx` has no main-head axis. After reduction across `HI`, each query obtains one shared position set; all `N=4` main query heads compute their own logits over that same set.
+`topk_idx` has no main-head axis. After reduction across `HI`, each query obtains one shared position set; all $`N=4`$ main query heads compute their own logits over that same set.
 
 ### Numerical Walk from Logical Positions to Output
 
 Suppose the first query produces:
 
+```math
+\mathrm{shape}\left(\mathrm{position}\right)=\left[0,1,2,3,4,5,6,7\right]
+```
+
 ```text
-position: [0,    1,    2,    3,    4,    5,    6,    7]
 score:    [0.2,  1.7, -0.1,  0.8,  2.0,  0.4,  1.1,  0.3]
 ```
 
-`TopK(k=3)` returns logical positions `[4,1,6]`. Assume the block table maps these to physical cache slots `[20,9,14]`: **ranking produces logical token positions; the kernel reads physical slots**. For main head 0, the actual MLA logits might be:
+$`\mathrm{TopK}\left(k=3\right)`$ returns logical positions $`\left[4,1,6\right]`$. Assume the block table maps these to physical cache slots $`\left[20,9,14\right]`$: **ranking produces logical token positions; the kernel reads physical slots**. For main head 0, the actual MLA logits might be:
 
 ```text
 selected logical positions: [4,   1,   6]
@@ -73,15 +82,14 @@ softmax:                    [0.133,0.802,0.066]
 
 For corresponding latents
 
-```text
-c_4=[1,0,1,0], c_1=[0,2,0,0], c_6=[0,0,1,3]
+```math
+c_{4}=\left[1,0,1,0\right],\qquad c_{1}=\left[0,2,0,0\right],\qquad c_{6}=\left[0,0,1,3\right]
 ```
 
 the head first computes in latent space:
 
-```text
-z = 0.133*c_4 + 0.802*c_1 + 0.066*c_6
-  = [0.133, 1.604, 0.199, 0.198]       # [Dc=4]
+```math
+z=0.133\cdot c_{4}+0.802\cdot c_{1}+0.066\cdot c_{6}=\left[0.133,1.604,0.199,0.198\right]\qquad\text{[Dc=4]}
 ```
 
 Only then does the absorbed value/output transform run. The indexer scores `1.7, 2.0, 1.1` never enter main softmax; they only determine the set `{4,1,6}`.
@@ -149,9 +157,9 @@ The indexer and main attention serve different purposes and use different projec
 | `k` | number of entries selected per query, `k << L` |
 | `HI` | number of indexer query heads |
 | `DI` | indexer head dimension |
-| `h_t` | hidden state of query token `t`, `[H]` |
-| `qI_t,j` | indexer query of head `j`, `[DI]` |
-| `kI_s` | shared indexer key of historical token `s`, `[DI]` |
+| `h_t` | hidden state of query token `t`, $`\left[H\right]`$ |
+| `qI_t,j` | indexer query of head `j`, $`\left[\mathrm{DI}\right]`$ |
+| `kI_s` | shared indexer key of historical token `s`, $`\left[\mathrm{DI}\right]`$ |
 | `wI_t,j` | scalar weight of indexer head `j` |
 | `I_t,s` | scalar index score between query `t` and historical token `s` |
 | `c_s` | MLA latent KV entry of token `s` |
@@ -160,20 +168,34 @@ The indexer and main attention serve different purposes and use different projec
 
 The indexer computes a scalar retrieval score:
 
-```text
-I_t,s = sum_(j=1..HI) wI_t,j * ReLU(qI_t,j dot kI_s)
+```math
+I_{t},s = \sum_{j=1..\mathrm{HI}} \mathrm{wI\_t},j \cdot  \mathrm{ReLU}\left(\mathrm{qI\_t},j \cdot \mathrm{kI\_s}\right)
 ```
 
 Shape view for a packed batch with `Tq` query tokens and `Lkv` candidate entries:
 
-```text
-QI:       [Tq, HI, DI]
-KI_cache: [Lkv, DI]
-head_w:   [Tq, HI]
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]
+```
 
-dot:      [Tq, Lkv, HI]
+```math
+\mathrm{shape}\left(\mathrm{KI\_cache}\right)=\left[\mathrm{Lkv},\mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{head\_w}\right)=\left[\mathrm{Tq},\mathrm{HI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{dot}\right)=\left[\mathrm{Tq},\mathrm{Lkv},\mathrm{HI}\right]
+```
+
+```text
 ReLU + weighted sum over HI
-scores:   [Tq, Lkv]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[\mathrm{Tq},\mathrm{Lkv}\right]
 ```
 
 ### 4.1 Projection-by-Projection Shape Changes
@@ -182,20 +204,50 @@ The indexer receives the model hidden state and the low-rank MLA query activatio
 
 ```text
 hidden x:   [Tq,Hmodel]
-q_lora:     [Tq,Dq]
+```
 
-QI_flat = q_lora @ WqI^T
-WqI:        [HI*DI,Dq]
-QI_flat:    [Tq,HI*DI]
-QI:         [Tq,HI,DI]
+```math
+\mathrm{shape}\left(q_{\mathrm{lora}}\right)=\left[\mathrm{Tq},\mathrm{Dq}\right]
+```
 
-KI = LayerNorm(x @ WkI^T)
-WkI:        [DI,Hmodel]
+```math
+\mathrm{QI\_flat}=q_{\mathrm{lora}}\,{\mathrm{WqI}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(\mathrm{WqI}\right)=\left[\mathrm{HI}\cdot \mathrm{DI},\mathrm{Dq}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{QI\_flat}\right)=\left[\mathrm{Tq},\mathrm{HI}\cdot \mathrm{DI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]
+```
+
+```math
+\mathrm{KI}=\mathrm{LayerNorm}\left(x\,{\mathrm{WkI}}^{\mathsf T}\right)
+```
+
+```math
+\mathrm{shape}\left(\mathrm{WkI}\right)=\left[\mathrm{DI},\mathrm{Hmodel}\right]
+```
+
+```text
 KI:         [Tq,DI]             # one shared key per token
+```
 
-head_w = x @ WwI^T
-WwI:        [HI,Hmodel]
-head_w:     [Tq,HI]
+```math
+\mathrm{head\_w}=x\,{\mathrm{WwI}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(\mathrm{WwI}\right)=\left[\mathrm{HI},\mathrm{Hmodel}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{head\_w}\right)=\left[\mathrm{Tq},\mathrm{HI}\right]
 ```
 
 The indexer query has `HI` heads, but its key is shared. Broadcasting the key across query heads gives:
@@ -208,9 +260,12 @@ dot result:            [Tq,Lkv,HI]
 
 After `ReLU`, multiply by `head_w[:,None,:] [Tq,1,HI]` and reduce over `HI`:
 
-```text
-weighted: [Tq,Lkv,HI]
-scores:   [Tq,Lkv]
+```math
+\mathrm{shape}\left(\mathrm{weighted}\right)=\left[\mathrm{Tq},\mathrm{Lkv},\mathrm{HI}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[\mathrm{Tq},\mathrm{Lkv}\right]
 ```
 
 This head reduction is why top-k returns one position set per query token rather than a different set per main attention head.
@@ -219,30 +274,52 @@ This head reduction is why top-k returns one position set per query token rather
 
 The indexer head can contain positional and non-positional subspaces:
 
-```text
-QI: [Tq,HI,DI]
-  -> QI_rope [Tq,HI,Dr]
-  -> QI_nope [Tq,HI,DI-Dr]
-
-KI: [Tq,DI]
-  -> KI_rope [Tq,Dr]
-  -> KI_nope [Tq,DI-Dr]
+```math
+\mathrm{shape}\left(\mathrm{QI}\right)=\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]
 ```
 
-Apply RoPE only to the designated `Dr` channels and concatenate back to `DI`. In the NPU path visible in this repository, a representative shape is `HI=64`, `DI=128`, `Dr=64`: the projection produces `[Tq,64,128]`, splits into two 64-channel parts, rotates the positional part, and restores `[Tq,64,128]`.
+```text
+-> QI_rope [Tq,HI,Dr]
+-> QI_nope [Tq,HI,DI-Dr]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{KI}\right)=\left[\mathrm{Tq},\mathrm{DI}\right]
+```
+
+```text
+-> KI_rope [Tq,Dr]
+-> KI_nope [Tq,DI-Dr]
+```
+
+Apply RoPE only to the designated `Dr` channels and concatenate back to `DI`. In the NPU path visible in this repository, a representative shape is $`\mathrm{HI}=64`$, $`\mathrm{DI}=128`$, $`\mathrm{Dr}=64`$: the projection produces $`\left[\mathrm{Tq},64,128\right]`$, splits into two 64-channel parts, rotates the positional part, and restores $`\left[\mathrm{Tq},64,128\right]`$.
 
 ### 4.3 A Small Numerical Ranking Example
 
-Let `HI=2`, `DI=2`, and four candidate keys:
+Let $`\mathrm{HI}=2`$, $`\mathrm{DI}=2`$, and four candidate keys:
 
-```text
-qI_0 = [1, 0]       head weight w_0 = 0.75
-qI_1 = [0, 1]       head weight w_1 = 0.25
+```math
+\mathrm{qI\_0} = \left[1, 0\right] \mathrm{head} \mathrm{weight} w_{0} = 0.75
+```
 
-kI_0 = [ 2, 1]
-kI_1 = [-1, 4]
-kI_2 = [ 1,-2]
-kI_3 = [ 0, 3]
+```math
+\mathrm{qI\_1} = \left[0, 1\right] \mathrm{head} \mathrm{weight} w_{1} = 0.25
+```
+
+```math
+\mathrm{kI\_0}=\left[2,1\right]
+```
+
+```math
+\mathrm{kI\_1}=\left[-1,4\right]
+```
+
+```math
+\mathrm{kI\_2}=\left[1,-2\right]
+```
+
+```math
+\mathrm{kI\_3}=\left[0,3\right]
 ```
 
 Per-head dot products are:
@@ -256,14 +333,23 @@ candidate 3: [0, 3]  -> ReLU -> [0,3]
 
 Weighted scalar scores become:
 
-```text
-I_0 = 0.75*2 + 0.25*1 = 1.75
-I_1 = 0.75*0 + 0.25*4 = 1.00
-I_2 = 0.75*1 + 0.25*0 = 0.75
-I_3 = 0.75*0 + 0.25*3 = 0.75
+```math
+I_{0}=0.75\cdot 2+0.25\cdot 1=1.75
 ```
 
-For `k=2`, candidates 0 and 1 are selected. Notice that negative evidence is removed by ReLU before the head-weighted reduction; moving ReLU after the reduction would define a different function.
+```math
+I_{1}=0.75\cdot 0+0.25\cdot 4=1.0
+```
+
+```math
+I_{2}=0.75\cdot 1+0.25\cdot 0=0.75
+```
+
+```math
+I_{3}=0.75\cdot 0+0.25\cdot 3=0.75
+```
+
+For $`k=2`$, candidates 0 and 1 are selected. Notice that negative evidence is removed by ReLU before the head-weighted reduction; moving ReLU after the reduction would define a different function.
 
 ReLU is part of the trained scoring function, not an interchangeable implementation detail. The indexer uses fewer/smaller heads and can use low precision, making a full scan much cheaper than running the main attention on all entries.
 
@@ -271,15 +357,18 @@ ReLU is part of the trained scoring function, not an interchangeable implementat
 
 For query token `t`:
 
-```text
-S_t = TopK(I_t, :, k)
-selected_cache_t = {c_s | s in S_t}
+```math
+S_{t} = \mathrm{TopK}\left(I_{t}, :, k\right)
+```
+
+```math
+\mathrm{selected\_cache}_t=\left\{c_s\mid s\in S_t\right\}
 ```
 
 The main output is then:
 
-```text
-u_t = MLA_Attention(h_t, selected_cache_t)
+```math
+u_{t} = \mathrm{MLA\_Attention}\left(h_{t}, \mathrm{selected\_cache\_t}\right)
 ```
 
 Important consequences:
@@ -295,9 +384,9 @@ Ignoring constants:
 
 | Component | Full-sequence prefill | One-token decode |
 |---|---:|---:|
-| Dense MLA core | `O(L^2 * Dmain)` | `O(L * Dmain)` |
-| DSA indexer | `O(L^2 * HI * DI)` | `O(L * HI * DI)` |
-| DSA sparse main core | `O(L * k * Dmain)` | `O(k * Dmain)` |
+| Dense MLA core | $`O\left({L}^{2}\cdot \mathrm{Dmain}\right)`$ | $`O\left(L\cdot \mathrm{Dmain}\right)`$ |
+| DSA indexer | $`O\left({L}^{2}\cdot \mathrm{HI}\cdot \mathrm{DI}\right)`$ | $`O\left(L\cdot \mathrm{HI}\cdot \mathrm{DI}\right)`$ |
+| DSA sparse main core | $`O\left(L\cdot k\cdot \mathrm{Dmain}\right)`$ | $`O\left(k\cdot \mathrm{Dmain}\right)`$ |
 
 The indexer is still quadratic across a full sequence and linear in history for one decode token. DSA is efficient because the indexer constant is deliberately much smaller than the main MLA constant and because the expensive core uses only `k` entries.
 
@@ -383,7 +472,7 @@ logical top-k token index
   -> sparse attention metadata
 ```
 
-For graph capture, output buffers often have a fixed `[graph_batch, k]` shape. Runtime sequence lengths, page tables, indexer cache lengths, and selected indices must be refreshed without changing captured tensor addresses. `-1` sentinels mark invalid top-k slots.
+For graph capture, output buffers often have a fixed $`\left[\mathrm{graph\_batch},k\right]`$ shape. Runtime sequence lengths, page tables, indexer cache lengths, and selected indices must be refreshed without changing captured tensor addresses. `-1` sentinels mark invalid top-k slots.
 
 ## 12. SGLang Source Map
 
@@ -430,7 +519,7 @@ Both are natively trainable sparse attention designs, but their dataflows and ca
 
 ## 15. Common Misconceptions
 
-1. **“DSA makes all attention computation `O(L*k)`.”** The expensive core does; the lightweight indexer still scans all candidate history.
+1. **“DSA makes all attention computation $`O\left(L\cdot k\right)`$.”** The expensive core does; the lightweight indexer still scans all candidate history.
 2. **“Only selected entries need to be cached.”** Future queries may select previously unselected entries, so full latent and indexer history must remain addressable.
 3. **“Indexer score is the attention score.”** It is a retrieval score; the selected entries enter a separate MLA core and softmax.
 4. **“DSA can be added to any dense checkpoint without training.”** The published architecture warms up the indexer and continues sparse training.
@@ -453,22 +542,22 @@ Let packed prefill contain `R` requests, `Tq` new query tokens in total, and `Tk
 
 | Stage | Tensor | Logical shape | Persistent? |
 |---|---|---:|---|
-| Input | hidden states | `[Tq,Hmodel]` | no |
-| MLA query down projection | `q_lora` | `[Tq,Dq]` | no |
-| Main query heads | `Qmain` | `[Tq,Nq,Dmain]` | no |
-| New MLA latent | `Cnew` | `[Tq,Dc+Dr]` | yes, append |
-| Indexer query | `QI` | `[Tq,HI,DI]` | no |
-| Indexer head weights | `head_w` | `[Tq,HI]` | no |
-| New index key | `KInew` | `[Tq,DI]` | yes, append |
-| Indexer history | `KIcache` | `[Tkv,DI]` plus request metadata | yes |
-| Conceptual scores | `scores` | `[Tq,Lmax]` | workspace or fused away |
-| Selected logical IDs | `topk_ids` | `[Tq,k]` | forward metadata |
-| Selected physical IDs | `page_ids` | `[Tq,k]` | forward metadata |
-| Selected latent entries | `Csel` | `[Tq,k,Dc+Dr]` | often read directly, not materialized |
-| Main logits | `Alogit` | `[Tq,Nq,k]` | workspace or tiled |
-| Main probabilities | `P` | `[Tq,Nq,k]` | preferably online/tiled |
-| Head output | `Ohead` | `[Tq,Nq,Dv]` | no |
-| Layer output | `O` | `[Tq,Hmodel]` | no |
+| Input | hidden states | $`\left[\mathrm{Tq},\mathrm{Hmodel}\right]`$ | no |
+| MLA query down projection | `q_lora` | $`\left[\mathrm{Tq},\mathrm{Dq}\right]`$ | no |
+| Main query heads | `Qmain` | $`\left[\mathrm{Tq},\mathrm{Nq},\mathrm{Dmain}\right]`$ | no |
+| New MLA latent | `Cnew` | $`\left[\mathrm{Tq},\mathrm{Dc}+\mathrm{Dr}\right]`$ | yes, append |
+| Indexer query | `QI` | $`\left[\mathrm{Tq},\mathrm{HI},\mathrm{DI}\right]`$ | no |
+| Indexer head weights | `head_w` | $`\left[\mathrm{Tq},\mathrm{HI}\right]`$ | no |
+| New index key | `KInew` | $`\left[\mathrm{Tq},\mathrm{DI}\right]`$ | yes, append |
+| Indexer history | `KIcache` | $`\left[\mathrm{Tkv},\mathrm{DI}\right]`$ plus request metadata | yes |
+| Conceptual scores | `scores` | $`\left[\mathrm{Tq},\mathrm{Lmax}\right]`$ | workspace or fused away |
+| Selected logical IDs | `topk_ids` | $`\left[\mathrm{Tq},k\right]`$ | forward metadata |
+| Selected physical IDs | `page_ids` | $`\left[\mathrm{Tq},k\right]`$ | forward metadata |
+| Selected latent entries | `Csel` | $`\left[\mathrm{Tq},k,\mathrm{Dc}+\mathrm{Dr}\right]`$ | often read directly, not materialized |
+| Main logits | `Alogit` | $`\left[\mathrm{Tq},\mathrm{Nq},k\right]`$ | workspace or tiled |
+| Main probabilities | `P` | $`\left[\mathrm{Tq},\mathrm{Nq},k\right]`$ | preferably online/tiled |
+| Head output | `Ohead` | $`\left[\mathrm{Tq},\mathrm{Nq},\mathrm{Dv}\right]`$ | no |
+| Layer output | `O` | $`\left[\mathrm{Tq},\mathrm{Hmodel}\right]`$ | no |
 
 “Logical shape” does not imply that a dense tensor is allocated. A fused indexer can stream key tiles and keep only running top-k candidates; a sparse attention kernel can load latent entries from physical page IDs without constructing `Csel`.
 
@@ -509,15 +598,18 @@ Production code replaces the conceptual per-query cache views with packed/paged 
 
 Dense attention normalizes over all valid positions `V_t`:
 
-```text
-p_dense(s) = exp(a_s) / sum_(u in V_t) exp(a_u)
+```math
+p_{\mathrm{dense}}\left(s\right) = \mathrm{exp}\left(a_{s}\right) / \sum_{u \in V_{t}} \mathrm{exp}\left(a_{u}\right)
 ```
 
 DSA first obtains a selected support `S_t` from a different score function, then the main core normalizes only over that support:
 
-```text
-p_dsa(s) = exp(a_s) / sum_(u in S_t) exp(a_u),  s in S_t
-p_dsa(s) = 0,                                  s not in S_t
+```math
+p_{\mathrm{dsa}}\left(s\right) = \mathrm{exp}\left(a_{s}\right) / \sum_{u \in S_{t}} \mathrm{exp}\left(a_{u}\right), s \in S_{t}
+```
+
+```math
+p_{\mathrm{dsa}}\left(s\right) = 0, s \mathrm{not} \in S_{t}
 ```
 
 Even if the main logits `a_s` are unchanged, removing candidates changes the denominator. This explains both why sparse continued training is needed and why comparing a sparse result to dense MLA with an extremely tight elementwise tolerance is not a valid correctness target. Kernel correctness should match the trained sparse reference; model quality should be evaluated at the task level.
@@ -526,24 +618,36 @@ Even if the main logits `a_s` are unchanged, removing candidates changes the den
 
 Suppose one layer uses:
 
-```text
-Dc + Dr = 576 latent elements per token, BF16
-DI = 128 index elements per token, INT8 plus block scales
-L = 128K tokens
-k = 2048
+```math
+\mathrm{Dc} + \mathrm{Dr} = 576 \mathrm{latent} \mathrm{elements} \mathrm{per} \mathrm{token}, \mathrm{BF16}
+```
+
+```math
+\mathrm{DI} = 128 \mathrm{index} \mathrm{elements} \mathrm{per} \mathrm{token}, \mathrm{INT8} \mathrm{plus} \mathrm{block} \mathrm{scales}
+```
+
+```math
+L = 128K \mathrm{tokens}
+```
+
+```math
+k=2048
 ```
 
 Ignoring alignment and scales:
 
-```text
-latent capacity = 131072 * 576 * 2 bytes ≈ 144 MiB
-index capacity  = 131072 * 128 * 1 byte  ≈ 16 MiB
+```math
+\text{latent capacity}= 131072 \cdot  576 \cdot  2 \mathrm{bytes} \approx  144 \mathrm{MiB}
+```
+
+```math
+\text{index capacity}= 131072 \cdot  128 \cdot  1 \mathrm{byte} \approx  16 \mathrm{MiB}
 ```
 
 The full capacity still grows with `L`. But the main core's per-query latent read is bounded near:
 
-```text
-2048 * 576 * 2 bytes ≈ 2.25 MiB
+```math
+2048 \cdot  576 \cdot  2 \mathrm{bytes} \approx  2.25 \mathrm{MiB}
 ```
 
 The indexer scans roughly 16 MiB of quantized keys for that query unless its implementation reuses cache/on-chip locality or distributes the scan. This example makes the optimization target explicit: DSA trades a cheap, narrow sequential scan for a much smaller expensive latent-attention read.
@@ -562,10 +666,10 @@ The indexer scans roughly 16 MiB of quantized keys for that query unless its imp
 
 ## 22. Exercises
 
-1. With `Tq=32`, `HI=64`, `DI=128`, `Lkv=8192`, write every intermediate shape in the unfused indexer.
-2. Compute the ratio of main-core logits for dense MLA versus DSA when `L=128K` and `k=2048`.
+1. With $`\mathrm{Tq}=32`$, $`\mathrm{HI}=64`$, $`\mathrm{DI}=128`$, $`\mathrm{Lkv}=8192`$, write every intermediate shape in the unfused indexer.
+2. Compute the ratio of main-core logits for dense MLA versus DSA when $`L=128K`$ and $`k=2048`$.
 3. Explain why evicting every non-selected token after one query is incorrect.
-4. Design a streaming top-k implementation that never materializes `[Tq,Lkv]` scores.
+4. Design a streaming top-k implementation that never materializes $`\left[\mathrm{Tq},\mathrm{Lkv}\right]`$ scores.
 5. For a paged cache with page size 64, derive the physical address of logical token 130 from its request block table.
 
 ## 23. References

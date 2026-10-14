@@ -110,14 +110,23 @@ python -m sglang.launch_server \
 
 `_handle_dspark()` 做的不是普通参数透传，而是建立后续所有 memory/shape 计算依赖的不变量：
 
-```text
-speculative_num_steps = 1
-speculative_eagle_topk = 1
-gamma = checkpoint block_size 或 --speculative-dspark-block-size
-speculative_num_draft_tokens = gamma + 1
+```math
+\mathrm{speculative\_num\_steps}=1
 ```
 
-其中 `topk=1` 表示线性链而不是 EAGLE 候选树；`num_steps=1` 是复用 generic speculative accounting 字段，并不表示 DSpark 只提一个 token。
+```math
+\mathrm{speculative\_eagle\_topk}=1
+```
+
+```text
+gamma = checkpoint block_size 或 --speculative-dspark-block-size
+```
+
+```math
+\mathrm{speculative\_num\_draft\_tokens}=\gamma+1
+```
+
+其中 $`\mathrm{topk}=1`$ 表示线性链而不是 EAGLE 候选树；$`\mathrm{num\_steps}=1`$ 是复用 generic speculative accounting 字段，并不表示 DSpark 只提一个 token。
 
 `resolve_runtime_config()` 再执行 checkpoint 级校验：
 
@@ -132,12 +141,12 @@ return DSparkRuntimeConfig(
 
 还会要求：
 
-- `markov_rank > 0`；
+- $`\mathrm{markov\_rank} \gt 0`$；
 - `mask_token_id` 存在且小于 target vocabulary size；
 - 显式 `γ` 与 checkpoint block size 不一致时给出警告或错误；
 - 不受支持的 PP/DP-attention/CP 组合在模型加载前失败。
 
-为什么要尽早失败？若 worker 已按错误的 `W` 分配 KV slot、CUDA graph buffer 和 `[B,W]` accept buffer，之后再纠正 `γ` 已经太晚。
+为什么要尽早失败？若 worker 已按错误的 `W` 分配 KV slot、CUDA graph buffer 和 $`\left[B,W\right]`$ accept buffer，之后再纠正 `γ` 已经太晚。
 
 ## 3. Worker 初始化：对象图而不是一个模型
 
@@ -202,7 +211,7 @@ Markov head 与 exact sampling 都需要完整 vocabulary distribution，所以 
 |---|---|---|
 | target 持久 cache | 跨轮 | target attention KV、请求 token mapping、KDA/Mamba state |
 | draft 持久 cache | 跨轮 | 注入的 target context K/V、draft attention cache |
-| per-step workspace | 一轮 | `[B,W]` verify slot、draft block、confidence、compact mapping、accept buffers |
+| per-step workspace | 一轮 | $`\left[B,W\right]`$ verify slot、draft block、confidence、compact mapping、accept buffers |
 
 CUDA/NPU graph 还需要按 capture tier 预分配稳定地址。后文的 folded proposal/epilogue 正是为了把 sampling、scatter 与 commit 融进这些稳定图中。
 
@@ -237,16 +246,16 @@ target forward -> 用仍有效的 out_cache_loc 注入 -> 返回 scheduler
 
 ### 4.2 Prefill shape
 
-设本批实际 extend token 总数为 `T=Σ extend_len_r`，被 capture 的 target feature 宽度为 `D_t`：
+设本批实际 extend token 总数为 $`T=\sum  \mathrm{extend\_len\_r}`$，被 capture 的 target feature 宽度为 `D_t`：
 
 | Tensor | Shape | 说明 |
 |---|---:|---|
-| `batch.out_cache_loc` | `[T]` | target prompt token 的 cache slot |
+| `batch.out_cache_loc` | $`\left[T\right]`$ | target prompt token 的 cache slot |
 | captured hidden | `[T',D_t]` | `T'` 可因选层/裁剪策略与 `T` 对齐后再索引 |
 | absolute positions | `[T']` | 根据 prefix/extend length 构造 |
 | projected draft context K/V | 模型相关 | 每层写入 draft KV pool |
-| `next_token_ids` | `[B]` | 下一轮 anchor/bonus |
-| `new_seq_lens` | `[B]` | prefill 后的正式 target 长度 |
+| `next_token_ids` | $`\left[B\right]`$ | 下一轮 anchor/bonus |
+| `new_seq_lens` | $`\left[B\right]`$ | prefill 后的正式 target 长度 |
 
 `TargetHiddenKvInjector` 对普通 attention、MLA 与 unified KV/SWA 有不同写入分支。unified KV 额外携带 request state slot 与 final position，只保留滑窗中最终有效的写入，避免多个旧 prompt token 竞争同一 ring slot。
 
@@ -284,18 +293,18 @@ next_draft_input = make_next_draft_input(
 
 | 时刻 | Tensor | Shape |
 |---|---|---:|
-| 进入 decode | `prefix_lens` | `[B]` |
-| 临时 slot | `positions_2d`、`verify_cache_loc_2d` | `[B,W]` |
-| draft 输入 | `draft_block_ids` | 常见为 `[B,γ]` |
-| draft hidden | `draft_hidden` | `[B,γ,D]` |
-| draft candidates | `draft_tokens` | `[B,γ]` |
-| confidence | `confidence` | `[B,γ]` 或 `None` |
-| 每请求验证长度 | `verify_lens` | `[B]` |
-| target 逻辑输入 | `verify_ids_2d` | `[B,W]`，`W=γ+1` |
-| target compact 输入 | compact ids | `[T_v]` |
+| 进入 decode | `prefix_lens` | $`\left[B\right]`$ |
+| 临时 slot | `positions_2d`、`verify_cache_loc_2d` | $`\left[B,W\right]`$ |
+| draft 输入 | `draft_block_ids` | 常见为 $`\left[B,\gamma\right]`$ |
+| draft hidden | `draft_hidden` | $`\left[B,\gamma,D\right]`$ |
+| draft candidates | `draft_tokens` | $`\left[B,\gamma\right]`$ |
+| confidence | `confidence` | $`\left[B,\gamma\right]`$ 或 `None` |
+| 每请求验证长度 | `verify_lens` | $`\left[B\right]`$ |
+| target 逻辑输入 | `verify_ids_2d` | $`\left[B,W\right]`$，$`W=\gamma+1`$ |
+| target compact 输入 | compact ids | $`\left[T_{v}\right]`$ |
 | 统一 accept logits | strided logits | `[B·W,V]` |
-| 提交长度 | `commit_lens` | `[B]` |
-| 下一轮 anchor | `bonus` | `[B]` |
+| 提交长度 | `commit_lens` | $`\left[B\right]`$ |
+| 下一轮 anchor | `bonus` | $`\left[B\right]`$ |
 
 ## 6. 分配 verify window：候选 slot 还不是正式历史
 
@@ -319,7 +328,7 @@ class VerifyWindow(msgspec.Struct, frozen=True):
 
 ## 7. Draft 提案：anchor + mask 一次通过 backbone
 
-`DraftBlockProposer._run_forward()` 复用持久 `[capacity,query_token_num]` buffer：
+`DraftBlockProposer._run_forward()` 复用持久 $`\left[\mathrm{capacity},\mathrm{query\_token\_num}\right]`$ buffer：
 
 ```python
 draft_block_ids[:, 0].copy_(draft_input.bonus_tokens.view(-1))
@@ -358,7 +367,7 @@ hidden_by_query = hidden_states.view(B, gamma + 1, ...)
 selected = hidden_by_query[:, 1:]
 ```
 
-得到的采样 hidden 仍统一为 `[B,γ,D]`。教程或 profile 中看到 `B(γ+1)` 的 draft hidden 时，应先检查 `sample_from_anchor`，不要马上判定 off-by-one。
+得到的采样 hidden 仍统一为 $`\left[B,\gamma,D\right]`$。教程或 profile 中看到 `B(γ+1)` 的 draft hidden 时，应先检查 `sample_from_anchor`，不要马上判定 off-by-one。
 
 ### 7.2 Base logits 与 semi-AR sampling
 
@@ -384,7 +393,7 @@ bias = self.markov_w2(prev_embeds)          # [B,V]
 step_logits = base_logits[:, k, :] + bias   # [B,V]
 ```
 
-greedy CUDA 快路径用 `MarkovGreedyStep` 融合 bias dot、add 与 argmax，避免分别物化完整 `[B,V]` bias 与中间 logits。sampling 路径必须保留 corrected logits 或概率，因为 rejection sampling 需要 `q_k(x)`。
+greedy CUDA 快路径用 `MarkovGreedyStep` 融合 bias dot、add 与 argmax，避免分别物化完整 $`\left[B,V\right]`$ bias 与中间 logits。sampling 路径必须保留 corrected logits 或概率，因为 rejection sampling 需要 `q_k(x)`。
 
 ### 7.3 Folded proposal
 
@@ -402,12 +411,18 @@ draft backbone -> base LM head -> Markov sampling -> confidence
 
 ```text
 position 0 previous = anchor
-position 1 previous = draft_token[0]
+```
+
+```math
+\text{position 1 previous}= \mathrm{draft\_token}\left[0\right]
+```
+
+```text
 ...
 position γ-1 previous = draft_token[γ-2]
 ```
 
-所以 previous-token ids 与 embedding 的 shape 是 `[B,γ]` 和 `[B,γ,r]`，再与 `[B,γ,D]` hidden 拼接。
+所以 previous-token ids 与 embedding 的 shape 是 $`\left[B,\gamma\right]`$ 和 $`\left[B,\gamma,r\right]`$，再与 $`\left[B,\gamma,D\right]`$ hidden 拼接。
 
 `DSparkConfidenceHead.apply_sts()` 的运行时语义是：
 
@@ -415,7 +430,7 @@ position γ-1 previous = draft_token[γ-2]
 c_{r,k}=\sigma(z_{r,k}/T_k),
 ```
 
-输出 `[B,γ]` 并由 invariant 检查在 `[0,1]` 内。没有 confidence head 时：
+输出 $`\left[B,\gamma\right]`$ 并由 invariant 检查在 $`\left[0,1\right]`$ 内。没有 confidence head 时：
 
 - `static` / verify-all 仍可工作；
 - 依赖 confidence 的 dynamic scheduling 会在初始化阶段拒绝，而不是静默使用随机预算。
@@ -448,24 +463,27 @@ device kernel 先计算：
 sort_survival = torch.cumprod(confidence.float(), dim=1)  # [B,γ]
 ```
 
-再由 `ScheduleVerifyLensTopk` 在预算下产生 `[B]`：
+再由 `ScheduleVerifyLensTopk` 在预算下产生 $`\left[B\right]`$：
 
-```text
-min_verify_len <= verify_lens[r] <= W
-Σ(verify_lens[r] - floor) <= budget
+```math
+\mathrm{min\_verify\_len} \le {\mathrm{verify\_lens}}_{r} \le W
 ```
 
-`verify_lens` 含 anchor。比如 `γ=4,W=5`，`verify_lens=3` 表示计算：
+```math
+\sum \left(\mathrm{verify\_lens}\left[r\right] - \mathrm{floor}\right) \le  \mathrm{budget}
+```
 
-```text
-[anchor, draft_1, draft_2]
+`verify_lens` 含 anchor。比如 $`\gamma=4,\qquad W=5`$，$`\mathrm{verify\_lens}=3`$ 表示计算：
+
+```math
+\left[\mathrm{anchor},\mathrm{draft\_1},\mathrm{draft\_2}\right]
 ```
 
 而不是 3 个 draft 加 anchor。
 
 ### 9.3 Layout 中有什么
 
-`RaggedVerifyLayout` 把逻辑 `[B,W]` 与 compact `[T_v]` 联系起来。概念字段包括：
+`RaggedVerifyLayout` 把逻辑 $`\left[B,W\right]`$ 与 compact $`\left[T_{v}\right]`$ 联系起来。概念字段包括：
 
 ```text
 verify_lens [B]
@@ -475,7 +493,7 @@ graph tier token count
 scatter/gather 映射
 ```
 
-`T_v=Σ verify_lens`，但图 replay token 数可能是 `round_up_grid(T_v)`。若超过已捕获 grid，planner 会回退或选择其他布局，不能强行 replay 错误 shape。
+$`T_{v}=\sum  \mathrm{verify\_lens}`$，但图 replay token 数可能是 `round_up_grid(T_v)`。若超过已捕获 grid，planner 会回退或选择其他布局，不能强行 replay 错误 shape。
 
 ## 10. 构造 target verify 输入
 
@@ -487,17 +505,19 @@ verify_ids_2d = torch.cat(
 ).contiguous()
 ```
 
-shape 是 `[B,W]`。例如：
+shape 是 $`\left[B,W\right]`$。例如：
 
-```text
-B=2, γ=3, W=4
-anchor       [[10],       [20]]          [2,1]
-draft_tokens [[11,12,13], [21,22,23]]   [2,3]
-verify_ids   [[10,11,12,13],
-              [20,21,22,23]]            [2,4]
+```math
+B=2,\qquad \gamma=3,\qquad W=4
 ```
 
-若有 grammar，`GrammarTree.from_linear_chain(verify_ids_2d)` 先建立逻辑链。grammar mask 在 target logits 返回后应用；因为 compact 结果会 scatter 回 `[B,W,V]`，同一套 mask 对 static/compact 都成立。
+```text
+anchor       [[10],       [20]]          [2,1]
+draft_tokens [[11,12,13], [21,22,23]]   [2,3]
+verify_ids   [[10,11,12,13], [20,21,22,23]]            [2,4]
+```
+
+若有 grammar，`GrammarTree.from_linear_chain(verify_ids_2d)` 先建立逻辑链。grammar mask 在 target logits 返回后应用；因为 compact 结果会 scatter 回 $`\left[B,W,V\right]`$，同一套 mask 对 static/compact 都成立。
 
 ## 11. Compact target verify：pack、forward、scatter
 
@@ -520,11 +540,17 @@ strided_logits = ScatterCompactToStrided.execute(
 
 ### 11.1 Shape 变化
 
-设 `verify_lens=[3,1,4]`：
+设 $`\mathrm{verify\_lens}=\left[3,1,4\right]`$：
 
 ```text
 logical ids          [3,4]
-valid rows           3+1+4 = 8
+```
+
+```math
+\mathrm{valid} \mathrm{rows} 3+1+4 = 8
+```
+
+```text
 compact ids          [8]
 target logits        [8,V]
 target hidden        [8,D_t]
@@ -538,11 +564,11 @@ scatter hidden       [3*4,D_t]
 
 这样下游只需理解固定 stride：
 
-```text
-row = request_id * W + position_in_chain
+```math
+\mathrm{row}=\mathrm{request\_id}\cdot W+\mathrm{position\_in\_chain}
 ```
 
-greedy accept、rejection sampling、grammar、logprob、observer 和 hidden commit 可以共用接口。compact 是物理执行布局，`[B,W]` 是逻辑协议。
+greedy accept、rejection sampling、grammar、logprob、observer 和 hidden commit 可以共用接口。compact 是物理执行布局，$`\left[B,W\right]`$ 是逻辑协议。
 
 ### 11.3 Graph epilogue
 
@@ -654,17 +680,24 @@ next_draft_input = make_next_draft_input(
 
 bonus 恰好是 target 认可、且位于本轮已提交末端的 token，所以它既输出给用户，也成为下一轮 draft block 的第 0 列。
 
-## 14. 一个完整数值追踪：`B=2, γ=3`
+## 14. 一个完整数值追踪：$`B=2,\qquad \gamma=3`$
 
 设：
 
-```text
-prefix_lens = [100, 40]
-anchor      = [10, 20]
-draft       = [[11,12,13],
-               [21,22,23]]
-confidence  = [[0.90,0.70,0.20],
-               [0.95,0.90,0.80]]
+```math
+\mathrm{prefix\_lens}=\left[100,40\right]
+```
+
+```math
+\mathrm{anchor}=\left[10,20\right]
+```
+
+```math
+\mathrm{draft}=\left[\left[11,12,13\right],\left[21,22,23\right]\right]
+```
+
+```math
+\mathrm{confidence}=\left[\left[0.9,0.7,0.2\right],\left[0.95,0.9,0.8\right]\right]
 ```
 
 ### 14.1 Scheduler
@@ -678,15 +711,21 @@ R1 [0.95, 0.855, 0.684]
 
 假设预算选择：
 
-```text
-verify_lens = [2,4]      # 含 anchor
+```math
+\mathrm{verify\_lens}=\left[2,4\right]\qquad\text{含 anchor}
 ```
 
 于是 compact 输入为：
 
+```math
+\mathrm{shape}\left(\mathrm{R0}\right)=\left[10,11\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{R1}\right)=\left[20,21,22,23\right]
+```
+
 ```text
-R0: [10,11]
-R1: [20,21,22,23]
 T_v = 6，而固定窗口 B*W = 8
 ```
 
@@ -701,22 +740,34 @@ R1: 21、22 一致，23 不一致，target correction 为 88
 
 得到：
 
-```text
-correct_len = [1,2]
-bonus       = [99,88]
-commit_lens = [2,3]
-out tokens  = [[11,99], [21,22,88]]（物理上可 flatten）
-new_seq_lens= [102,43]
+```math
+\mathrm{correct\_len}=\left[1,2\right]
 ```
 
-R0 的第 2、3 个候选未验证，绝不能出现在 logits、hidden commit 或 cache 可见长度里。R1 的候选 23 虽经过 target forward，但被 correction 88 替换；下一轮 anchor 是 `[99,88]`。
+```math
+\mathrm{bonus}=\left[99,88\right]
+```
+
+```math
+\mathrm{commit\_lens}=\left[2,3\right]
+```
+
+```text
+out tokens  = [[11,99], [21,22,88]]（物理上可 flatten）
+```
+
+```math
+\mathrm{new\_seq\_lens}=\left[102,43\right]
+```
+
+R0 的第 2、3 个候选未验证，绝不能出现在 logits、hidden commit 或 cache 可见长度里。R1 的候选 23 虽经过 target forward，但被 correction 88 替换；下一轮 anchor 是 $`\left[99,88\right]`$。
 
 ## 15. Static、compact、cap-accept 的真实分支
 
 | 分支 | `layout` | target forward | accept cutoff | hidden commit |
 |---|---|---|---|---|
 | static | `None` | `[B·W]` | 无动态 cap | 按 `commit_lens` |
-| compact | `RaggedVerifyLayout` | `[T_v]` 后 scatter | `verify_lens` | 只提交已算前缀 |
+| compact | `RaggedVerifyLayout` | $`\left[T_{v}\right]`$ 后 scatter | `verify_lens` | 只提交已算前缀 |
 | cap-accept | 有 layout 但 full verify | `[B·W]` | `verify_lens` | 按 gated commit |
 
 调试推荐先比较 static 与 compact 在相同 seed、greedy 请求下输出是否一致，再打开 sampling、grammar、DP attention 与 graph folding。一次同时打开所有优化，会让错误难以定位。
@@ -769,8 +820,17 @@ grammar 或额外 logits adjustment 会改变 target 分布。源码只在这些
 ```text
 draft_tokens.shape             == [B,γ]
 verify_ids_2d.shape            == [B,γ+1]
-1 <= verify_lens[r]            <= γ+1
-commit_lens[r]                 <= verify_lens[r]
+```
+
+```math
+1 \le {\mathrm{verify\_lens}}_{r} \le \gamma+1
+```
+
+```math
+{\mathrm{commit\_lens}}_{r} \le {\mathrm{verify\_lens}}_{r}
+```
+
+```text
 new_seq_lens[r]                == prefix_lens[r] + commit_lens[r]
 next_anchor[r]                 == bonus[r]
 compact valid rows             == sum(verify_lens)
@@ -811,7 +871,7 @@ _handle_dspark
   -> make_next_draft_input
 ```
 
-每个断点只打印：dtype、device、shape、前两个 request 的长度/少量 token id，不要打印完整 `[B,γ,V]` logits。
+每个断点只打印：dtype、device、shape、前两个 request 的长度/少量 token id，不要打印完整 $`\left[B,\gamma,V\right]`$ logits。
 
 第二轮再依次打开：
 
@@ -844,7 +904,7 @@ _handle_dspark
 2. `draft_block_ids`、`draft_tokens`、`verify_ids_2d` 分别包含什么？
 3. 为什么 sampling 路径必须保留 corrected draft logits，而 greedy 可以只保留 token？
 4. 为什么 current confidence 不一定用于 current verify budget？
-5. compact target 只算 `[T_v]` 行，为什么 acceptor 仍看到 `[B·W,V]`？
+5. compact target 只算 $`\left[T_{v}\right]`$ 行，为什么 acceptor 仍看到 `[B·W,V]`？
 6. `correct_len` 与 `commit_lens` 为什么总差一个 token？
 7. rejected tail 已经写过临时 KV，为什么不能成为下一轮状态？
 8. KDA/Mamba 为什么要用 `commit_lens-1` 选择递推 state？

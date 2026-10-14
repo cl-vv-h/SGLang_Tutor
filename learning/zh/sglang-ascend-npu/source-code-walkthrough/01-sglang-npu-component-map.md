@@ -32,14 +32,17 @@
 
 SGLang 主要负责控制面和运行时编排：
 
+```math
+\frac{\text{用户参数}}{\text{模型配置}}
+```
+
 ```text
-用户参数 / 模型配置
-  -> 平台识别与能力校验
-  -> backend、method、runner、manager 选择
-  -> 对象初始化与状态持有
-  -> Scheduler 组织请求和 batch
-  -> ModelRunner 驱动模型 forward
-  -> 为 NPU 算子准备 tensor、metadata、stream 和通信组
+-> 平台识别与能力校验
+-> backend、method、runner、manager 选择
+-> 对象初始化与状态持有
+-> Scheduler 组织请求和 batch
+-> ModelRunner 驱动模型 forward
+-> 为 NPU 算子准备 tensor、metadata、stream 和通信组
 ```
 
 SGLang 中最集中的 NPU 目录是：

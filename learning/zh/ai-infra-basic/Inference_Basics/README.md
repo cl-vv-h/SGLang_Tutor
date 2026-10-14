@@ -45,14 +45,29 @@ Decode 每次通常只输入一个 token。单个请求的计算量变小，但�
 
 常见张量形状：
 
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[\mathrm{batch},\mathrm{seq\_len}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[\mathrm{batch},\mathrm{seq\_len},\mathrm{hidden\_size}\right]
+```
+
 ```text
-input_ids: [batch, seq_len]
-hidden_states: [batch, seq_len, hidden_size]
 q/k/v: [batch, num_heads, seq_len, head_dim]
 kv_cache per layer:
-    key:   [num_tokens_or_blocks, kv_heads, head_dim]
-    value: [num_tokens_or_blocks, kv_heads, head_dim]
-logits: [batch, seq_len, vocab_size]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{key}\right)=\left[\mathrm{num\_tokens\_or\_blocks},\mathrm{kv\_heads},\mathrm{head\_dim}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{value}\right)=\left[\mathrm{num\_tokens\_or\_blocks},\mathrm{kv\_heads},\mathrm{head\_dim}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[\mathrm{batch},\mathrm{seq\_len},\mathrm{vocab\_size}\right]
 ```
 
 在 decode 阶段，`seq_len` 往往是 1，但 attention 需要看的历史长度是 `past_len + 1`。这也是“输入很短但不一定很快”的根本原因。

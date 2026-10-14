@@ -8,8 +8,8 @@
 
 MLA 路径中的融合投影输出可抽象为：
 
-```text
-fused row = [Q latent | K latent(nope) | K positional(pe)]
+```math
+\text{fused row}= \left[Q \mathrm{latent} \mid  K \mathrm{latent}\left(\mathrm{nope}\right) \mid  K \mathrm{positional}\left(\mathrm{pe}\right)\right]
 ```
 
 Kernel 一次完成：
@@ -66,8 +66,11 @@ fused_split_qk_norm_kernel[(B,)](
 
 所以：
 
+```math
+\mathrm{grid}=\left[B\right]
+```
+
 ```text
-grid = (B,)
 pid 0 -> 第 0 行
 pid 1 -> 第 1 行
 其余 pid 依次对应其余行
@@ -94,7 +97,7 @@ q = tl.load(
 
 一个 program 把当前行 Q 段当成一维 tile。`q_lora_rank` 是 `tl.constexpr`，编译器在编译期知道 tile 长度。
 
-若输入是 FP16：`pid/base` 是整数标量 `tl.tensor`；`q_lora_rank` 是编译期整数；`q_offs` 是 `int32[q_lora_rank]`；`fused_ptr` 是 `pointer<fp16>[]`；三者相加得到 `pointer<fp16>[q_lora_rank]`；`tl.load` 先返回 `fp16[q_lora_rank]`，`.to(tl.float32)` 再生成 `fp32[q_lora_rank]`。构造地址不会访问 GM，`tl.load` 才发生读取。
+若输入是 FP16：`pid/base` 是整数标量 `tl.tensor`；`q_lora_rank` 是编译期整数；`q_offs` 是 `int32[q_lora_rank]`；`fused_ptr` 是 $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[\right]`$；三者相加得到 $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[\mathrm{q\_lora\_rank}\right]`$；`tl.load` 先返回 `fp16[q_lora_rank]`，`.to(tl.float32)` 再生成 `fp32[q_lora_rank]`。构造地址不会访问 GM，`tl.load` 才发生读取。
 
 地址范围：
 
@@ -282,7 +285,7 @@ pe_ref = pe
 
 **答案：**因为 launch grid 是 `(B,)`，`pid` 选择 batch/token 行，而行内元素由 `tl.arange` 组成 block tensor 一次处理。
 
-`pid=2` 时，`base=2*total_hidden` 定位到输入第 2 行。随后 `q_offs=tl.arange(0,q_lora_rank)` 生成这一行 Q 段的全部逻辑 offset，K 与 PE 段同理。没有第二维 program ID 为每个元素创建独立 program。
+$`\mathrm{pid}=2`$ 时，$`\mathrm{base}=2\cdot \mathrm{total\_hidden}`$ 定位到输入第 2 行。随后 `q_offs=tl.arange(0,q_lora_rank)` 生成这一行 Q 段的全部逻辑 offset，K 与 PE 段同理。没有第二维 program ID 为每个元素创建独立 program。
 
 因此并行层次是“program 间并行处理不同行，program 内以 block tensor 处理一行的三个片段”。编译器会进一步把行内 block 降低到 Vector 指令，但这不改变 program 的逻辑职责。
 

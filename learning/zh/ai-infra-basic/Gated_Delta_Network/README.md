@@ -24,8 +24,8 @@ GDN 在本专题中指 **Gated Delta Network / Gated DeltaNet**，也就是 Qwen
 | GDN 的状态是参数吗 | 不是。`S_t` 或 `ssm_states` 是每个请求运行时缓存，类似 Mamba state，不被 optimizer 更新。 |
 | 哪些东西可训练 | 输入投影、短卷积、`A_log`、`dt_bias`、output gate norm、out projection，以及模型其他 MLP/MoE/embedding 等权重。 |
 | `a`、`b` 是参数吗 | 不是。它们是由 hidden states 经线性投影得到的 token 级激活；产生它们的投影权重是参数。 |
-| `g`、`beta` 是参数吗 | 不是。`g = -exp(A_log) * softplus(a + dt_bias)`，`beta = sigmoid(b)`，它们是由参数和激活计算出来的控制信号。 |
-| GDN 为什么适合长上下文 | 每层每请求状态大小约为 `num_value_heads * value_dim * key_dim`，不随历史 token 数线性增长。 |
+| `g`、`beta` 是参数吗 | 不是。$`g=-\mathrm{exp}\left(A_{\mathrm{log}}\right)\cdot \mathrm{softplus}\left(a+\mathrm{dt\_bias}\right)`$，$`\beta=\mathrm{sigmoid}\left(b\right)`$，它们是由参数和激活计算出来的控制信号。 |
+| GDN 为什么适合长上下文 | 每层每请求状态大小约为 $`\mathrm{num\_value\_heads}\cdot \mathrm{value\_dim}\cdot \mathrm{key\_dim}`$，不随历史 token 数线性增长。 |
 | KDA 有何不同 | GDN 对每个 token/head 使用一个保留率标量；Kimi Delta Attention 在 key 通道上使用向量，因此状态各列可以独立衰减。 |
 
 读完三个章节后，可继续学习 [Kimi Delta Attention](../Model_Architecture/09-kimi-delta-attention.md)，理解细粒度门控如何改变递归、kernel 与 serving 状态契约。

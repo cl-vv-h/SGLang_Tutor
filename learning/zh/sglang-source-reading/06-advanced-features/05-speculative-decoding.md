@@ -145,7 +145,7 @@ flowchart TD
 | 文件 | 函数 | 作用 |
 |---|---|---|
 | `scheduler.py` | `Scheduler.maybe_init_draft_worker()` | 如果启用 speculative，创建 draft/spec worker |
-| `scheduler.py` | `Scheduler.init_model_worker()` | 普通模式 `model_worker = tp_worker`；spec 模式 `model_worker = draft_worker` |
+| `scheduler.py` | `Scheduler.init_model_worker()` | 普通模式 $`\mathrm{model\_worker}=\mathrm{tp\_worker}`$；spec 模式 $`\mathrm{model\_worker}=\mathrm{draft\_worker}`$ |
 | `scheduler.py` | `Scheduler.run_batch()` | 后续执行 batch 时统一调用 `self.model_worker.forward_batch_generation()` |
 
 流程如下：
@@ -294,13 +294,13 @@ flowchart TD
 
 ### top-k 与 tree
 
-如果 `topk=1`，候选结构退化成一条链：
+如果 $`\mathrm{topk}=1`$，候选结构退化成一条链：
 
 ```text
 t1 -> t2 -> t3 -> ...
 ```
 
-如果 `topk>1`，候选会变成树：
+如果 $`\mathrm{topk} \gt 1`$，候选会变成树：
 
 ```mermaid
 flowchart TD
@@ -410,8 +410,8 @@ flowchart LR
 
 `accept_lens` 包含 bonus，所以：
 
-```text
-num_correct_drafts = accept_len - 1
+```math
+\mathrm{num\_correct\_drafts}=\mathrm{accept\_len}-1
 ```
 
 这也是 `BatchResultProcessor._resolve_spec_overlap_tokens()` 中的处理：
@@ -486,7 +486,7 @@ flowchart LR
 spec v2 的 `_resolve_spec_overlap_tokens()` 会根据 `accept_lens` 修正 `req.kv_committed_len`：
 
 - 请求完成时，因为 decode 前预占了 bonus slot，需要减掉未使用的部分。
-- 请求未完成时，`kv_committed_len += accept_lens[i] - 1`。
+- 请求未完成时，$`\mathrm{kv\_committed\_len} += \mathrm{accept\_lens}\left[i\right] - 1`$。
 
 这里的 `-1` 来自注释里的提示：`prepare_for_decode` 已经预占了 bonus slot。
 

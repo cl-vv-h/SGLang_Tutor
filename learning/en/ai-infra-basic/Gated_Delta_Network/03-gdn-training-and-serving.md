@@ -6,13 +6,13 @@ Using SGLang's `Qwen3GatedDeltaNet` as the concrete example, trainable parameter
 
 | Parameter | Code Module / Field | Shape Intuition | Role |
 |---|---|---:|---|
-| `in_proj_qkvz.weight` | `MergedColumnParallelLinear` | `[2*H*K+2*HV*V, H_model]` | projects hidden states into q/k/v/z |
-| `in_proj_ba.weight` | `MergedColumnParallelLinear` | `[2*HV, H_model]` | projects hidden states into b/a gate activations |
-| `conv1d.weight` | `ColumnParallelLinear` then reshape | equivalent to `[2*H*K+HV*V, C]` | short causal convolution on the q/k/v path |
-| `A_log` | `nn.Parameter` | `[HV]` | log-space decay parameter |
-| `dt_bias` | `nn.Parameter` | `[HV]` | decay/time-step bias |
-| `norm.weight` | `RMSNormGated` | `[V]` or implementation-specific | scale parameter for output gate/norm |
-| `out_proj.weight` | `RowParallelLinear` | `[H_model, HV*V]` | projects multi-head GDN output back to hidden size |
+| `in_proj_qkvz.weight` | `MergedColumnParallelLinear` | $`\left[2\cdot H\cdot K+2\cdot \mathrm{HV}\cdot V,H_{\mathrm{model}}\right]`$ | projects hidden states into q/k/v/z |
+| `in_proj_ba.weight` | `MergedColumnParallelLinear` | $`\left[2\cdot \mathrm{HV},H_{\mathrm{model}}\right]`$ | projects hidden states into b/a gate activations |
+| `conv1d.weight` | `ColumnParallelLinear` then reshape | equivalent to $`\left[2\cdot H\cdot K+\mathrm{HV}\cdot V,C\right]`$ | short causal convolution on the q/k/v path |
+| `A_log` | `nn.Parameter` | $`\left[\mathrm{HV}\right]`$ | log-space decay parameter |
+| `dt_bias` | `nn.Parameter` | $`\left[\mathrm{HV}\right]`$ | decay/time-step bias |
+| `norm.weight` | `RMSNormGated` | $`\left[V\right]`$ or implementation-specific | scale parameter for output gate/norm |
+| `out_proj.weight` | `RowParallelLinear` | $`\left[H_{\mathrm{model}},\mathrm{HV}\cdot V\right]`$ | projects multi-head GDN output back to hidden size |
 
 Objects that are not trainable parameters:
 
@@ -30,21 +30,24 @@ GDN does not have a standalone loss. It is part of a decoder layer and participa
 
 Training sample:
 
-```text
-input_ids:  [B,S]
-labels:     [B,S]
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[B,S\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{labels}\right)=\left[B,S\right]
 ```
 
 Model output:
 
-```text
-logits: [B,S,Vocab]
+```math
+\mathrm{shape}\left(\mathrm{logits}\right)=\left[B,S,\mathrm{Vocab}\right]
 ```
 
 Loss:
 
-```text
-loss = CrossEntropy(logits[:, :-1, :], labels[:, 1:])
+```math
+\mathrm{loss} = \mathrm{CrossEntropy}\left(\mathrm{logits}\left[:, :-1, :\right], \mathrm{labels}\left[:, 1:\right]\right)
 ```
 
 Backpropagation updates GDN layer parameters through the normal model graph:
@@ -67,8 +70,8 @@ it participates in gradient computation, but it is not an optimizer-owned Parame
 
 Training usually uses teacher forcing and feeds a sequence segment at once. For each training sample, the initial state is usually zero or passed in from a previous segment:
 
-```text
-S_0 = zeros([B, HV, V, K])
+```math
+S_{0}=\mathrm{zeros}\left(\left[B,\mathrm{HV},V,K\right]\right)
 ```
 
 Then the sequence is recurrently processed:
@@ -108,12 +111,11 @@ pass summary state between chunks
 
 The one-step recurrence contains:
 
-```text
-S_t = exp(g_t) * S_(t-1)
-      + beta_t * (v_t - exp(g_t) * S_(t-1) @ k_t) outer k_t
+```math
+S_{t}=\mathrm{exp}\left(g_{t}\right)\cdot {S}_{t-1}+\beta_{t}\cdot \left(v_{t}-\mathrm{exp}\left(g_{t}\right)\cdot {S}_{t-1}\,k_{t}\right)\,{k_{t}}^{\mathsf T}
 ```
 
-Tokens inside the same chunk influence one another. The write from token `i` affects the prediction for token `j > i`. Therefore, the chunk algorithm must handle a causal lower-triangular dependency.
+Tokens inside the same chunk influence one another. The write from token `i` affects the prediction for token $`j \gt i`$. Therefore, the chunk algorithm must handle a causal lower-triangular dependency.
 
 In SGLang's `chunk_fwd.py`, the core stages are:
 
@@ -125,7 +127,7 @@ In SGLang's `chunk_fwd.py`, the core stages are:
 5. Merge chunk state and compute output
 ```
 
-Why does `K @ K^T` appear?
+Why does $`K\,{K}^{\mathsf T}`$ appear?
 
 ```text
 Each write direction is k_i.
@@ -138,9 +140,12 @@ So the within-chunk token-to-token interaction can be organized as a lower-trian
 
 Prefill processes the prompt or an extended segment of tokens:
 
-```text
-hidden_states: [T,H_model]
-query_start_loc: [N+1]
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[T,H_{\mathrm{model}}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{query\_start\_loc}\right)=\left[N+1\right]
 ```
 
 End-to-end flow:
@@ -185,8 +190,8 @@ Prefill produces two categories of results:
 
 Decode usually has one new token per request:
 
-```text
-hidden_states: [B,H_model]
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[B,H_{\mathrm{model}}\right]
 ```
 
 Flow:
@@ -214,11 +219,20 @@ This is why GDN is attractive for long-context serving.
 
 SGLang's Triton GDN backend supports packed decode:
 
-```text
-mixed_qkv: [B, 2*H*K + HV*V]
-a:         [B, HV]
-b:         [B, HV]
-ssm_states:[num_slots, HV, V, K]
+```math
+\mathrm{shape}\left(\mathrm{mixed\_qkv}\right)=\left[B,2\cdot H\cdot K+\mathrm{HV}\cdot V\right]
+```
+
+```math
+\mathrm{shape}\left(a\right)=\left[B,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(b\right)=\left[B,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{ssm\_states}\right)=\left[\mathrm{num\_slots},\mathrm{HV},V,K\right]
 ```
 
 The packed kernel does all of the following inside one kernel:
@@ -334,12 +348,8 @@ GDN layers also need conv state and ssm state.
 
 So practical runtime cache memory is:
 
-```text
-total_runtime_cache =
-    full_attention_KV_cache
-    + GDN_ssm_states
-    + GDN_conv_states
-    + allocator/prefix/spec metadata
+```math
+\mathrm{total\_runtime\_cache} = \mathrm{full\_attention\_KV\_cache} + \mathrm{GDN\_ssm\_states} + \mathrm{GDN\_conv\_states} + \mathrm{allocator}/\mathrm{prefix}/\mathrm{spec} \mathrm{metadata}
 ```
 
 ## 12. Training vs Serving

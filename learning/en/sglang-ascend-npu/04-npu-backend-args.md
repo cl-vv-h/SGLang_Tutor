@@ -39,5 +39,5 @@
 1. Find `init_npu_backend()` — understand runtime initialization
 2. Find `set_default_server_args()` — see all NPU overrides
 3. Trace `attention_backend = "ascend"` — how backend is selected
-4. Check `page_size = 128` — why different from GPU default
+4. Check $`\mathrm{page\_size}=128`$ — why different from GPU default
 5. Understand `disable_custom_all_reduce = True` — NPU communication difference

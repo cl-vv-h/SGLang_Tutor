@@ -30,15 +30,19 @@ def persistent_matmul(A, B, C, M, N, K, ...):
 
 ```text
 Ascend constraint: physical AI Cores are limited (e.g., 32 cores per NPU)
-
 Large grid (> physical cores):
-  → Triton-Ascend splits into waves
-  → Each wave: grid_size cores active, rest idle
-  → Multiple waves execute sequentially
-
+→ Triton-Ascend splits into waves
+→ Each wave: grid_size cores active, rest idle
+→ Multiple waves execute sequentially
 Persistent kernel with large grid:
-  → grid_size = physical_cores (max occupancy)
-  → Each core processes multiple tiles (no idle waves)
+```
+
+```math
+\text{→ grid\_size}= \mathrm{physical\_cores} \left(\mathrm{max} \mathrm{occupancy}\right)
+```
+
+```text
+→ Each core processes multiple tiles (no idle waves)
 ```
 
 ## Auto-Blockify

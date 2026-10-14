@@ -16,7 +16,7 @@ flowchart LR
     R2 --> IO["Next layer or output head"]
 ```
 
-1. **Input/output contract**: why does the residual stream usually remain `[B,S,H]`?
+1. **Input/output contract**: why does the residual stream usually remain $`\left[B,S,H\right]`$?
 2. **Token mixer**: which tokens may a token read, and by what operation?
 3. **Channel mixer**: how do Dense FFN, SwiGLU, and MoE transform the last dimension?
 4. **Runtime state**: what exactly survives into the next decode step?
@@ -27,36 +27,60 @@ This chapter is not a list of model names. It is a method for reconstructing an 
 
 For the common serial Pre-Norm residual layout:
 
-```text
-U = RMSNorm(X)                   [B,S,H]
-A, state' = TokenMixer(U,state) [B,S,H]
-R = X + A                       [B,S,H]
-V = RMSNorm(R)                  [B,S,H]
-F = ChannelMixer(V)             [B,S,H]
-Y = R + F                       [B,S,H]
+```math
+U=\mathrm{RMSNorm}\left(X\right)\qquad\mathrm{shape}:\left[B,S,H\right]
 ```
 
-The **intermediates** and **persistent state** change; the residual stream shape does not. SwiGLU temporarily expands to `[B,S,I]`; MoE temporarily expands each token into `K` routes; attention logically creates `[B,N,Lq,Lkv]` scores; SSM/KDA reads and writes fixed-shape matrices. Every branch must project back to `H` before residual addition.
+```math
+\text{A, state'}= \mathrm{TokenMixer}\left(U,\mathrm{state}\right) \left[B,S,H\right]
+```
+
+```math
+R=X+A\qquad\mathrm{shape}:\left[B,S,H\right]
+```
+
+```math
+V=\mathrm{RMSNorm}\left(R\right)\qquad\mathrm{shape}:\left[B,S,H\right]
+```
+
+```math
+F = \mathrm{ChannelMixer}\left(V\right) \left[B,S,H\right]
+```
+
+```math
+Y=R+F\qquad\mathrm{shape}:\left[B,S,H\right]
+```
+
+The **intermediates** and **persistent state** change; the residual stream shape does not. SwiGLU temporarily expands to $`\left[B,S,I\right]`$; MoE temporarily expands each token into `K` routes; attention logically creates $`\left[B,N,\mathrm{Lq},\mathrm{Lkv}\right]`$ scores; SSM/KDA reads and writes fixed-shape matrices. Every branch must project back to `H` before residual addition.
 
 ### One Teaching Configuration Across Families
 
-```text
-B=2, S=1024, H=4096, L=32
-Nq=32, Nkv=8, D=128
-FFN I=11008
-MoE E=64, top-K=2, expert width Ie=1408
+```math
+B=2,\qquad S=1024,\qquad H=4096,\qquad L=32
+```
+
+```math
+\mathrm{Nq}=32,\qquad \mathrm{Nkv}=8,\qquad D=128
+```
+
+```math
+\text{FFN I}=11008
+```
+
+```math
+\text{MoE E}=64, \mathrm{top}-K=2, \mathrm{expert} \mathrm{width} \mathrm{Ie}=1408
 ```
 
 | Family | Largest logical temporary | Per-layer persistent decode state | Grows with context? |
 |---|---|---|---|
-| Encoder-only | attention score `[2,32,1024,1024]` | usually none | No |
-| Encoder-Decoder | self score + cross score `[2,32,Stgt,Ssrc]` | decoder KV + encoder memory/KV | Decoder part does |
-| Dense/MoE Decoder | causal score `[2,32,1024,1024]` | KV `[B,S,Nkv,D] × 2` | Yes |
-| MLA Decoder | latent-attention score `[2,32,1024,1024]` | `Ckv [B,S,Dc] + Krope [B,S,Dr]` | Yes, but narrower per token |
+| Encoder-only | attention score $`\left[2,32,1024,1024\right]`$ | usually none | No |
+| Encoder-Decoder | self score + cross score $`\left[2,32,\mathrm{Stgt},\mathrm{Ssrc}\right]`$ | decoder KV + encoder memory/KV | Decoder part does |
+| Dense/MoE Decoder | causal score $`\left[2,32,1024,1024\right]`$ | KV `[B,S,Nkv,D] × 2` | Yes |
+| MLA Decoder | latent-attention score $`\left[2,32,1024,1024\right]`$ | `Ckv [B,S,Dc] + Krope [B,S,Dr]` | Yes, but narrower per token |
 | SSM/KDA | scan/chunk temporaries | fixed recurrent state + convolution tail | No |
 | Hybrid | depends on the current layer type | union of KV and recurrent states | Only some layers |
 
-The score tensor above is a logical training/naive shape. FlashAttention-style kernels tile the online softmax and do not write the full `[S,S]` matrix to HBM.
+The score tensor above is a logical training/naive shape. FlashAttention-style kernels tile the online softmax and do not write the full $`\left[S,S\right]`$ matrix to HBM.
 
 ### Decoder-Only End-to-End Main Path
 
@@ -82,7 +106,7 @@ flowchart TD
     LAYER --> FINAL["Final norm + LM head<br/>[B,S,H] -> [B,S,V]"]
 ```
 
-Prefill sends all `S` positions through this graph; decode sends only `[B,1,H]`, while the token mixer reads the previously persisted history. That distinction is why the same model has radically different performance profiles in the two phases.
+Prefill sends all `S` positions through this graph; decode sends only $`\left[B,1,H\right]`$, while the token mixer reads the previously persisted history. That distinction is why the same model has radically different performance profiles in the two phases.
 
 ## 1. Unified Analysis Framework
 
@@ -131,7 +155,10 @@ Cross Attention shapes:
 ```text
 Q from decoder: [B,Stgt,N,D]
 K,V from encoder memory: [B,Ssrc,Nkv,D]
-scores: [B,N,Stgt,Ssrc]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scores}\right)=\left[B,N,\mathrm{Stgt},\mathrm{Ssrc}\right]
 ```
 
 Characteristics:
@@ -154,18 +181,30 @@ Token Embedding
 
 Per layer:
 
-```text
-r = x + Attention(Norm(x))
-y = r + FFN(Norm(r))
+```math
+r = x + \mathrm{Attention}\left(\mathrm{Norm}\left(x\right)\right)
+```
+
+```math
+y = r + \mathrm{FFN}\left(\mathrm{Norm}\left(r\right)\right)
 ```
 
 Dense SwiGLU FFN:
 
-```text
-gate = X @ W_gate       [B,S,I]
-up   = X @ W_up         [B,S,I]
-mid  = SiLU(gate) * up  [B,S,I]
-Y    = mid @ W_down     [B,S,H]
+```math
+\mathrm{gate}=X\,W_{\mathrm{gate}}\qquad\mathrm{shape}:\left[B,S,I\right]
+```
+
+```math
+\mathrm{up}=X\,W_{\mathrm{up}}\qquad\mathrm{shape}:\left[B,S,I\right]
+```
+
+```math
+\mathrm{mid}=\mathrm{SiLU}\left(\mathrm{gate}\right)\odot \mathrm{up}\qquad\mathrm{shape}:\left[B,S,I\right]
+```
+
+```math
+Y=\mathrm{mid}\,W_{\mathrm{down}}\qquad\mathrm{shape}:\left[B,S,H\right]
 ```
 
 Parameter count and per-token compute both grow with FFN intermediate size `I`. All tokens pass through the same FFN weights.
@@ -176,9 +215,12 @@ GPT-style, LLaMA-style, and many dense Qwen-style models belong to this family.
 
 Retains causal Attention, replaces Dense FFN with routed experts:
 
-```text
-r = x + Attention(Norm(x))
-y = r + SparseMoE(Norm(r))
+```math
+r = x + \mathrm{Attention}\left(\mathrm{Norm}\left(x\right)\right)
+```
+
+```math
+y = r + \mathrm{SparseMoE}\left(\mathrm{Norm}\left(r\right)\right)
 ```
 
 MoE layer:
@@ -187,7 +229,10 @@ MoE layer:
 router logits: [B,S,E]
 top-k ids/weights: [B,S,K]
 logical expert routes: B*S*K
-output: [B,S,H]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{output}\right)=\left[B,S,H\right]
 ```
 
 Total expert parameter count ≈ proportional to `E`; per-token activation compute ≈ proportional to `K`. Key structural characteristics:
@@ -202,8 +247,8 @@ Mixtral-style and various MoE Qwen-style models belong to this family.
 
 Some MoE architectures use both shared and routed experts:
 
-```text
-Y = SharedExpert(X) + sum_(e in TopK(X)) p_e * RoutedExpert_e(X)
+```math
+Y = \mathrm{SharedExpert}\left(X\right) + \sum_{e \in \mathrm{TopK}\left(X\right)} p_{e} \cdot  \mathrm{RoutedExpert\_e}\left(X\right)
 ```
 
 Where:
@@ -213,22 +258,31 @@ Where:
 
 Shapes:
 
-```text
-shared_output: [B,S,H]
-routed_output: [B,S,H]
-final_output:  [B,S,H]
+```math
+\mathrm{shape}\left(\mathrm{shared\_output}\right)=\left[B,S,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{routed\_output}\right)=\left[B,S,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{final\_output}\right)=\left[B,S,H\right]
 ```
 
 ## 7. Fine-Grained MoE
 
 Fine-grained MoE uses more, smaller experts. If an expert with intermediate width `I_big` is split into `m` small experts,
 
-```text
-Ie = I_big / m
-active_width = K * Ie
+```math
+\mathrm{Ie}=\frac{I_{\mathrm{big}}}{m}
 ```
 
-the model may increase top-`K` so that the total active width per token remains near a target. The computation for flattened tokens `T=B*S` is:
+```math
+\mathrm{active\_width}=K\cdot \mathrm{Ie}
+```
+
+the model may increase top-`K` so that the total active width per token remains near a target. The computation for flattened tokens $`T=B\cdot S`$ is:
 
 ```text
 X_flat:       [T,H]
@@ -264,9 +318,12 @@ MLA attacks long-context state cost; MoE increases parameter capacity without ac
 
 An SSM does not dot the current query against every historical K. It recurrently updates a fixed-shape state:
 
-```text
-h_t = A_t h_(t-1) + B_t x_t
-y_t = C_t h_t + D x_t
+```math
+h_{t}=A_{t}\,{h}_{t-1}+B_{t}\,x_{t}
+```
+
+```math
+y_{t}=C_{t}\,h_{t}+D\,x_{t}
 ```
 
 Logical dataflow:
@@ -344,17 +401,23 @@ The projector establishes the critical width contract `Hvision -> H`. Fusion may
 | ALiBi | linear distance bias on score | score shape unchanged | no position-embedding table |
 | Decoupled RoPE | rotates only positional Q/K subspace | splits last dimension | permits MLA content-projection absorption |
 
-Position encoding affects long-context extrapolation, cache content, and attention kernels, although the residual path usually remains `[B,S,H]`.
+Position encoding affects long-context extrapolation, cache content, and attention kernels, although the residual path usually remains $`\left[B,S,H\right]`$.
 
 ## 14. Normalization and Residual Layout
 
-```text
-Post-Norm:         y = Norm(x + Sublayer(x))
-Pre-Norm:          y = x + Sublayer(Norm(x))
-Parallel Residual: y = x + Attention(Norm(x)) + FFN(Norm(x))
+```math
+\mathrm{Post}-\mathrm{Norm}: y = \mathrm{Norm}\left(x + \mathrm{Sublayer}\left(x\right)\right)
 ```
 
-Deep models commonly use Pre-Norm or a variant for optimization stability. LayerNorm centers and scales, while RMSNorm only rescales by the root-mean-square magnitude. Both preserve `[B,S,H]`.
+```math
+\mathrm{Pre}-\mathrm{Norm}: y = x + \mathrm{Sublayer}\left(\mathrm{Norm}\left(x\right)\right)
+```
+
+```math
+\text{Parallel Residual}: y = x + \mathrm{Attention}\left(\mathrm{Norm}\left(x\right)\right) + \mathrm{FFN}\left(\mathrm{Norm}\left(x\right)\right)
+```
+
+Deep models commonly use Pre-Norm or a variant for optimization stability. LayerNorm centers and scales, while RMSNorm only rescales by the root-mean-square magnitude. Both preserve $`\left[B,S,H\right]`$.
 
 ## 15. Reconstruct an Architecture from Configuration
 

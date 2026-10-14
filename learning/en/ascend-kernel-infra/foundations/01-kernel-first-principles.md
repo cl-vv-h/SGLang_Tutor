@@ -7,8 +7,11 @@
 - **Operator**: The mathematical operation (e.g., matrix multiply, ReLU). Framework-level concept.
 - **Kernel**: The actual device code that executes the operator. Hardware-level concept.
 
+```math
+\mathrm{Operator}: C = A \, B \left(\mathrm{what} \mathrm{to} \mathrm{compute}\right)
+```
+
 ```text
-Operator: C = A @ B          (what to compute)
 Kernel:   __global__ void matmul_kernel(float* A, float* B, float* C)  (how to compute)
 ```
 
@@ -42,10 +45,10 @@ Program: The full computation (e.g., add two [N] vectors)
 
 ### Shape vs Stride
 
-- **Shape**: Logical dimensions `[B, H]` — how we think about the tensor
-- **Stride**: Memory layout `[stride_B, stride_H]` — how data is physically stored
+- **Shape**: Logical dimensions $`\left[B,H\right]`$ — how we think about the tensor
+- **Stride**: Memory layout $`\left[\mathrm{stride\_B},\mathrm{stride\_H}\right]`$ — how data is physically stored
 
-A `[3, 4]` row-major tensor has stride `[4, 1]`. A transposed view changes strides, not data.
+A $`\left[3,4\right]`$ row-major tensor has stride $`\left[4,1\right]`$. A transposed view changes strides, not data.
 
 ## Why Parallel Kernels Matter for LLM Serving
 

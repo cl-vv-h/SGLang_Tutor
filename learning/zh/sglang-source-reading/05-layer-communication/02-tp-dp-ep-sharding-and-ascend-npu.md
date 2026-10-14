@@ -28,7 +28,7 @@ DP Attention 的完整执行轮次、padding、IDLE、partial/replica gather 和
 
 这里最重要的警告是：
 
-> SGLang 的 `dp_size` 有“普通 DP”和“DP Attention”两种运行形态。看到 `dp_size=2`，不能立刻推断进程组结构，必须继续看 `enable_dp_attention`。
+> SGLang 的 `dp_size` 有“普通 DP”和“DP Attention”两种运行形态。看到 $`\mathrm{dp\_size}=2`$，不能立刻推断进程组结构，必须继续看 `enable_dp_attention`。
 
 ## 2. 参数关系：不要把 `tp_size` 只理解成矩阵切分度
 
@@ -150,7 +150,7 @@ for pp_rank in pp_rank_range:
 
 这段代码完成的是**进程切分**，还没有切任何权重。
 
-单机、`base_gpu_id=0`、`gpu_id_step=1` 时，通常有：
+单机、$`\mathrm{base\_gpu\_id}=0`$、$`\mathrm{gpu\_id\_step}=1`$ 时，通常有：
 
 ```text
 tp_rank 0 -> Scheduler process 0 -> npu:0
@@ -158,7 +158,7 @@ tp_rank 1 -> Scheduler process 1 -> npu:1
 ...
 ```
 
-多机时，`tp_rank` 可以是跨节点的全局模型 rank，而 `gpu_id` 是当前节点上的本地设备编号。不同节点都可能有 `gpu_id=0`，但它们的 global rank 不同。
+多机时，`tp_rank` 可以是跨节点的全局模型 rank，而 `gpu_id` 是当前节点上的本地设备编号。不同节点都可能有 $`\mathrm{gpu\_id}=0`$，但它们的 global rank 不同。
 
 ### 4.2 global rank、local rank、group rank 不是同一个概念
 
@@ -167,14 +167,14 @@ tp_rank 1 -> Scheduler process 1 -> npu:1
 | global rank | WORLD 内唯一编号 | 6 |
 | local rank / `gpu_id` | 当前节点绑定哪张设备 | `npu:2` |
 | TP rank | 当前 TP world 中的位置 | 6 |
-| rank in group | 当前进程在某个子 group 中的位置 | 在 `[4,5,6,7]` 中为 2 |
-| DP/EP rank | 对 rank 网格按对应维度解码后的坐标 | `attn_dp_rank=1`、`moe_ep_rank=2` |
+| rank in group | 当前进程在某个子 group 中的位置 | 在 $`\left[4,5,6,7\right]`$ 中为 2 |
+| DP/EP rank | 对 rank 网格按对应维度解码后的坐标 | $`\mathrm{attn\_dp\_rank}=1`$、$`\mathrm{moe\_ep\_rank}=2`$ |
 
 源码里同一个整数有时恰好相等，但含义不能混用。
 
 ### 4.3 普通 DP 会创建多个独立 TP 副本
 
-当 `dp_size > 1` 且没有启用 DP Attention 时，`DataParallelController.launch_dp_schedulers()` 为每个 DP rank 启动一个完整 TP/PP worker group：
+当 $`\mathrm{dp\_size} \gt 1`$ 且没有启用 DP Attention 时，`DataParallelController.launch_dp_schedulers()` 为每个 DP rank 启动一个完整 TP/PP worker group：
 
 ```python
 base_gpu_id = 0
@@ -188,7 +188,7 @@ for dp_rank in range(server_args.dp_size):
     )
 ```
 
-例如 `dp_size=2, tp_size=4`：
+例如 $`\mathrm{dp\_size}=2,\qquad \mathrm{tp\_size}=4`$：
 
 ```text
 DP replica 0: NPU 0..3，内部 TP rank 0..3
@@ -312,7 +312,7 @@ for tp_group_idx in range(num_tensor_model_parallel_groups):
     )
 ```
 
-若 `world_size=8, tp_size=4, pp_size=2`：
+若 $`\mathrm{world\_size}=8,\qquad \mathrm{tp\_size}=4,\qquad \mathrm{pp\_size}=2`$：
 
 ```text
 TP groups: [0,1,2,3], [4,5,6,7]
@@ -329,11 +329,8 @@ Attention rank 的布局顺序是：
 
 其中 TP 是变化最快的维度：
 
-```text
-tp_rank =
-    (attn_dp_rank * attn_cp_size + attn_cp_rank)
-    * attn_tp_size
-    + attn_tp_rank
+```math
+\mathrm{tp\_rank}=\left(\mathrm{attn\_dp\_rank}\cdot \mathrm{attn\_cp\_size}+\mathrm{attn\_cp\_rank}\right)\cdot \mathrm{attn\_tp\_size}+\mathrm{attn\_tp\_rank}
 ```
 
 ### 6.3 MoE group
@@ -346,11 +343,8 @@ MoE rank 的布局顺序是：
 
 其中 MoE TP 是变化最快的维度：
 
-```text
-tp_rank =
-    (moe_dp_rank * ep_size + moe_ep_rank)
-    * moe_tp_size
-    + moe_tp_rank
+```math
+\mathrm{tp\_rank}=\left(\mathrm{moe\_dp\_rank}\cdot \mathrm{ep\_size}+\mathrm{moe\_ep\_rank}\right)\cdot \mathrm{moe\_tp\_size}+\mathrm{moe\_tp\_rank}
 ```
 
 这两个公式是理解 SGLang 多维并行最有效的工具。
@@ -359,31 +353,53 @@ tp_rank =
 
 设：
 
+```math
+\mathrm{tp\_size}=8
+```
+
+```math
+\mathrm{dp\_size}=2
+```
+
 ```text
-tp_size      = 8
-dp_size      = 2
 enable_dp_attention = True
-attn_cp_size = 1
-ep_size      = 4
-moe_dp_size  = 2
-pp_size      = 1
+```
+
+```math
+\mathrm{attn\_cp\_size}=1
+```
+
+```math
+\mathrm{ep\_size}=4
+```
+
+```math
+\mathrm{moe\_dp\_size}=2
+```
+
+```math
+\mathrm{pp\_size}=1
 ```
 
 那么：
 
-```text
-attn_tp_size = 8 / 2 / 1 = 4
-moe_tp_size  = 8 / 2 / 4 = 1
+```math
+\mathrm{attn\_tp\_size}=\frac{\frac{8}{2}}{1}=4
+```
+
+```math
+\mathrm{moe\_tp\_size}=\frac{\frac{8}{2}}{4}=1
 ```
 
 通信组如下：
 
-```text
-TP:       [0,1,2,3,4,5,6,7]
+```math
+\mathrm{shape}\left(\mathrm{TP}\right)=\left[0,1,2,3,4,5,6,7\right]
+```
 
+```text
 ATTN_TP:  [0,1,2,3], [4,5,6,7]
 ATTN_CP:  [0], [1], [2], [3], [4], [5], [6], [7]
-
 MOE_EP:   [0,1,2,3], [4,5,6,7]
 MOE_DP:   [0,4], [1,5], [2,6], [3,7]
 MOE_TP:   [0], [1], [2], [3], [4], [5], [6], [7]
@@ -405,7 +421,7 @@ MOE_TP:   [0], [1], [2], [3], [4], [5], [6], [7]
 观察 rank 2 和 rank 6：
 
 - 两者位于不同 MoE-DP 副本。
-- 两者都是 `moe_ep_rank=2`，因此保存同一组逻辑 expert 权重。
+- 两者都是 $`\mathrm{moe\_ep\_rank}=2`$，因此保存同一组逻辑 expert 权重。
 - 两者处理不同 token 数据，形成 MoE data parallel。
 
 这也说明 EP 和 MoE DP 可以同时存在：EP 决定“哪组 expert 在哪里”，MoE DP 决定“这组 expert 有几份数据副本”。
@@ -429,7 +445,7 @@ MOE_TP:   [0], [1], [2], [3], [4], [5], [6], [7]
 
 ### 8.1 Column Parallel：切输出维
 
-对 `Y = XW`，Column Parallel 把 `W` 的输出维切开：
+对 $`Y=\mathrm{XW}`$，Column Parallel 把 `W` 的输出维切开：
 
 ```text
 W = [W0, W1, ..., Wp-1]
@@ -804,7 +820,7 @@ flowchart LR
 
 ### 12.2 通用 DeepEP dispatcher + NPU expert compute
 
-当 `moe_a2a_backend=deepep` 时：
+当 $`\mathrm{moe\_a2a\_backend}=\mathrm{deepep}`$ 时：
 
 1. 通用 `MaybeTboDeepEPDispatcher.dispatch()` 把 token 发到目标 EP rank。
 2. NPU 的 `_forward_npu_deepep()` 或 `maybe_apply_deepep_npu()` 读取 dispatch 后的 token 和 `group_list`。
@@ -931,7 +947,7 @@ forward 阶段：
 
 ## 15. 常见误区
 
-### 15.1 `tp_size=8` 就表示每个矩阵都切 8 份
+### 15.1 $`\mathrm{tp\_size}=8`$ 就表示每个矩阵都切 8 份
 
 不一定。启用 DP Attention、CP、EP 或 MoE DP 后，需要继续计算 `attn_tp_size` 和 `moe_tp_size`。
 

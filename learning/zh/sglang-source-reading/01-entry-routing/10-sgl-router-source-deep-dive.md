@@ -517,7 +517,7 @@ flowchart TD
   Scan --> Spawn2["重新 spawn register_one()"]
 ```
 
-为什么 `Added` 要 spawn？因为注册 worker 要访问 `/server_info`，如果一次有很多 worker 上线，串行探测会让注册延迟变成 `N * timeout`。
+为什么 `Added` 要 spawn？因为注册 worker 要访问 `/server_info`，如果一次有很多 worker 上线，串行探测会让注册延迟变成 $`N\cdot \mathrm{timeout}`$。
 
 为什么 `Removed` 要等同 id 的 `Added` 完成？如果不等，可能出现：
 
@@ -666,15 +666,36 @@ experimental/sgl-router/src/server/app.rs
 
 主要路由：
 
-```text
-GET  /healthz
-GET  /readyz
-GET  /metrics
-GET  /v1/models
-POST /v1/tokenize
-POST /v1/detokenize
-POST /v1/chat/completions
-POST /flush_cache
+```math
+\frac{\mathrm{GET}}{\mathrm{healthz}}
+```
+
+```math
+\frac{\mathrm{GET}}{\mathrm{readyz}}
+```
+
+```math
+\frac{\mathrm{GET}}{\mathrm{metrics}}
+```
+
+```math
+\frac{\frac{\mathrm{GET}}{\mathrm{v1}}}{\mathrm{models}}
+```
+
+```math
+\frac{\frac{\mathrm{POST}}{\mathrm{v1}}}{\mathrm{tokenize}}
+```
+
+```math
+\frac{\frac{\mathrm{POST}}{\mathrm{v1}}}{\mathrm{detokenize}}
+```
+
+```math
+\frac{\frac{\frac{\mathrm{POST}}{\mathrm{v1}}}{\mathrm{chat}}}{\mathrm{completions}}
+```
+
+```math
+\frac{\mathrm{POST}}{\mathrm{flush\_cache}}
 ```
 
 其中本讲最重要的是：
@@ -1172,10 +1193,14 @@ experimental/sgl-router/src/policies/cache_aware_zmq.rs
 
 判断条件：
 
-```text
-max_load - min_load > balance_abs_threshold
+```math
+\mathrm{max\_load}-\mathrm{min\_load} \gt \mathrm{balance\_abs\_threshold}
+```
+
 AND
-max_load > min_load * balance_rel_threshold
+
+```math
+\mathrm{max\_load} \gt \mathrm{min\_load}\cdot \mathrm{balance\_rel\_threshold}
 ```
 
 这一步是防止 cache-aware routing 把所有相似 prompt 都打到一个 worker，导致缓存命中率高但尾延迟变差。
@@ -1606,8 +1631,8 @@ sgl_router_active_load{kind="decode_blocks"}
 
 sticky policy 会记录：
 
-```text
-NoRoutingKey / Hit / Assigned / Remap
+```math
+\frac{\frac{\frac{\mathrm{NoRoutingKey}}{\mathrm{Hit}}}{\mathrm{Assigned}}}{\mathrm{Remap}}
 ```
 
 错误语义上，PD resolver 会区分：
@@ -1654,7 +1679,7 @@ flowchart LR
 在一个 worker 内部，把请求放入哪个 batch、何时 prefill、何时 decode、如何分配 KV cache。
 ```
 
-`TpWorker / ModelRunner` 的执行粒度是：
+$`\frac{\mathrm{TpWorker}}{\mathrm{ModelRunner}}`$ 的执行粒度是：
 
 ```text
 在一个 worker/rank 内部，执行模型 forward、attention、sampling、通信和 kernel。

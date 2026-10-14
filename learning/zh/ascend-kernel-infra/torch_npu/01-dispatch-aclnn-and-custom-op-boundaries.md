@@ -186,7 +186,7 @@ w = torch.ops.attentions.layernorm(x, [4096], weight, bias, 1e-5, 0)[0]
 
 逐行理解：
 
-1. `z = x + y`
+1. $`z=x+y`$
    直觉上最像“标准 ATen 算子在 NPU backend 上执行”，优先走现成实现。
 2. `torch_npu.npu_rms_norm(...)`
    显式调用 `torch_npu` 暴露的 NPU 专用 API，通常仍是在复用现成算子能力。
@@ -197,7 +197,7 @@ w = torch.ops.attentions.layernorm(x, [4096], weight, bias, 1e-5, 0)[0]
 
 这四行长得都像“PyTorch 调用”，但底层含义已经分成三类。
 
-从类型角度看，`x/y/weight/bias/bitmask` 都是 Python `torch.Tensor`，但 `bitmask` 的元素 dtype 是 `int32`，其 128 个整数各自打包 32 个词表位置；其余 tensor 是 FP16。`torch_npu.npu_rms_norm` 是 Python callable，返回 tuple-like 结果，所以 `[0]` 是取第一个返回 tensor；`torch.ops.npu.apply_token_bitmask` 与 `torch.ops.attentions.layernorm` 是 dispatcher op packet。它们的“Python 调用外形”不能说明 device 实现类型，必须继续追到 schema、dispatch key 和 Host 函数。
+从类型角度看，`x/y/weight/bias/bitmask` 都是 Python `torch.Tensor`，但 `bitmask` 的元素 dtype 是 `int32`，其 128 个整数各自打包 32 个词表位置；其余 tensor 是 FP16。`torch_npu.npu_rms_norm` 是 Python callable，返回 tuple-like 结果，所以 $`\left[0\right]`$ 是取第一个返回 tensor；`torch.ops.npu.apply_token_bitmask` 与 `torch.ops.attentions.layernorm` 是 dispatcher op packet。它们的“Python 调用外形”不能说明 device 实现类型，必须继续追到 schema、dispatch key 和 Host 函数。
 
 这条跨层类型链应当能在脑中展开：
 
@@ -266,7 +266,7 @@ Python torch.Tensor
 这里最值得读的不是数学，而是职责分工：
 
 1. 先整理 `weight`、`bias` optional 参数；
-2. 根据输入 shape 分配 `output / mean / rstd`；
+2. 根据输入 shape 分配 $`\frac{\frac{\mathrm{output}}{\mathrm{mean}}}{\mathrm{rstd}}`$；
 3. 最后调用 `EXEC_NPU_CMD<"aclnnLayerNormWithImplMode">(...)`。
 
 这就说明：
@@ -314,7 +314,7 @@ Python torch.Tensor
 4. 再把 `(workspace, workspaceSize, executor, stream)` 提交给真正执行函数；
 5. 最外层再通过 `OpCommand` 统一纳入 `torch_npu` 的执行框架。
 
-这就是很多 profiling、报错和 Host 代码里反复出现 `workspace / executor / stream` 三件套的根本原因。
+这就是很多 profiling、报错和 Host 代码里反复出现 $`\frac{\frac{\mathrm{workspace}}{\mathrm{executor}}}{\mathrm{stream}}`$ 三件套的根本原因。
 
 ## 10. 如何判断一个热点应该改哪层
 

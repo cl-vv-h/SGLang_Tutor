@@ -156,14 +156,14 @@ flowchart TD
 
 | 名称 | 含义 |
 |---|---|
-| `device=npu` | 运行时设备类型，和 `cuda`、`cpu` 平级。 |
+| $`\mathrm{device}=\mathrm{npu}`$ | 运行时设备类型，和 `cuda`、`cpu` 平级。 |
 | `gpu_id` / `base-gpu-id` | 历史命名，NPU 场景里通常表示本进程绑定的 NPU device id。 |
 | `rank` | 分布式全局进程编号。 |
 | `local_rank` | 当前机器内的设备编号。 |
 | `tp_rank` | tensor parallel 组内 rank。 |
 | `tp_size` | tensor parallel 切分大小。 |
 | `pp_rank` | pipeline parallel stage 编号。 |
-| `attention_backend=ascend` | SGLang 使用 Ascend attention backend，而不是 CUDA/FlashInfer/Triton 后端。 |
+| $`\mathrm{attention\_backend}=\mathrm{ascend}`$ | SGLang 使用 Ascend attention backend，而不是 CUDA/FlashInfer/Triton 后端。 |
 
 部署时最先确认三件事：
 
@@ -347,7 +347,7 @@ Ascend NPU 下 SGLang 使用：
 | NCCL | HCCL |
 | `torch.cuda` | `torch.npu` / `torch_npu` |
 | CUDA Graph | `torch.npu.NPUGraph` |
-| FlashInfer/Triton attention | `attention_backend=ascend` |
+| FlashInfer/Triton attention | $`\mathrm{attention\_backend}=\mathrm{ascend}`$ |
 | CUDA custom all-reduce | NPU 下通常禁用 |
 | CUDA kernel package | `sgl_kernel_npu` |
 | CUDA profiling | `torch_npu.profiler` |

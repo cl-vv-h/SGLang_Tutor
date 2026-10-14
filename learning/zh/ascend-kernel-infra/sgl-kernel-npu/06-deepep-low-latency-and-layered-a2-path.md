@@ -145,7 +145,7 @@ flowchart LR
 
 [`deep_ep.cpp#L21-L88`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/deepep/deep_ep.cpp#L21-L88) 有三件事必须一起看：
 
-1. `A2_MAX_HCCS_PEERS = 8`。
+1. $`\mathrm{A2\_MAX\_HCCS\_PEERS}=8`$。
 2. `Buffer` 会保存 `low_latency_mode`。
 3. 当 `soc_version == ASCEND910B` 时，会据此推导 `num_rdma_ranks`、`num_nvl_ranks`、`rdma_rank`、`nvl_rank`。
 
@@ -220,7 +220,7 @@ def low_latency_roundtrip(
 
 `all_rank_max_tokens -> low_latency_dispatch -> local expert compute -> low_latency_combine`
 
-类型逐项看：`local_num_tokens/hidden/num_experts/num_topk/aligned_num_tokens` 是 Host Python `int`；`local_tokens_tensor` 是 shape `[1]` 的 NPU INT32 tensor，用于 all-reduce MAX；`.item()` 会把同步后的标量取回 Host。`x` 是 BF16 tensor，`scores/topk_weights` 是 FP32 tensor，`topk_idx` 是整数索引 tensor。`packed_recv_x` 在 FP8 路径是包含量化数据与 scale 的 tuple，解包给 `per_token_cast_back` 后得到普通 NPU tensor；`packed_recv_count` 是计数 tensor；`handle` 是 combine 所需的 tuple-like 路由元数据；`event/hook` 是异步完成对象，不是数值结果。
+类型逐项看：`local_num_tokens/hidden/num_experts/num_topk/aligned_num_tokens` 是 Host Python `int`；`local_tokens_tensor` 是 shape $`\left[1\right]`$ 的 NPU INT32 tensor，用于 all-reduce MAX；`.item()` 会把同步后的标量取回 Host。`x` 是 BF16 tensor，`scores/topk_weights` 是 FP32 tensor，`topk_idx` 是整数索引 tensor。`packed_recv_x` 在 FP8 路径是包含量化数据与 scale 的 tuple，解包给 `per_token_cast_back` 后得到普通 NPU tensor；`packed_recv_count` 是计数 tensor；`handle` 是 combine 所需的 tuple-like 路由元数据；`event/hook` 是异步完成对象，不是数值结果。
 
 真实模型把 `simulated_gemm_x` 替换为 expert FFN 输出，但 FFN 的权重、量化与 grouped-matmul API 属于模型计算层，不能用一个未声明的 `local_grouped_ffn(...)` 混入 DeepEP 通信源码。
 
@@ -258,14 +258,14 @@ def low_latency_roundtrip(
 [`deep_ep.cpp#L872-L880`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/deepep/deep_ep.cpp#L872-L880) 明确写出 layered 条件：
 
 - `soc_version == ASCEND910B`
-- `HCCL_INTRA_PCIE_ENABLE=1`
-- `HCCL_INTRA_ROCE_ENABLE=0`
+- $`\mathrm{HCCL\_INTRA\_PCIE\_ENABLE}=1`$
+- $`\mathrm{HCCL\_INTRA\_ROCE\_ENABLE}=0`$
 
 满足后：
 
-- `isLayered = true`
-- `ep_recv_count` 从默认的 `[num_local_experts * num_ranks]`
-- 扩成 `num_experts + 2 * global_bs * num_topk * server_num`
+- $`\mathrm{isLayered}=\mathrm{true}`$
+- `ep_recv_count` 从默认的 $`\left[\mathrm{num\_local\_experts}\cdot \mathrm{num\_ranks}\right]`$
+- 扩成 $`\mathrm{num\_experts}+2\cdot \mathrm{global\_bs}\cdot \mathrm{num\_topk}\cdot \mathrm{server\_num}`$
 
 这里有一个需要明确标注的推断：源码只直接告诉我们“张量形状膨胀了很多”，没有在这一段注释里逐字段解释它。结合 README 的 A2 模式说明和 layered 内核文件名，我推断它意味着 layered A2 需要的不只是“每个 expert 收多少 token”，还需要额外的按 server / token 组织的辅助路由信息。这是从官方源码结构推出的合理结论，但不是源码注释逐字写死的事实。
 
@@ -318,7 +318,7 @@ def low_latency_roundtrip(
 
 - `x` 必须是 2 维 contiguous
 - `x` 必须是 `bfloat16`
-- `num_max_dispatch_tokens_per_rank >= topk_idx.size(0)`
+- $`\mathrm{num\_max\_dispatch\_tokens\_per\_rank}\ge\mathrm{topk\_idx}.\mathrm{size}(0)`$
 
 也就是说，combine 根本不假设自己可以“看着结果猜回去”。它要求你继续遵守 dispatch 那一轮统一的 token 上界。
 
@@ -337,8 +337,8 @@ def low_latency_roundtrip(
 先把“能直接证明的”列出来：
 
 1. README 写了 A3 是 full-mesh HCCS，A2 是 intranode HCCS + internode RDMA。
-2. 构造函数在 910B/A2 上按 `A2_MAX_HCCS_PEERS = 8` 划分本地快链组与 RDMA 组。
-3. low-latency dispatch/combine 只在 910B 且 `HCCL_INTRA_PCIE_ENABLE=1`、`HCCL_INTRA_ROCE_ENABLE=0` 时打开 layered 条件。
+2. 构造函数在 910B/A2 上按 $`\mathrm{A2\_MAX\_HCCS\_PEERS}=8`$ 划分本地快链组与 RDMA 组。
+3. low-latency dispatch/combine 只在 910B 且 $`\mathrm{HCCL\_INTRA\_PCIE\_ENABLE}=1`$、$`\mathrm{HCCL\_INTRA\_ROCE\_ENABLE}=0`$ 时打开 layered 条件。
 4. 仓库里存在专门的 [`cam_moe_distribute_dispatch_a2_layered.h`](https://github.com/sgl-project/sgl-kernel-npu/blob/d5630dff41c8108216f835597e63f6d3a7445908/csrc/deepep/ops2/op_kernel/a2/cam_moe_distribute_dispatch_a2_layered.h)。
 
 再说“谨慎推断的”：
@@ -357,7 +357,7 @@ def low_latency_roundtrip(
 - 先 dispatch
 - 中间用可控的 `simulated_gemm_x`
 - 再 combine
-- 最后把结果和 `x * sum(topk_weights)` 这样的参考语义做比较
+- 最后把结果和 $`x\cdot \mathrm{sum}\left(\mathrm{topk\_weights}\right)`$ 这样的参考语义做比较
 
 这告诉你：验证通信 contract 时，先把中间 expert 计算简化掉，别一开始就把所有不确定性叠在一起。
 
@@ -434,7 +434,7 @@ def low_latency_roundtrip(
 
 **答案：**`num_tokens` 是本 rank 此轮真实有效 token 数；`aligned_num_tokens` 是各参与 rank 的 token 数做 AllReduce MAX 后得到的统一上界，用于所有 rank 形成一致的通信与 buffer 容量合同。
 
-例如四个 rank 分别有 `[3,7,5,2]` 个 token，则每个 rank 的 `aligned_num_tokens` 都是 7，但 rank 0 仍只有 3 个有效 token。多出来的容量是协议预留，不应当被当成有效 token 参与 expert 数学。
+例如四个 rank 分别有 $`\left[3,7,5,2\right]`$ 个 token，则每个 rank 的 `aligned_num_tokens` 都是 7，但 rank 0 仍只有 3 个有效 token。多出来的容量是协议预留，不应当被当成有效 token 参与 expert 数学。
 
 统一上界让 rank 间能用兼容 shape 预分配接收区，并避免某个 rank 按 3、另一个按 7 对同一通信阶段作出不一致解释。它通常增加少量空槽成本，换来更可预测的 launch/通信形状；动态 token 波动较大时要评估浪费。
 
@@ -451,7 +451,7 @@ Handle 封装了 dispatch 产生的路由与 buffer 元数据，combine 用它�
 **答案：**至少有三组相互印证的证据，而不是只凭变量名猜测。
 
 1. 仓库 README 明确描述 A2 使用“同机 HCCS + 跨机 RDMA”的组合路径。
-2. `deep_ep.cpp` 定义 `A2_MAX_HCCS_PEERS = 8`，并在 `soc_version == ASCEND910B` 时计算 `num_rdma_ranks/num_nvl_ranks`、`rdma_rank/nvl_rank` 等两级分组信息；这里的 `nvl_*` 应按代码历史命名理解为本地快速互联组，不能机械套成 NVIDIA NVLink。
+2. `deep_ep.cpp` 定义 $`\mathrm{A2\_MAX\_HCCS\_PEERS}=8`$，并在 `soc_version == ASCEND910B` 时计算 `num_rdma_ranks/num_nvl_ranks`、`rdma_rank/nvl_rank` 等两级分组信息；这里的 `nvl_*` 应按代码历史命名理解为本地快速互联组，不能机械套成 NVIDIA NVLink。
 3. Low-latency dispatch/combine 存在 A2 layered 分支、额外计数/assist tensor，并有专门的 `cam_moe_distribute_dispatch_a2_layered.h` kernel 文件。
 
 这些证据足以支持“先在本地 HCCS 层组织，再通过 RDMA 处理跨机通信”的高层结论；但没有更底层官方资料时，仍不应擅自推导每条硬件指令、链路时序或精确带宽模型。

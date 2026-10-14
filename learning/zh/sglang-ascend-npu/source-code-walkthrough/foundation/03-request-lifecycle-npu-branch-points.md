@@ -123,7 +123,10 @@ Scheduler 维护：
 ```text
 prepare_for_extend()  # prefill/extend
 prepare_for_decode()  # 下一 token decode
-filter_batch / merge_batch / retract
+```
+
+```math
+\frac{\frac{\mathrm{filter\_batch}}{\mathrm{merge\_batch}}}{\mathrm{retract}}
 ```
 
 ### 4.1 Prefill/extend

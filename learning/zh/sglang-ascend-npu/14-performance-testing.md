@@ -98,17 +98,17 @@ ps -ef | grep -E "sglang serve|sgl-router" | grep -v grep | tee "$LOG_ROOT/perf/
 |---|---|---|---|---|
 | 请求数 | requests、num prompts | 本轮压测发出的总请求数。 | 压测脚本输入。 | workload 规模。 |
 | 成功请求数 | ok、success | 正常返回的请求数。 | HTTP 2xx 且响应可解析。 | 服务稳定性。 |
-| 失败请求数 | failed、errors | 超时、连接失败、HTTP 错误、worker crash、router upstream error 等失败请求。 | `failed = total - ok`。 | OOM、timeout、router、worker。 |
-| 错误率 | error rate | 失败请求占比。 | `failed / total`。 | 容量上限、OOM、超时、服务崩溃。 |
-| QPS | requests/s、RPS | 每秒完成的成功请求数，衡量服务整体请求吞吐。 | `ok_requests / elapsed_s`。 | scheduler、batching、router、整体容量。 |
+| 失败请求数 | failed、errors | 超时、连接失败、HTTP 错误、worker crash、router upstream error 等失败请求。 | $`\mathrm{failed}=\mathrm{total}-\mathrm{ok}`$。 | OOM、timeout、router、worker。 |
+| 错误率 | error rate | 失败请求占比。 | $`\frac{\mathrm{failed}}{\mathrm{total}}`$。 | 容量上限、OOM、超时、服务崩溃。 |
+| QPS | requests/s、RPS | 每秒完成的成功请求数，衡量服务整体请求吞吐。 | $`\frac{\mathrm{ok\_requests}}{\mathrm{elapsed\_s}}`$。 | scheduler、batching、router、整体容量。 |
 | 请求注入速率 | request rate、arrival rate | 压测端每秒向服务发起多少请求。 | 压测器控制值。 | 是否接近线上流量模型。 |
 | 并发数 | concurrency、in-flight requests | 同一时刻最多有多少请求在服务端处理中或排队。 | 压测器控制值，也可从服务日志观察。 | batch 形成、排队、显存/KV cache 压力。 |
 | 端到端延迟 | latency、E2E latency | 从客户端发出请求到收到完整响应的时间。非流式压测最容易采到这个指标。 | `response_done_time - request_start_time`。 | 排队、prefill、decode、网络、序列化。 |
-| 平均延迟 | avg latency、mean latency | 所有成功请求端到端延迟的平均值。 | `sum(latency) / ok_requests`。 | 粗略趋势。 |
+| 平均延迟 | avg latency、mean latency | 所有成功请求端到端延迟的平均值。 | $`\frac{\mathrm{sum}\left(\mathrm{latency}\right)}{\mathrm{ok\_requests}}`$。 | 粗略趋势。 |
 | 中位延迟 | P50 latency、median | 50% 请求不超过该延迟，表示典型用户体验。 | latency 排序后取 50 分位。 | 常规体验。 |
 | 尾延迟 | P90/P95/P99 latency | 90%、95%、99% 请求不超过该延迟，表示慢请求和抖动。 | latency 排序后取对应分位。 | HCCL、OOM retry、graph miss、router、KV transfer。 |
 | 最大延迟 | max latency | 本轮最慢请求耗时。 | `max(latency)`。 | 极端抖动、单点阻塞。 |
-| 超时率 | timeout rate | 因客户端或服务端 timeout 失败的比例。 | `timeout_requests / total`。 | SLA、router upstream timeout、服务饱和。 |
+| 超时率 | timeout rate | 因客户端或服务端 timeout 失败的比例。 | $`\frac{\mathrm{timeout\_requests}}{\mathrm{total}}`$。 | SLA、router upstream timeout、服务饱和。 |
 
 `QPS` 和 `request rate` 容易混淆：`request rate` 是压测器“发出去”的速度，`QPS` 是服务“成功完成”的速度。当 request rate 高于系统容量时，QPS 会变平，而 P95/P99 和 timeout rate 会快速上升。
 
@@ -120,13 +120,13 @@ ps -ef | grep -E "sglang serve|sgl-router" | grep -v grep | tee "$LOG_ROOT/perf/
 |---|---|---|---|---|
 | 首 token 延迟 | TTFT、time to first token | 客户端发出请求到收到第一个输出 token 的时间。 | `first_token_time - request_start_time`。 | 排队、prefill、chunked prefill、router、PD KV transfer。 |
 | token 间延迟 | ITL、inter-token latency | 相邻两个输出 token 到达客户端的时间间隔。 | `token_i_time - token_(i-1)_time`。 | decode kernel、NPU graph、sampler、batch 稳定性。 |
-| 每输出 token 时间 | TPOT、time per output token | 输出阶段平均每个 token 消耗的时间，常用来衡量 decode 体验。 | `(last_token_time - first_token_time) / max(output_tokens - 1, 1)`。 | decode attention、MoE、graph replay。 |
+| 每输出 token 时间 | TPOT、time per output token | 输出阶段平均每个 token 消耗的时间，常用来衡量 decode 体验。 | $`\frac{\mathrm{last\_token\_time}-\mathrm{first\_token\_time}}{\mathrm{max}\left(\mathrm{output\_tokens}-1,1\right)}`$。 | decode attention、MoE、graph replay。 |
 | 生成阶段延迟 | generation latency | 首 token 之后到完整输出结束的耗时。 | `response_done_time - first_token_time`。 | decode 长输出性能。 |
 | 首 token P95/P99 | P95 TTFT、P99 TTFT | 首 token 的尾延迟。 | 对所有请求 TTFT 取分位。 | prefill 抖动、排队、PD transfer。 |
 | TPOT P95/P99 | P95 TPOT、P99 TPOT | 每请求平均输出 token 时间的尾部分位。 | 对每个请求 TPOT 取分位。 | decode 抖动、graph miss、HCCL。 |
 | ITL P95/P99 | P95 ITL、P99 ITL | 单 token 间隔的尾部分位。 | 汇总所有 token 间隔后取分位。 | decode step 抖动、batch 变化。 |
 
-非流式请求只能准确得到端到端 latency 和 tokens/s，不能准确拆出 TTFT/ITL/TPOT。要测这些指标，压测脚本必须打开 `stream=true`，并记录每个 chunk 到达时间。做 SGLang-NPU 性能结论时，建议至少跑一组 streaming workload，否则无法判断用户首字响应和连续出字体验。
+非流式请求只能准确得到端到端 latency 和 tokens/s，不能准确拆出 TTFT/ITL/TPOT。要测这些指标，压测脚本必须打开 $`\mathrm{stream}=\mathrm{true}`$，并记录每个 chunk 到达时间。做 SGLang-NPU 性能结论时，建议至少跑一组 streaming workload，否则无法判断用户首字响应和连续出字体验。
 
 #### 0.3.3 token 吞吐指标
 
@@ -134,14 +134,14 @@ token 吞吐比 QPS 更适合比较不同输入/输出长度下的模型执行�
 
 | 指标 | 常见写法 | 含义 | 怎么计算 | 优先关联路径 |
 |---|---|---|---|---|
-| 输入 token 吞吐 | input tokens/s、prompt tok/s | 每秒处理多少 prompt/input token。主要衡量 prefill 能力。 | `sum(prompt_tokens) / elapsed_s`。 | prefill attention、chunked prefill、KV 写入、prefix cache。 |
-| 输出 token 吞吐 | output tokens/s、decode tok/s | 每秒生成多少 completion/output token。主要衡量 decode 能力。 | `sum(completion_tokens) / elapsed_s`。 | decode attention、NPU graph、sampler、MoE。 |
-| 总 token 吞吐 | total tokens/s | 输入 token 和输出 token 合计吞吐。 | `(prompt_tokens + completion_tokens) / elapsed_s`。 | 总体算力利用。 |
-| 单卡 token 吞吐 | tokens/s/card | 平均到每张 NPU 的 token 吞吐。 | `tokens/s / npu_count`。 | 多卡扩展效率。 |
-| prefill 吞吐 | prefill tokens/s | prefill 阶段每秒处理 prompt token 的速度。 | `prefill_tokens / prefill_time`。 | 长输入、chunked prefill、attention backend。 |
-| decode 吞吐 | decode tokens/s | decode 阶段每秒产出 token 的速度。 | `generated_tokens / decode_time`。 | 长输出、graph、batch 稳定性。 |
-| 平均输入长度 | avg input tokens | 每个请求平均 prompt token 数。 | `sum(prompt_tokens) / ok_requests`。 | workload 是否一致。 |
-| 平均输出长度 | avg output tokens | 每个请求平均 completion token 数。 | `sum(completion_tokens) / ok_requests`。 | decode 压力是否一致。 |
+| 输入 token 吞吐 | input tokens/s、prompt tok/s | 每秒处理多少 prompt/input token。主要衡量 prefill 能力。 | $`\frac{\mathrm{sum}\left(\mathrm{prompt\_tokens}\right)}{\mathrm{elapsed\_s}}`$。 | prefill attention、chunked prefill、KV 写入、prefix cache。 |
+| 输出 token 吞吐 | output tokens/s、decode tok/s | 每秒生成多少 completion/output token。主要衡量 decode 能力。 | $`\frac{\mathrm{sum}\left(\mathrm{completion\_tokens}\right)}{\mathrm{elapsed\_s}}`$。 | decode attention、NPU graph、sampler、MoE。 |
+| 总 token 吞吐 | total tokens/s | 输入 token 和输出 token 合计吞吐。 | $`\frac{\mathrm{prompt\_tokens}+\mathrm{completion\_tokens}}{\mathrm{elapsed\_s}}`$。 | 总体算力利用。 |
+| 单卡 token 吞吐 | tokens/s/card | 平均到每张 NPU 的 token 吞吐。 | $`\frac{\frac{\mathrm{tokens}}{s}}{\mathrm{npu\_count}}`$。 | 多卡扩展效率。 |
+| prefill 吞吐 | prefill tokens/s | prefill 阶段每秒处理 prompt token 的速度。 | $`\frac{\mathrm{prefill\_tokens}}{\mathrm{prefill\_time}}`$。 | 长输入、chunked prefill、attention backend。 |
+| decode 吞吐 | decode tokens/s | decode 阶段每秒产出 token 的速度。 | $`\frac{\mathrm{generated\_tokens}}{\mathrm{decode\_time}}`$。 | 长输出、graph、batch 稳定性。 |
+| 平均输入长度 | avg input tokens | 每个请求平均 prompt token 数。 | $`\frac{\mathrm{sum}\left(\mathrm{prompt\_tokens}\right)}{\mathrm{ok\_requests}}`$。 | workload 是否一致。 |
+| 平均输出长度 | avg output tokens | 每个请求平均 completion token 数。 | $`\frac{\mathrm{sum}\left(\mathrm{completion\_tokens}\right)}{\mathrm{ok\_requests}}`$。 | decode 压力是否一致。 |
 | 有效 token 吞吐 | useful tokens/s | 去掉失败请求、warmup、padding 后的有效吞吐。 | 按报告口径定义。 | 真实业务收益。 |
 
 同一个 QPS 下，`短输入短输出` 和 `长输入长输出` 的 token 计算量完全不同。因此比较优化前后性能时，要固定输入/输出长度，并同时报告 QPS、input tokens/s、output tokens/s。
@@ -209,13 +209,13 @@ PD 的性能不能只看总 QPS。常见情况是 TTFT 因 prefill 独立扩容�
 
 | 指标 | 含义 | 公式或口径 | 适用问题 |
 |---|---|---|---|
-| SLA goodput | 满足延迟 SLA 的成功请求吞吐。 | `latency <= SLA` 的成功请求数 / elapsed。 | “吞吐高但尾延迟不可用”时更可信。 |
+| SLA goodput | 满足延迟 SLA 的成功请求吞吐。 | $`\mathrm{latency} \le \mathrm{SLA}`$ 的成功请求数 / elapsed。 | “吞吐高但尾延迟不可用”时更可信。 |
 | token goodput | 满足 TTFT/TPOT SLA 的输出 token 吞吐。 | 满足 SLA 请求的 output tokens / elapsed。 | 流式服务体验。 |
-| TP scaling efficiency | 多卡扩展效率。 | `throughput_TPN / (throughput_TP1 * N)`。 | 判断 TP 是否被 HCCL 或 batch 限制。 |
-| graph speedup | NPU Graph 带来的加速比。 | `eager_latency / graph_latency` 或 `graph_tokens/s / eager_tokens/s`。 | graph 是否值得打开。 |
+| TP scaling efficiency | 多卡扩展效率。 | $`\frac{\mathrm{throughput\_TPN}}{\mathrm{throughput\_TP1}\cdot N}`$。 | 判断 TP 是否被 HCCL 或 batch 限制。 |
+| graph speedup | NPU Graph 带来的加速比。 | $`\frac{\mathrm{eager\_latency}}{\mathrm{graph\_latency}}`$ 或 $`\frac{\frac{\frac{\mathrm{graph\_tokens}}{s}}{\mathrm{eager\_tokens}}}{s}`$。 | graph 是否值得打开。 |
 | prefill/decode 时间占比 | 请求耗时中 prefill 与 decode 的比例。 | profiling 或服务日志统计。 | 判断优化方向。 |
-| 每百万 token NPU 小时 | 处理固定 token 量消耗多少 NPU 时间。 | `npu_count * elapsed_hours / (tokens / 1e6)`。 | 成本评估。 |
-| 性能回归百分比 | 新旧版本差异。 | `(new - old) / old`，延迟类越低越好，吞吐类越高越好。 | PR 验证。 |
+| 每百万 token NPU 小时 | 处理固定 token 量消耗多少 NPU 时间。 | $`\frac{\mathrm{npu\_count}\cdot \mathrm{elapsed\_hours}}{\frac{\mathrm{tokens}}{1000000.0}}`$。 | 成本评估。 |
+| 性能回归百分比 | 新旧版本差异。 | $`\frac{\mathrm{new}-\mathrm{old}}{\mathrm{old}}`$，延迟类越低越好，吞吐类越高越好。 | PR 验证。 |
 
 报告性能收益时要说明指标方向：吞吐、goodput、利用率越高越好；延迟、错误率、超时率、NPU 小时/token 越低越好。不要把这些指标混成一个“综合分数”，否则很难定位真实瓶颈。
 
@@ -543,7 +543,7 @@ bash "$PERF_ROOT/scripts/run_workload_matrix.sh"
 
 ### 4.2 多卡 TP 性能
 
-TP 测试要比较 `tp-size=1/2/4/8`，但前提是模型能在这些配置下都跑起来。
+TP 测试要比较 $`\mathrm{tp}-\mathrm{size}=\frac{\frac{\frac{1}{2}}{4}}{8}`$，但前提是模型能在这些配置下都跑起来。
 
 报告表建议：
 

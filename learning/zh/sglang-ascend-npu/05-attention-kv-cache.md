@@ -1,6 +1,6 @@
 # 05. Ascend Attention、KV Cache 与 HiCache
 
-这一讲拆 SGLang-NPU 最核心的性能路径：attention backend 如何读写 KV cache，以及 NPU 专用 KV pool 为什么要和 `attention_backend=ascend` 配套使用。
+这一讲拆 SGLang-NPU 最核心的性能路径：attention backend 如何读写 KV cache，以及 NPU 专用 KV pool 为什么要和 $`\mathrm{attention\_backend}=\mathrm{ascend}`$ 配套使用。
 
 ## 主链路
 
@@ -152,7 +152,7 @@ classDiagram
 |---|---|
 | 普通 MHA/GQA | `NPUMHATokenToKVPool` |
 | MLA | `NPUMLATokenToKVPool` |
-| hybrid SWA | `SWAKVPool(token_to_kv_pool_class=NPUMHATokenToKVPool)` |
+| hybrid SWA | $`\mathrm{SWAKVPool}\left(\mathrm{token\_to\_kv\_pool\_class}=\mathrm{NPUMHATokenToKVPool}\right)`$ |
 
 ## Allocator
 
@@ -172,10 +172,16 @@ HiCache 是分层 KV cache，可以把部分 KV 从 NPU device memory 扩展到 
 
 NPU 默认配置：
 
-```text
-hicache_io_backend = kernel_ascend
-hicache_mem_layout = page_first_kv_split   # MLA
-hicache_mem_layout = page_first_direct     # MHA
+```math
+\mathrm{hicache\_io\_backend}=\mathrm{kernel\_ascend}
+```
+
+```math
+\mathrm{hicache\_mem\_layout}=\mathrm{page\_first\_kv\_split}\qquad\text{MLA}
+```
+
+```math
+\mathrm{hicache\_mem\_layout}=\mathrm{page\_first\_direct}\qquad\text{MHA}
 ```
 
 ```mermaid

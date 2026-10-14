@@ -126,7 +126,7 @@ def persistent_add(
         tl.store(out_ptr + offsets, x + y, mask=mask)
 ```
 
-若输入是 FP16、`BLOCK_SIZE=1024`：`pid/num_programs/num_tiles/tile_id` 都是运行时整数标量 `tl.tensor`；`BLOCK_SIZE` 是 `tl.constexpr`；`offsets` 是 `int32[1024]`；`x_ptr + offsets` 是 `pointer<fp16>[1024]`；`x/y` 是 `fp16[1024]`。`range(pid, ...)` 是 JIT 支持的 device 控制流，不是 CPython 在 launch 前把 tile 全部循环一遍。
+若输入是 FP16、$`\mathrm{BLOCK\_SIZE}=1024`$：`pid/num_programs/num_tiles/tile_id` 都是运行时整数标量 `tl.tensor`；`BLOCK_SIZE` 是 `tl.constexpr`；`offsets` 是 `int32[1024]`；`x_ptr + offsets` 是 $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[1024\right]`$；`x/y` 是 `fp16[1024]`。`range(pid, ...)` 是 JIT 支持的 device 控制流，不是 CPython 在 launch 前把 tile 全部循环一遍。
 
 这段代码表达的不是“当前设备物理上一定有 `num_programs` 个核在跑”，而是：
 
@@ -195,8 +195,11 @@ grid = min(num_sms, num_tiles)
 
 源码第 145-147 行先做了：
 
+```math
+\mathrm{tiles\_per\_sm}=\left\lfloor\frac{\mathrm{num\_tiles}}{\mathrm{NUM\_SMS}}\right\rfloor
+```
+
 ```text
-tiles_per_sm = num_tiles // NUM_SMS
 前 num_tiles % NUM_SMS 个 program 再多领 1 个 tile
 ```
 
@@ -207,7 +210,7 @@ tiles_per_sm = num_tiles // NUM_SMS
 
 初学者这里最容易误解成“每个 program 一定连续处理自己那一段 tile”。其实源码不是按“连续区间”分，而是按固定步长 `NUM_SMS` 往后跳。
 
-### 9.3 `tile_id = start_pid - NUM_SMS` 是为了让第一次加回去后正好等于 `start_pid`
+### 9.3 $`\mathrm{tile\_id}=\mathrm{start\_pid}-\mathrm{NUM\_SMS}`$ 是为了让第一次加回去后正好等于 `start_pid`
 
 源码第 149 行乍看很怪：
 
@@ -226,7 +229,13 @@ tile_id += NUM_SMS
 ```text
 start_pid
 start_pid + NUM_SMS
-start_pid + 2 * NUM_SMS
+```
+
+```math
+\mathrm{start\_pid}+2\cdot \mathrm{NUM\_SMS}
+```
+
+```text
 ...
 ```
 
@@ -341,23 +350,23 @@ task queue:
 按“先证明是哪一层”的顺序做：
 
 1. **先手算逻辑 tile 数**
-   - 例如 matmul 先算 `num_pid_m * num_pid_n`，不要只看 tensor 很大就说“肯定需要 persistent”。
+   - 例如 matmul 先算 $`\mathrm{num\_pid\_m}\cdot \mathrm{num\_pid\_n}`$，不要只看 tensor 很大就说“肯定需要 persistent”。
 2. **再查设备物理核数**
    - 区分当前 kernel 更依赖 `num_aicore` 还是 `num_vectorcore`。
 3. **确认你比较的是哪两种方案**
    - 普通 grid vs 手写 persistent；
-   - 普通 grid + `TRITON_ALL_BLOCKS_PARALLEL=1`；
+   - 普通 grid + $`\mathrm{TRITON\_ALL\_BLOCKS\_PARALLEL}=1`$；
    - 或 per-kernel `enable_auto_blockify=True/False`。
 4. **看 launch 是否真的改了**
    - 若走 auto-blockify，检查编译和运行时是否都启用了对应路径，而不是只设了环境变量但命中旧 cache。
 5. **benchmark 边界要同步**
-   - 尤其当 `TRITON_ENABLE_TASKQUEUE=1` 时，不能把 Host 提交返回时间直接当 kernel 完成时间。
+   - 尤其当 $`\mathrm{TRITON\_ENABLE\_TASKQUEUE}=1`$ 时，不能把 Host 提交返回时间直接当 kernel 完成时间。
 6. **对 persistent kernel 优先检查完整覆盖**
    - 最容易错的是少算尾 tile、重复算某些 tile，或者忘记在 tile 切换时重置局部状态。
 
 没有 NPU 环境时，当前工作区仍然能做的静态核查包括：
 
-- `grid=min(num_sms, num_tiles)` 这类 wrapper 逻辑是否自洽；
+- $`\mathrm{grid}=\mathrm{min}\left(\mathrm{num\_sms},\mathrm{num\_tiles}\right)`$ 这类 wrapper 逻辑是否自洽；
 - `tile_id`、`ki`、`accumulator reset` 的状态机是否覆盖完整；
 - `TRITON_ALL_BLOCKS_PARALLEL` / `enable_auto_blockify` 的编译器与 driver 锚点是否一致；
 - 文档里的 pinned 链接和源码行号是否仍能复核。
@@ -375,7 +384,7 @@ task queue:
 
 ## 15. 练习
 
-1. 以 `BLOCK_SIZE_M=64`、`BLOCK_SIZE_N=128`、`M=8192`、`N=8192` 为例，先手算普通 matmul 的 `num_tiles`，再假设设备有 32 个相关物理核，估算 persistent 版本每个 program 平均要处理多少个 tile。
+1. 以 $`\mathrm{BLOCK\_SIZE\_M}=64`$、$`\mathrm{BLOCK\_SIZE\_N}=128`$、$`M=8192`$、$`N=8192`$ 为例，先手算普通 matmul 的 `num_tiles`，再假设设备有 32 个相关物理核，估算 persistent 版本每个 program 平均要处理多少个 tile。
 2. 用自己的话解释：为什么 `for k in range(...)` 不是 persistent 的证据，而 `for tile_id in ...` 或 `tile_id += NUM_SMS` 才是。
 3. 设计一个“先试 auto-blockify，再决定是否手写 persistent”的排查清单，至少写出三条前提条件。
 4. 假设 benchmark 里只改了 `TRITON_ENABLE_TASKQUEUE`，结果 wall time 降了很多。写出两个可能原因，并说明如何排除“只是 Host 提前返回”的误判。
@@ -386,7 +395,7 @@ task queue:
 
 **答案：**三者分别描述“总共有多少份算法工作”“设备能同时提供多少核心资源”和“本次 launch 在某个 grid 轴上创建了多少逻辑 program”。它们属于算法、硬件和 launch 三个层次。
 
-例如输出矩阵按 `BM×BN` 切分后可能有 10,000 个逻辑 tile，但设备只有几十个 AIC。普通写法可以让 `num_programs(0)=10,000`，由 Runtime 分多轮调度；persistent 写法则可能只 launch 32 个 program，让每个 program 循环领取多个 tile。两种写法覆盖同样 10,000 份逻辑工作，物理核数也没有变化。
+例如输出矩阵按 `BM×BN` 切分后可能有 10,000 个逻辑 tile，但设备只有几十个 AIC。普通写法可以让 $`\mathrm{num\_programs}\left(0\right)=10,000`$，由 Runtime 分多轮调度；persistent 写法则可能只 launch 32 个 program，让每个 program 循环领取多个 tile。两种写法覆盖同样 10,000 份逻辑工作，物理核数也没有变化。
 
 `tl.num_programs(0)` 只返回 grid 第 0 轴的 launch 数量，不查询“当前到底有多少核正在同时执行”，也不一定等于总 program 数——多维 grid 还要结合其他轴。把它当成物理核数会让任务步长、负载均衡和尾块判断依赖一个并不成立的调度假设。
 
@@ -403,15 +412,15 @@ persistent：program -> 多次执行 [领取 C tile -> K-loop -> store -> reset]
 
 因此看到 `for k in ...` 不能证明 kernel 是 persistent；关键证据是 program 生命周期内 `tile_id` 会跨多个输出 tile 变化。忘记在切换 tile 时清空 accumulator，会把上一 tile 的部分和带到下一 tile，产生静默数值错误。
 
-### 3. `tile_id = start_pid - NUM_SMS` 为什么不是 bug？
+### 3. $`\mathrm{tile\_id}=\mathrm{start\_pid}-\mathrm{NUM\_SMS}`$ 为什么不是 bug？
 
 **答案：**因为官方状态机在第一次真正使用 `tile_id` 前，会在 `ki == 0` 分支执行 `tile_id += NUM_SMS`。两行合起来的第一次结果正好是：
 
-```text
-(start_pid - NUM_SMS) + NUM_SMS = start_pid
+```math
+\mathrm{start\_pid}-\mathrm{NUM\_SMS}+\mathrm{NUM\_SMS}=\mathrm{start\_pid}
 ```
 
-之后每完成一个输出 tile，`ki` 回到领取新任务的状态，再加一次 `NUM_SMS`，同一 program 依次处理 `start_pid`、`start_pid + NUM_SMS`、`start_pid + 2*NUM_SMS`。这是用统一的“先递增再使用”状态转移避免首轮单独特判。
+之后每完成一个输出 tile，`ki` 回到领取新任务的状态，再加一次 `NUM_SMS`，同一 program 依次处理 `start_pid`、`start_pid + NUM_SMS`、$`\mathrm{start\_pid}+2\cdot \mathrm{NUM\_SMS}`$。这是用统一的“先递增再使用”状态转移避免首轮单独特判。
 
 孤立地看初始化行确实像负数或越界；判断它是否为 bug 必须连同 `ki` 更新顺序、循环条件和第一次 dereference 一起读。若代码在第一次 `+= NUM_SMS` 之前就用它构造地址，那才会成为真实错误。
 

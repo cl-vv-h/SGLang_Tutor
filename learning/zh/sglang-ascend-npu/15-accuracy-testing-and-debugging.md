@@ -476,7 +476,7 @@ evalscope eval \
 
 不同模型需要调整：
 
-- 普通 instruct 模型：优先 `temperature=0`、`top_p=1`。
+- 普通 instruct 模型：优先 $`\mathrm{temperature}=0`$、$`\mathrm{top\_p}=1`$。
 - reasoning 模型：提高 `max_tokens`，并检查数据集是否需要移除 `<think>...</think>` 的后处理。
 - 代码数据集：涉及代码执行时应使用隔离 sandbox，不要直接在共享服务器宿主环境执行未知代码。
 - 某些依赖 logits 的数据集不支持 OpenAI API 模式，选择数据集前先查看 EvalScope 对应 benchmark 页面。
@@ -792,7 +792,7 @@ MoE 精度问题通常集中在 routing 和 combine：
 
 定位方法：
 
-- 固定 `temperature=0`。
+- 固定 $`\mathrm{temperature}=0`$。
 - 保存每步 top-10 token 与 logits。
 - 如果 top-1 不同但差距极小，继续看任务级影响。
 - 如果 top-k 排名大范围不同，回到 attention/MLP/logits processor。

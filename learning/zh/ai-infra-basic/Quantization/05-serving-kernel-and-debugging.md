@@ -30,17 +30,29 @@ config.json / quantization_config.json
 
 ```text
 weight: [O,I] bf16
-bias:   [O]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{bias}\right)=\left[O\right]
 ```
 
 W4A16 可能需要：
 
 ```text
 qweight: [O,I/pack_factor] int32/uint8
-scales:  [O,I/group_size]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scales}\right)=\left[O,\frac{I}{\mathrm{group\_size}}\right]
+```
+
+```text
 zeros:   optional [O,I/group_size]
 g_idx:   optional [I]
-bias:    [O]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{bias}\right)=\left[O\right]
 ```
 
 FP8/MXFP8 可能需要：
@@ -54,33 +66,48 @@ input_scale:       optional
 
 MoE expert 还会多一维：
 
-```text
-w13_weight: [num_local_experts, 2*intermediate, hidden]
-w2_weight:  [num_local_experts, hidden, intermediate]
+```math
+\mathrm{shape}\left(\mathrm{w13\_weight}\right)=\left[\mathrm{num\_local\_experts},2\cdot \mathrm{intermediate},\mathrm{hidden}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{w2\_weight}\right)=\left[\mathrm{num\_local\_experts},\mathrm{hidden},\mathrm{intermediate}\right]
 ```
 
 量化后可能变成：
 
 ```text
 w13_weight_packed: [E, 2*intermediate, hidden/2] uint8
-w13_scale:         [E, 2*intermediate, hidden/group]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{w13\_scale}\right)=\left[E,2\cdot \mathrm{intermediate},\frac{\mathrm{hidden}}{\mathrm{group}}\right]
+```
+
+```text
 w2_weight_packed:  [E, hidden, intermediate/2] uint8
-w2_scale:          [E, hidden, intermediate/group]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{w2\_scale}\right)=\left[E,\mathrm{hidden},\frac{\mathrm{intermediate}}{\mathrm{group}}\right]
 ```
 
 ## 3. packed W4 的 loader 视角
 
 设逻辑权重：
 
-```text
-W: [O,I]
+```math
+\mathrm{shape}\left(W\right)=\left[O,I\right]
 ```
 
 如果沿 `I` 维打包，每个 `uint8` 存两个 W4：
 
-```text
-W_packed: [O,I/2]
-pack_factor = 2
+```math
+\mathrm{shape}\left(W_{\mathrm{packed}}\right)=\left[O,\frac{I}{2}\right]
+```
+
+```math
+\mathrm{pack\_factor}=2
 ```
 
 如果 tensor parallel 按输入维切 RowParallel：
@@ -92,9 +119,12 @@ rank 1 负责 I 的后半
 
 加载切片时必须把逻辑 offset 转成 packed offset：
 
-```text
-physical_offset = logical_offset / pack_factor
-physical_size   = logical_size / pack_factor
+```math
+\mathrm{physical\_offset}=\frac{\mathrm{logical\_offset}}{\mathrm{pack\_factor}}
+```
+
+```math
+\mathrm{physical\_size}=\frac{\mathrm{logical\_size}}{\mathrm{pack\_factor}}
 ```
 
 如果不转换，会出现三类问题：
@@ -137,7 +167,10 @@ W4A16 的高性能执行通常不是：
 
 ```text
 qweight -> full dequant W_bf16 [O,I]
-X_bf16 @ W_bf16
+```
+
+```math
+X_{\mathrm{bf16}}\,W_{\mathrm{bf16}}
 ```
 
 而是：
@@ -205,7 +238,13 @@ kernel:
 
 ```text
 K dimension % 32 == 0
-scale last dim = K / 32
+```
+
+```math
+\text{scale last dim}= K / 32
+```
+
+```text
 某些 MoE kernel 还要求 N、K、intermediate 对齐到 128/256
 ```
 
@@ -242,28 +281,34 @@ combine outputs
 
 ```text
 Attention layer 产生:
-    K_new, V_new: [T, Nkv, D] bf16
-
+K_new, V_new: [T, Nkv, D] bf16
 写 cache 前:
-    K_q, K_scale = quantize(K_new)
-    V_q, V_scale = quantize(V_new)
+```
 
+```math
+\text{K\_q, K\_scale}= \mathrm{quantize}\left(K_{\mathrm{new}}\right)
+```
+
+```math
+\text{V\_q, V\_scale}= \mathrm{quantize}\left(V_{\mathrm{new}}\right)
+```
+
+```text
 KV memory pool 保存:
-    K_q/V_q payload
-    K_scale/V_scale metadata
-    block/page index
-    dtype info
-
+K_q/V_q payload
+K_scale/V_scale metadata
+block/page index
+dtype info
 Attention 读取:
-    按 request 的 cache index 找历史页
-    读取 payload + scale
-    kernel 内部解释为低 bit KV
+按 request 的 cache index 找历史页
+读取 payload + scale
+kernel 内部解释为低 bit KV
 ```
 
 如果有 prefix cache：
 
-```text
-prefix entry = token ids + KV payload + KV scale + dtype + layout version
+```math
+\text{prefix entry}= \mathrm{token} \mathrm{ids} + \mathrm{KV} \mathrm{payload} + \mathrm{KV} \mathrm{scale} + \mathrm{dtype} + \mathrm{layout} \mathrm{version}
 ```
 
 如果有 KV transfer：
@@ -312,46 +357,42 @@ all-reduce 是求和，量化误差会跨 rank 叠加；
 
 ### 10.1 权重显存
 
-```text
-weight_bytes =
-    num_params * bits_per_weight / 8
-    + scale_bytes
-    + zero_point_bytes
-    + layout_padding
+```math
+\mathrm{weight\_bytes}=\frac{\mathrm{num\_params}\cdot \mathrm{bits\_per\_weight}}{8}+\mathrm{scale\_bytes}+\mathrm{zero\_point\_bytes}+\mathrm{layout\_padding}
 ```
 
 以 70B 为例：
 
-```text
 BF16 主体:
-    70B * 2 bytes = 140 GB
+
+```math
+70B \cdot  2 \mathrm{bytes} = 140 \mathrm{GB}
+```
 
 W4 主体:
-    70B * 4 / 8 = 35 GB
+
+```math
+70B \cdot  4 / 8 = 35 \mathrm{GB}
 ```
 
 如果 group size 是 128，scale 用 FP16，粗略 scale overhead：
 
-```text
 每 128 个权重 1 个 scale
-scale overhead per param = 2 / 128 = 0.015625 bytes
-70B scale overhead ≈ 1.09 GB
+
+```math
+\text{scale overhead per param}= 2 / 128 = 0.015625 \mathrm{bytes}
+```
+
+```math
+70B \mathrm{scale} \mathrm{overhead} \approx  1.09 \mathrm{GB}
 ```
 
 还要加 zero point、padding、MoE 特殊 metadata、embedding/lm_head 未量化部分等。
 
 ### 10.2 KV Cache 显存
 
-```text
-kv_bytes =
-    batch_total_tokens
-    * num_layers
-    * 2
-    * num_kv_heads
-    * head_dim
-    * bytes_per_kv_element
-    + kv_scale_bytes
-    + allocator_metadata
+```math
+\mathrm{kv\_bytes}=\mathrm{batch\_total\_tokens}\cdot \mathrm{num\_layers}\cdot 2\cdot \mathrm{num\_kv\_heads}\cdot \mathrm{head\_dim}\cdot \mathrm{bytes\_per\_kv\_element}+\mathrm{kv\_scale\_bytes}+\mathrm{allocator\_metadata}
 ```
 
 KV 量化对长上下文特别有效，因为 `batch_total_tokens` 会持续增长。
@@ -403,12 +444,24 @@ kernel fallback 比例
 3. 加载量化权重 qW + scale
 4. 手写 reference dequant 得到 W_hat
 5. 比较:
-       Y_ref = X @ W
-       Y_q_ref = X @ W_hat
-       Y_kernel = quant_kernel(X, qW, scale)
+```
+
+```math
+Y_{\mathrm{ref}}=X\,W
+```
+
+```math
+\mathrm{Y\_q\_ref}=X\,W_{\mathrm{hat}}
+```
+
+```math
+Y_{\mathrm{kernel}} = \mathrm{quant\_kernel}\left(X, \mathrm{qW}, \mathrm{scale}\right)
+```
+
+```text
 6. 分别检查:
-       max_abs(Y_q_ref - Y_kernel)
-       max_abs(Y_ref - Y_q_ref)
+max_abs(Y_q_ref - Y_kernel)
+max_abs(Y_ref - Y_q_ref)
 ```
 
 读法：

@@ -334,7 +334,7 @@ flowchart TD
 
 实践建议：
 
-- 先跑单卡，再跑 `tp_size=2`。
+- 先跑单卡，再跑 $`\mathrm{tp\_size}=2`$。
 - 观察 HCCL 初始化日志、rank 映射、显存占用。
 - 再验证长 prompt、continuous batching、streaming 是否稳定。
 
@@ -389,7 +389,7 @@ MoE：
 
 Fallback：
 
-- NPU 不适合直接复用 CUDA/Triton kernel 的地方，通常会出现 fallback 或 `disable=_is_npu` 之类分支。
+- NPU 不适合直接复用 CUDA/Triton kernel 的地方，通常会出现 fallback 或 $`\mathrm{disable}=\mathrm{\_is\_npu}`$ 之类分支。
 - 看到 fallback 时先判断：它是正确性兜底，还是性能降级路径。
 
 ### 10. 性能压测与排错

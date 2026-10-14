@@ -182,7 +182,7 @@ sequenceDiagram
    - extend：一个请求可能一次处理多个 suffix token，所以需要 `extend_prefix_lens`、`extend_seq_lens`、`extend_start_loc`。
 
 3. **计算 positions**
-   - decode：`positions = seq_lens - 1`，并做 clamp。
+   - decode：$`\mathrm{positions}=\mathrm{seq\_lens}-1`$，并做 clamp。
    - extend：调用 `compute_position()`，把每个请求的 prefix 长度和 extend 长度展开成 token 级 position。
 
 4. **挂载额外能力 metadata**
@@ -198,14 +198,17 @@ sequenceDiagram
 
 | 请求 | prefix_len | extend_len | positions |
 |---|---:|---:|---|
-| req A | 5 | 3 | `[5, 6, 7]` |
-| req B | 10 | 2 | `[10, 11]` |
+| req A | 5 | 3 | $`\left[5,6,7\right]`$ |
+| req B | 10 | 2 | $`\left[10,11\right]`$ |
 
 那么拼成一个扁平 token batch：
 
-```text
-input_ids:  [A5, A6, A7, B10, B11]
-positions:  [5,  6,  7,  10,  11]
+```math
+\mathrm{shape}\left(\mathrm{input\_ids}\right)=\left[\mathrm{A5},\mathrm{A6},\mathrm{A7},\mathrm{B10},\mathrm{B11}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{positions}\right)=\left[5,6,7,10,11\right]
 ```
 
 这就是为什么 extend 路径里不只是 batch size，而是还要关心 `extend_num_tokens`。
@@ -469,9 +472,15 @@ decode 时最值得观察三个字段：
 
 ```text
 对于每个请求：
-  Q = 当前新 token 的 query
-  K/V = 历史所有 token 的 cached K/V + 当前新 token 的 K/V
-  输出 = 当前 token attend 到整个上下文后的 hidden state
+Q = 当前新 token 的 query
+```
+
+```math
+K/V = \text{历史所有} \mathrm{token} \text{的} \mathrm{cached} K/V + \text{当前新} \mathrm{token} \text{的} K/V
+```
+
+```text
+输出 = 当前 token attend 到整个上下文后的 hidden state
 ```
 
 所以 decode 的计算量主要来自“请求数 × 上下文长度”，而不是输入 token 数，因为输入 token 数基本等于 batch size。

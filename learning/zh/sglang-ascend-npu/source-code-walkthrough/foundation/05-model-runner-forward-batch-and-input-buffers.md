@@ -64,8 +64,11 @@ ModelRunner 因而是“模型 + 设备 + 并行 + backend”的聚合点。
 
 构造函数先保存配置并识别模型特征：
 
+```math
+\frac{\mathrm{device}}{\mathrm{gpu\_id}}
+```
+
 ```text
-device / gpu_id
 TP/PP/EP/DP ranks
 generation vs embedding
 multimodal
@@ -201,8 +204,8 @@ NPU 和 GPU 一样需要把 host list/mirror 转成设备 tensor。`non_blocking
 
 decode/target verify：
 
-```text
-positions = clamp_position(seq_lens)
+```math
+\mathrm{positions} = \mathrm{clamp\_position}\left(\mathrm{seq\_lens}\right)
 ```
 
 extend：

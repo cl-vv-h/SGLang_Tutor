@@ -41,7 +41,7 @@ This topic independently explains the computational structure of large language 
 | `w` | local sliding-window length |
 | `M` | recurrent linear-attention state matrix |
 
-Standard Multi-Head Attention typically satisfies `H=Nq*D`; GQA satisfies `Nq>Nkv`; Sparse MoE satisfies `K<<E`; MLA uses `Dc`-dimensional latent state instead of storing full K/V per head; sparse attention usually has `k_attn<<S`; recurrent attention stores `M` instead of a token-length cache.
+Standard Multi-Head Attention typically satisfies $`H=\mathrm{Nq}\cdot D`$; GQA satisfies $`\mathrm{Nq} \gt \mathrm{Nkv}`$; Sparse MoE satisfies `K<<E`; MLA uses `Dc`-dimensional latent state instead of storing full K/V per head; sparse attention usually has `k_attn<<S`; recurrent attention stores `M` instead of a token-length cache.
 
 ## Reading Order
 

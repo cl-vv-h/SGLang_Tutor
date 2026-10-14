@@ -57,8 +57,8 @@
 
 例如后面会看到：
 
-```text
-accept_prob(y) = min(1, p(y) / q(y))
+```math
+\mathrm{accept\_prob}\left(y\right) = \mathrm{min}\left(1, p\left(y\right) / q\left(y\right)\right)
 ```
 
 它不是在说“公式越复杂越正确”，而是在说：
@@ -90,8 +90,8 @@ accept prefix -> commit accepted tokens, then append correction/bonus token
 
 如果平均每轮可以提交：
 
-```text
-平均提交 token 数 = 平均接受的 draft token 数 + 1 个修正/奖励 token
+```math
+\text{平均提交 token 数}= \text{平均接受的} \mathrm{draft} \mathrm{token} \text{数} + 1 \text{个修正}/\text{奖励} \mathrm{token}
 ```
 
 而 target verify 的成本没有线性增长到 `K` 倍，就能减少大模型调度轮数，降低 inter-token latency 并提高吞吐。

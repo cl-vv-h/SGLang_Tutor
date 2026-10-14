@@ -10,10 +10,16 @@ Modern LLMs (70B+ parameters in BF16) need ~140GB+ of memory just to store weigh
 
 **How it works**: Split individual weight matrices across GPUs.
 
-```text
-Standard: Y = X @ W          # W: [H, 4H] must fit on one GPU
-TP:       Y = [X @ W_0, X @ W_1]  # W split column-wise across 2 GPUs
-          Y = all_reduce(Y_parts)  # Combine results
+```math
+\mathrm{Standard}: Y = X \, W \qquad\text{W: [H, 4H] must fit on one GPU}
+```
+
+```math
+\mathrm{TP}: Y = \left[X \, W_{0}, X \, W_{1}\right] \qquad\text{W split column-wise across 2 GPUs}
+```
+
+```math
+Y = \mathrm{all\_reduce}\left(Y_{\mathrm{parts}}\right) \qquad\text{Combine results}
 ```
 
 **Memory**: Each GPU holds `1/TP_size` of each weight matrix
@@ -85,9 +91,18 @@ Real deployments combine multiple strategies:
 
 ```text
 Example: 8 GPUs, 70B MoE model
-- TP = 2 (split matrices across GPU 0-1 and GPU 2-3)
-- PP = 2 (GPU 0-3: layers 0-39, GPU 4-7: layers 40-79)
-- EP = 4 (experts distributed within each PP stage)
+```
+
+```math
+- \mathrm{TP} = 2 \left(\mathrm{split} \mathrm{matrices} \mathrm{across} \mathrm{GPU} 0-1 \mathrm{and} \mathrm{GPU} 2-3\right)
+```
+
+```math
+- \mathrm{PP} = 2 \left(\mathrm{GPU} 0-3: \mathrm{layers} 0-39, \mathrm{GPU} 4-7: \mathrm{layers} 40-79\right)
+```
+
+```math
+- \mathrm{EP} = 4 \left(\mathrm{experts} \mathrm{distributed} \mathrm{within} \mathrm{each} \mathrm{PP} \mathrm{stage}\right)
 ```
 
 ## 8. SGLang Code References

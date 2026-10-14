@@ -105,9 +105,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 日志里至少确认：
 
-```text
-device=npu
-attention_backend=ascend
+```math
+\mathrm{device}=\mathrm{npu}
+```
+
+```math
+\mathrm{attention\_backend}=\mathrm{ascend}
 ```
 
 ### 0.4 脚本目录约定
@@ -319,7 +322,7 @@ sglang serve \
 验收重点：
 
 - `torch.npu.device_count()` 至少为 1。
-- 日志确认 `device=npu`。
+- 日志确认 $`\mathrm{device}=\mathrm{npu}`$。
 - 单请求和 stream 请求都能返回。
 
 ### 2.2 多卡 Tensor Parallel
@@ -387,7 +390,7 @@ sglang serve \
   --tp-size 1
 ```
 
-注意：`ASCEND_RT_VISIBLE_DEVICES=1` 后，进程内看到的第一张卡通常仍是逻辑 0，所以 `--base-gpu-id 0` 是常见写法。
+注意：$`\mathrm{ASCEND\_RT\_VISIBLE\_DEVICES}=1`$ 后，进程内看到的第一张卡通常仍是逻辑 0，所以 `--base-gpu-id 0` 是常见写法。
 
 ## 3. 按服务形态区分
 
@@ -473,7 +476,7 @@ chmod +x "$WORKSPACE/scripts/pd/env.sh"
 
 说明：
 
-- `PREFILL_NPUS=0`、`DECODE_NPUS=1` 表示两个 server 分别绑定不同 NPU。
+- $`\mathrm{PREFILL\_NPUS}=0`$、$`\mathrm{DECODE\_NPUS}=1`$ 表示两个 server 分别绑定不同 NPU。
 - 如果一台机器上只有一张可用 NPU，不建议用 PD 分离做性能结论，只能做功能冒烟。
 - 如果 prefill/decode 各自使用多卡，把 `PREFILL_NPUS` 和 `DECODE_NPUS` 写成逗号分隔，并同步调大对应 `*_TP_SIZE`。
 
@@ -1200,7 +1203,7 @@ bash "$WORKSPACE/scripts/pd/run_all_local.sh"
 2. 容器内 `npu-smi info` 是否正常。
 3. `torch.npu.is_available()` 是否为 `True`。
 4. `import sglang, sgl_kernel_npu` 是否成功。
-5. 日志里是否是 `device=npu`。
+5. 日志里是否是 $`\mathrm{device}=\mathrm{npu}`$。
 6. 日志里 attention backend 是否是 `ascend`。
 7. 单卡是否正常。
 8. 再看多卡、PD、LoRA、MoE、量化、多模态。

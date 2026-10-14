@@ -91,7 +91,7 @@ pipe.InitBuffer(outQueue, bufferCount, tileBytes);
 | `bufferCount` | `constexpr uint8_t` | 否 | 编译期 buffer 数量 2 |
 | `tileBytes` | `constexpr uint32_t` | 否 | 每个 buffer 的容量，单位明确为字节 |
 
-`InitBuffer` 只配置/分配资源，不从 GM 复制输入。后续 `AllocTensor<T>()` 得到 `LocalTensor<T>` view，`DataCopy` 才触发搬运，`EnQue/DeQue` 表达 buffer 就绪和所有权交接。
+`InitBuffer` 只配置/分配资源，不从 GM 复制输入。后续 $`\mathrm{AllocTensor} \lt T \gt \left[\right]`$ 得到 `LocalTensor<T>` view，`DataCopy` 才触发搬运，`EnQue/DeQue` 表达 buffer 就绪和所有权交接。
 
 ## 5. Double Buffer
 
@@ -172,7 +172,7 @@ Triton 把其中较多工作交给编译器和 meta-parameter；Ascend C 往往�
 AI = \frac{计算操作数}{从较慢存储搬运的字节数}
 ```
 
-向量加法 `z=x+y` 对每个 FP16 元素：
+向量加法 $`z=x+y`$ 对每个 FP16 元素：
 
 - 读 `x`：2 bytes；
 - 读 `y`：2 bytes；
@@ -245,7 +245,7 @@ Queue 只在正确使用 `AllocTensor`、`EnQue`、`DeQue`、`FreeTensor` 的前
 
 **答案：**每个元素的计算很少，但必须搬运较多字节。
 
-FP16 的 `z=x+y` 每个元素读取 x 2 字节、读取 y 2 字节、写 z 2 字节，总计至少约 6 字节，只完成一次加法，算术强度约为 `1 op / 6 bytes`。Vector 加法单元很快就能完成计算，更多时间往往花在 GM↔UB 数据供应和写回上。
+FP16 的 $`z=x+y`$ 每个元素读取 x 2 字节、读取 y 2 字节、写 z 2 字节，总计至少约 6 字节，只完成一次加法，算术强度约为 `1 op / 6 bytes`。Vector 加法单元很快就能完成计算，更多时间往往花在 GM↔UB 数据供应和写回上。
 
 所以此类 kernel 的优化重点通常是连续合并访问、对齐、大粒度 DataCopy、流水和与相邻逐元素操作融合，而不是只替换加法指令。若数据已在 cache 或融合后不再写中间结果，实际流量会变化，必须按真实数据路径重新计算。
 

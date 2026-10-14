@@ -49,10 +49,16 @@ TE 的典型流程是注册本地内存、定位远端 segment、批量提交、
 
 对普通 MHA/GQA，假设每层 K/V 的 head dim 相同，没有量化、padding、复制和 prefix 命中：
 
-```text
-KV_bytes = 2 * L * T * H_kv * D * bytes_per_element
-L=32, T=8192, H_kv=8, D=128, BF16=2 bytes
-KV_bytes = 1,073,741,824 bytes = 1 GiB
+```math
+\mathrm{KV}_{\mathrm{bytes}}=2\cdot L\cdot T\cdot H_{\mathrm{kv}}\cdot D\cdot \mathrm{bytes\_per\_element}
+```
+
+```math
+L=32, T=8192, H_{\mathrm{kv}}=8, D=128, \mathrm{BF16}=2 \mathrm{bytes}
+```
+
+```math
+\mathrm{KV}_{\mathrm{bytes}} = 1,073,741,824 \mathrm{bytes} = 1 \mathrm{GiB}
 ```
 
 若聚合有效带宽为 `50 GB/s`，仅 payload 的理想传输时间约 **21.47 ms**。此处 GB 为十进制，GiB 为二进制。这个下界不含排队、注册、layout 转换、协议和同步开销，也不等于 TTFT：prefill 是否已经返回首 token、KV 是否分块流水，都会影响用户可见延迟。

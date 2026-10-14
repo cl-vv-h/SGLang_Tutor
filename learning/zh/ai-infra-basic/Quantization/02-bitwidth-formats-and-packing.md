@@ -61,15 +61,23 @@ KV Cache 8-bit
 
 这个名字可以拆成两层：
 
-```text
 W4A4C8:
-    W4  = weight 4-bit
-    A4  = activation 4-bit
-    C8  = KV Cache 8-bit
+
+```math
+\mathrm{W4} = \mathrm{weight} 4-\mathrm{bit}
+```
+
+```math
+\mathrm{A4} = \mathrm{activation} 4-\mathrm{bit}
+```
+
+```math
+\mathrm{C8} = \mathrm{KV} \mathrm{Cache} 8-\mathrm{bit}
+```
 
 MXFP8:
-    指明其中 8-bit 浮点路径采用 microscaling FP8 格式
-```
+
+指明其中 8-bit 浮点路径采用 microscaling FP8 格式
 
 更完整的读法是：
 
@@ -123,9 +131,9 @@ INT8 的优势是硬件支持成熟，activation 动态量化也相对稳定。
 
 | 格式 | 常见范围 | 说明 |
 |---|---:|---|
-| signed INT4 | `-8..7` | 二补码友好 |
-| symmetric INT4 | `-7..7` 或 `-8..7` | 取决于 kernel 是否使用所有编码 |
-| UINT4 | `0..15` | 常与 zero point 搭配 |
+| signed INT4 | $`\{-8,\ldots,7\}`$ | 二补码友好 |
+| symmetric INT4 | $`\{-7,\ldots,7\}`$ 或 $`\{-8,\ldots,7\}`$ | 取决于 kernel 是否使用所有编码 |
+| UINT4 | $`\{0,\ldots,15\}`$ | 常与 zero point 搭配 |
 
 INT4 很少作为独立 tensor dtype 存在，通常被打包到 `uint8`、`int32` 或硬件专用 packed dtype 中。
 
@@ -147,8 +155,8 @@ mantissa 位数越多，在同一数量级内的刻度越细。
 
 FP8 仍然经常需要 scale：
 
-```text
-x ≈ x_fp8 * scale
+```math
+x\approx x_{\mathrm{fp8}}\cdot \mathrm{scale}
 ```
 
 如果整个 tensor 只有一个 FP32 scale，遇到 outlier 时仍可能损失小值精度。因此出现了 block scaling 和 MXFP8。
@@ -161,8 +169,8 @@ MXFP8 把张量切成很多小 block，每个 block 共享一个局部 scale。
 
 NVIDIA Transformer Engine 对 MXFP8 的核心语义是：
 
-```text
-x = x_fp8 * s_block
+```math
+x=x_{\mathrm{fp8}}\cdot s_{\mathrm{block}}
 ```
 
 | 项 | 含义 |
@@ -174,14 +182,14 @@ x = x_fp8 * s_block
 
 为什么 E8M0 可以当 scale？因为它只存指数：
 
-```text
-s_block = 2^(e - bias)
+```math
+s_{\mathrm{block}}={2}^{e-\mathrm{bias}}
 ```
 
 如果一个 block 内最大绝对值是 `amax_block`，可以选择一个 scale 让最大值刚好落进 FP8 范围：
 
-```text
-scale ≈ amax_block / max_fp8
+```math
+\mathrm{scale}\approx \frac{\mathrm{amax\_block}}{\mathrm{max\_fp8}}
 ```
 
 读法：
@@ -274,7 +282,7 @@ b = (packed >> 4) & 0x0F
 
 ### 9.2 signed INT4 的解码
 
-如果 packed nibble 存的是 signed INT4，解包后还要从 `0..15` 映射到 `-8..7`：
+如果 packed nibble 存的是 signed INT4，解包后还要从 $`\{0,\ldots,15\}`$ 映射到 $`\{-8,\ldots,7\}`$：
 
 ```text
 raw = nibble
@@ -293,34 +301,34 @@ signed = raw if raw < 8 else raw - 16
 
 如果是 UINT4 + zero point，则不做二补码映射，而是：
 
-```text
-x_hat = (raw - zero_point) * scale
+```math
+x_{\mathrm{hat}}=\left(\mathrm{raw}-\mathrm{zero\_point}\right)\cdot \mathrm{scale}
 ```
 
 ### 9.3 物理形状与逻辑形状
 
 逻辑权重：
 
-```text
-W_logical: [O, I]
+```math
+\mathrm{shape}\left(W_{\mathrm{logical}}\right)=\left[O,I\right]
 ```
 
 如果每个 `uint8` 存两个 W4，物理存储可能是：
 
-```text
-W_packed_uint8: [O, I / 2]
+```math
+\mathrm{shape}\left(\mathrm{W\_packed\_uint8}\right)=\left[O,\frac{I}{2}\right]
 ```
 
 如果每个 `int32` 存八个 W4，物理存储可能是：
 
-```text
-W_packed_int32: [O, I / 8]
+```math
+\mathrm{shape}\left(\mathrm{W\_packed\_int32}\right)=\left[O,\frac{I}{8}\right]
 ```
 
 这就是 `pack_factor` 的含义：
 
-```text
-pack_factor = container_bits / value_bits
+```math
+\mathrm{pack\_factor}=\frac{\mathrm{container\_bits}}{\mathrm{value\_bits}}
 ```
 
 | 容器 | value bits | pack factor |
@@ -334,17 +342,22 @@ pack_factor = container_bits / value_bits
 
 如果一个 Linear 权重按输出维分片：
 
-```text
-W_logical: [O, I]
-TP rank 0: O 的前半
-TP rank 1: O 的后半
+```math
+\mathrm{shape}\left(W_{\mathrm{logical}}\right)=\left[O,I\right]
 ```
+
+TP rank 0: O 的前半
+
+TP rank 1: O 的后半
 
 当 packed 维正好是分片维，offset 和 size 必须按 `pack_factor` 缩小：
 
-```text
-logical_shard_size = 4096
-physical_shard_size = logical_shard_size / pack_factor
+```math
+\mathrm{logical\_shard\_size}=4096
+```
+
+```math
+\mathrm{physical\_shard\_size}=\frac{\mathrm{logical\_shard\_size}}{\mathrm{pack\_factor}}
 ```
 
 否则 loader 会从 checkpoint 中切错位置。很多量化模型加载失败、shape mismatch 或生成质量异常，都来自逻辑 shape 和 packed physical shape 混淆。
@@ -365,13 +378,20 @@ physical_shard_size = logical_shard_size / pack_factor
 
 不要只按变量名猜方向。要看 kernel 公式：
 
-```text
 有的 kernel:
-    x_fp = q * scale
+
+```math
+x_{\mathrm{fp}}=q\cdot \mathrm{scale}
+```
 
 有的 kernel:
-    q = x * scale_inv
-    x_fp = q / scale_inv
+
+```math
+q=x\cdot \mathrm{scale\_inv}
+```
+
+```math
+x_{\mathrm{fp}}=\frac{q}{\mathrm{scale\_inv}}
 ```
 
 如果把 `scale` 和 `scale_inv` 用反，模型不会只“慢一点”，而是直接输出崩坏。
@@ -391,8 +411,8 @@ physical_shard_size = logical_shard_size / pack_factor
 | `NVFP4` | NVIDIA FP4 block scaling 格式 |
 | `NF4` | QLoRA 常用 NormalFloat 4-bit 码本 |
 | `packed W4` | 多个 4-bit 权重塞进 `uint8`/`int32` 容器 |
-| `group_size=128` | 每 128 个输入维共享一组权重 scale |
-| `block_size=[1,32]` | 常见 MXFP8 权重 block，沿 K 维每 32 个值一个 scale |
+| $`\mathrm{group\_size}=128`$ | 每 128 个输入维共享一组权重 scale |
+| $`\mathrm{block\_size}=\left[1,32\right]`$ | 常见 MXFP8 权重 block，沿 K 维每 32 个值一个 scale |
 
 ## 12. 小结
 

@@ -45,16 +45,19 @@ flowchart TD
 
 不同模型文件写法不完全相同，但典型 decoder layer 都会做这些事：
 
+```math
+\frac{\mathrm{hidden\_states}}{\mathrm{residual}}
+```
+
 ```text
-hidden_states / residual
-  -> input layernorm
-  -> QKV projection
-  -> RoPE / position encoding
-  -> RadixAttention.forward()
-  -> attention output projection
-  -> post-attention layernorm
-  -> MLP 或 MoE
-  -> residual 合并
+-> input layernorm
+-> QKV projection
+-> RoPE / position encoding
+-> RadixAttention.forward()
+-> attention output projection
+-> post-attention layernorm
+-> MLP 或 MoE
+-> residual 合并
 ```
 
 在没有复杂并行时，这看起来就是普通 Transformer block；但在 SGLang 中，输入张量可能处于 TP 切分、attention TP 切分、context parallel 切分、MoE expert parallel 切分、DP attention padding 等状态。`LayerCommunicator` 的作用就是让每个子模块在它期望的张量布局上执行。

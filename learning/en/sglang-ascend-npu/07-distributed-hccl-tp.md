@@ -68,7 +68,7 @@ ZBAL affects:
 ## 6. Verification Steps
 
 1. Single NPU: verify basic serving works
-2. `tp_size=2`: verify HCCL init, rank mapping, memory
+2. $`\mathrm{tp\_size}=2`$: verify HCCL init, rank mapping, memory
 3. Long prompts: verify chunked prefill across TP
 4. Continuous batching: verify dynamic batch sizes
 5. Streaming: verify streaming token delivery

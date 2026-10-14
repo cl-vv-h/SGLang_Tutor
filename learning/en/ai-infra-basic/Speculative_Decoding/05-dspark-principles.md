@@ -30,14 +30,14 @@ flowchart LR
 |---|---|
 | `B` | Number of requests in the current decode batch |
 | `γ` | Maximum number of proposed draft tokens per request, or block size |
-| `W=γ+1` | Logical target-verification width; the extra row is the anchor/current token |
+| $`W=\gamma+1`$ | Logical target-verification width; the extra row is the anchor/current token |
 | `S_r` | Committed sequence length of request `r` before this round |
 | `D` | Draft-backbone hidden width |
 | `D_t` | Target hidden/context feature width |
 | `V` | Vocabulary size |
-| `r` | Markov low-rank width; the paper commonly uses `r=256` |
-| `h_{r,k}` | Draft hidden state for request `r`, proposal position `k`, shape `[D]` |
-| `U_{r,k}` | Parallel backbone's base logits, shape `[V]` |
+| `r` | Markov low-rank width; the paper commonly uses $`r=256`$ |
+| `h_{r,k}` | Draft hidden state for request `r`, proposal position `k`, shape $`\left[D\right]`$ |
+| `U_{r,k}` | Parallel backbone's base logits, shape $`\left[V\right]`$ |
 | `x_{r,k}` | Token sampled at proposal position `k` |
 | `c_{r,k}` | Conditional probability that proposal `k` is accepted given that its prefix survived |
 | `a_{r,k}` | Estimated probability that the accepted draft prefix reaches position `k` |
@@ -107,7 +107,7 @@ DSpark reuses a DFlash-style block drafter. Given the current anchor token `x_0`
 [x_0, MASK, MASK, ..., MASK]
 ```
 
-with shape `[B,γ]`. Some checkpoints use a “do not sample from anchor” layout that retains an extra query row and removes the anchor hidden state before sampling. Do not infer `γ` from a single intermediate tensor without checking this mode.
+with shape $`\left[B,\gamma\right]`$. Some checkpoints use a “do not sample from anchor” layout that retains an extra query row and removes the anchor hidden state before sampling. Do not infer `γ` from a single intermediate tensor without checking this mode.
 
 The block positions interact, while target context features are injected into draft attention. If features are taken from selected target layers,
 
@@ -126,12 +126,12 @@ The lightweight drafter therefore does not have to re-encode the complete target
 
 | Stage | Tensor | Shape |
 |---|---|---|
-| block token ids | `draft_block_ids` | `[B,γ]` |
+| block token ids | `draft_block_ids` | $`\left[B,\gamma\right]`$ |
 | flattened ids | `input_ids` | `[B·γ]` |
 | embeddings | `E` | `[B·γ,D]` |
-| draft hidden | `H_d` | `[B,γ,D]` |
-| shared target LM-head weight | `W_lm` | `[V,D]`, vocabulary-sharded under TP |
-| base logits | `U=H_d W_lm^T` | `[B,γ,V]` |
+| draft hidden | `H_d` | $`\left[B,\gamma,D\right]`$ |
+| shared target LM-head weight | `W_lm` | $`\left[V,D\right]`$, vocabulary-sharded under TP |
+| base logits | $`U=H_{d} W_{\mathrm{lm}}^{\mathsf T}`$ | $`\left[B,\gamma,V\right]`$ |
 
 ```mermaid
 flowchart TB
@@ -182,12 +182,12 @@ z_k=U_k+b_k,\qquad x_k\sim\mathrm{softmax}(z_k/T).
 
 | Object | One request, one step | Batch, one step | Whole block |
 |---|---:|---:|---:|
-| previous token id | `[]` | `[B]` | `[B,γ]` |
-| Markov embedding | `[r]` | `[B,r]` | produced step by step |
-| base logits | `[V]` | `[B,V]` | `[B,γ,V]` |
-| transition bias | `[V]` | `[B,V]` | need not be persisted |
-| corrected logits | `[V]` | `[B,V]` | sampling may retain `[B,γ,V]` |
-| sampled token | `[]` | `[B]` | `[B,γ]` |
+| previous token id | `[]` | $`\left[B\right]`$ | $`\left[B,\gamma\right]`$ |
+| Markov embedding | $`\left[r\right]`$ | $`\left[B,r\right]`$ | produced step by step |
+| base logits | $`\left[V\right]`$ | $`\left[B,V\right]`$ | $`\left[B,\gamma,V\right]`$ |
+| transition bias | $`\left[V\right]`$ | $`\left[B,V\right]`$ | need not be persisted |
+| corrected logits | $`\left[V\right]`$ | $`\left[B,V\right]`$ | sampling may retain $`\left[B,\gamma,V\right]`$ |
+| sampled token | `[]` | $`\left[B\right]`$ | $`\left[B,\gamma\right]`$ |
 
 The dependency is serial, but only a lookup, low-rank projection, and sampling are serial. The expensive Transformer runs once:
 
@@ -243,7 +243,7 @@ The confidence head predicts
 c_k\approx P(A_k=1\mid A_1=\cdots=A_{k-1}=1,\text{draft state}),
 ```
 
-where `A_k=1` means candidate `k` passes verification. A typical head consumes the draft hidden and previous-token Markov embedding:
+where $`A_{k}=1`$ means candidate `k` passes verification. A typical head consumes the draft hidden and previous-token Markov embedding:
 
 ```math
 c_k=\sigma\left(w^T[h_k;W_1[x_{k-1}]]\right).
@@ -277,9 +277,12 @@ a_j=P(A_1=\cdots=A_j=1)\approx\prod_{i=1}^{j}c_i.
 
 For example:
 
-```text
-c = [0.90, 0.80, 0.50, 0.20]
-a = [0.90, 0.72, 0.36, 0.072]
+```math
+c=\left[0.9,0.8,0.5,0.2\right]
+```
+
+```math
+a=\left[0.9,0.72,0.36,0.072\right]
 ```
 
 Sorting raw `c_k` is incorrect because a later token cannot skip an earlier token. Scheduling must operate on prefix survival and preserve prefix closure.
@@ -319,7 +322,7 @@ where `SPS(N)` is measured target steps per second at `N` verification rows. It 
 
 The scheduler considers candidate prefix extensions `(request,position)` by marginal survival, evaluates the throughput objective, and produces a prefix length `ℓ_r` for each request. A result with a hole in the middle is invalid.
 
-### 6.1 Worked example: `B=3, γ=4`
+### 6.1 Worked example: $`B=3,\qquad \gamma=4`$
 
 Suppose conditional confidence is
 
@@ -337,11 +340,14 @@ R1: [0.700, 0.420, 0.210, 0.084]
 R2: [0.990, 0.941, 0.847, 0.678]
 ```
 
-The anchor-only state is `ℓ=[1,1,1]`, `N=3`, `E=3`. If the hardware curve says a budget of nine rows maximizes throughput, six candidates might be allocated as all four R2 candidates plus the first two R0 candidates:
+The anchor-only state is $`l=\left[1,1,1\right]`$, $`N=3`$, $`E=3`$. If the hardware curve says a budget of nine rows maximizes throughput, six candidates might be allocated as all four R2 candidates plus the first two R0 candidates:
 
-```text
-ℓ = [3, 1, 5]        # lengths include anchors
-N = 3 + 1 + 5 = 9
+```math
+l=\left[3,1,5\right]\qquad\text{lengths include anchors}
+```
+
+```math
+N=3+1+5=9
 ```
 
 The implementation cannot select R0 position 2 while dropping position 1; it must enforce prefix closure.
@@ -370,7 +376,7 @@ Lag trades scheduling accuracy for pipeline efficiency; it does not alter the ta
 
 ## 7. Ragged verification packs different lengths into one batch
 
-For `ℓ=[3,1,5]`, fixed-width work is `B·W=3·5=15` rows, while compact work contains only `T_v=9` rows:
+For $`l=\left[3,1,5\right]`$, fixed-width work is $`B\cdot W=3\cdot 5=15`$ rows, while compact work contains only $`T_{v}=9`$ rows:
 
 ```text
 fixed-stride:
@@ -386,12 +392,12 @@ The runtime constructs:
 
 | Metadata | Shape | Purpose |
 |---|---:|---|
-| `verify_lens` | `[B]` | Valid rows per request |
-| `cu_seqlens` / offsets | `[B+1]` | Request boundaries in the packed buffer |
-| compact token ids | `[T_v]` | Actual target inputs |
-| positions | `[T_v]` | Absolute position of every row |
-| cache locations | `[T_v]` | Temporary target KV slots |
-| scatter index | `[T_v]` | Mapping back to logical `[B,W]` |
+| `verify_lens` | $`\left[B\right]`$ | Valid rows per request |
+| `cu_seqlens` / offsets | $`\left[B+1\right]`$ | Request boundaries in the packed buffer |
+| compact token ids | $`\left[T_{v}\right]`$ | Actual target inputs |
+| positions | $`\left[T_{v}\right]`$ | Absolute position of every row |
+| cache locations | $`\left[T_{v}\right]`$ | Temporary target KV slots |
+| scatter index | $`\left[T_{v}\right]`$ | Mapping back to logical $`\left[B,W\right]`$ |
 
 After target forward, logits and hidden states are commonly scattered back to fixed-stride `[B,W,...]`. Greedy/rejection sampling, logprob, grammar, and other shared logic can then retain one logical interface.
 
@@ -440,8 +446,14 @@ For request `r`:
 
 ```text
 correct_len_r = number of accepted draft tokens
-commit_len_r  = correct_len_r + one bonus/correction token
-new_seq_len_r = S_r + commit_len_r
+```
+
+```math
+\mathrm{commit\_len\_r} = \mathrm{correct\_len\_r} + \mathrm{one} \mathrm{bonus}/\mathrm{correction} \mathrm{token}
+```
+
+```math
+\mathrm{new\_seq\_len\_r}=S_{r}+\mathrm{commit\_len\_r}
 ```
 
 When the budget caps the window at `ℓ_r`, the implementation must gate commit to computed rows and commit only the matching KV/hidden state.
@@ -488,17 +500,17 @@ This table uses the common `sample_from_anchor=True` semantics. A special checkp
 
 | Order | Stage | Input shape | Output shape |
 |---:|---|---|---|
-| 1 | build block | bonus/anchor `[B]` | ids `[B,γ]` |
-| 2 | draft backbone | ids `[B,γ]`, context cache | hidden `[B,γ,D]` |
-| 3 | shared LM head | hidden `[B,γ,D]` | base logits `[B,γ,V]` |
-| 4 | Markov sampling | base logits + previous ids | tokens `[B,γ]`; sampling may retain corrected logits `[B,γ,V]` |
-| 5 | confidence | hidden + previous embeddings | confidence `[B,γ]` |
-| 6 | schedule | confidence `[B,γ]` + SPS table | verify lengths `[B]` |
-| 7 | logical verify | anchor `[B,1]` + tokens `[B,γ]` | ids `[B,γ+1]` |
-| 8 | compact | ids + lengths | compact ids `[T_v]` |
-| 9 | target verify | compact ids `[T_v]` | logits `[T_v,V]`, hidden `[T_v,D_t]` |
-| 10 | scatter/accept | logical logits `[B,γ+1,V]` | commit lengths `[B]`, bonus `[B]`, output tokens |
-| 11 | state commit | accepted-prefix metadata | new sequence lengths `[B]`, persistent target/draft KV |
+| 1 | build block | bonus/anchor $`\left[B\right]`$ | ids $`\left[B,\gamma\right]`$ |
+| 2 | draft backbone | ids $`\left[B,\gamma\right]`$, context cache | hidden $`\left[B,\gamma,D\right]`$ |
+| 3 | shared LM head | hidden $`\left[B,\gamma,D\right]`$ | base logits $`\left[B,\gamma,V\right]`$ |
+| 4 | Markov sampling | base logits + previous ids | tokens $`\left[B,\gamma\right]`$; sampling may retain corrected logits $`\left[B,\gamma,V\right]`$ |
+| 5 | confidence | hidden + previous embeddings | confidence $`\left[B,\gamma\right]`$ |
+| 6 | schedule | confidence $`\left[B,\gamma\right]`$ + SPS table | verify lengths $`\left[B\right]`$ |
+| 7 | logical verify | anchor $`\left[B,1\right]`$ + tokens $`\left[B,\gamma\right]`$ | ids $`\left[B,\gamma+1\right]`$ |
+| 8 | compact | ids + lengths | compact ids $`\left[T_{v}\right]`$ |
+| 9 | target verify | compact ids $`\left[T_{v}\right]`$ | logits $`\left[T_{v},V\right]`$, hidden $`\left[T_{v},D_{t}\right]`$ |
+| 10 | scatter/accept | logical logits $`\left[B,\gamma+1,V\right]`$ | commit lengths $`\left[B\right]`$, bonus $`\left[B\right]`$, output tokens |
+| 11 | state commit | accepted-prefix metadata | new sequence lengths $`\left[B\right]`$, persistent target/draft KV |
 
 ## 12. Performance limits and common misconceptions
 
@@ -540,10 +552,10 @@ DSpark is not “DFlash plus a threshold.” It closes the loop across semi-auto
 
 ## 14. Exercises
 
-1. Why does `γ=7` imply a logical target window of eight rows?
+1. Why does $`\gamma=7`$ imply a logical target window of eight rows?
 2. Why is a serial low-rank Markov head still cheaper than an autoregressive small model?
-3. For `c=[0.8,0.7,0.5]`, compute all three prefix-survival probabilities.
-4. Why optimize `expected commits × SPS` instead of using `c_k>0.5`?
+3. For $`c=\left[0.8,0.7,0.5\right]`$, compute all three prefix-survival probabilities.
+4. Why optimize `expected commits × SPS` instead of using $`c_{k} \gt 0.5`$?
 5. What is the fundamental target-compute difference between `compact` and `cap-accept`?
 6. Why should confidence errors not change the final token distribution? Which implementation bugs could violate that property?
 7. Why scatter ragged results back to `[B,W,...]`?

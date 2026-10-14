@@ -41,7 +41,7 @@
 | `w` | 局部滑动窗口长度 |
 | `M` | 递归线性注意力状态矩阵 |
 
-标准 Multi-Head Attention 常满足 `H=Nq*D`；GQA 满足 `Nq>Nkv`；Sparse MoE 满足 `K<<E`；MLA 使用 `Dc` 维 latent state 替代逐 head 保存完整 K/V；稀疏注意力通常满足 `k_attn<<S`；递归注意力保存 `M` 而不是 token 长度的缓存。
+标准 Multi-Head Attention 常满足 $`H=\mathrm{Nq}\cdot D`$；GQA 满足 $`\mathrm{Nq} \gt \mathrm{Nkv}`$；Sparse MoE 满足 `K<<E`；MLA 使用 `Dc` 维 latent state 替代逐 head 保存完整 K/V；稀疏注意力通常满足 `k_attn<<S`；递归注意力保存 `M` 而不是 token 长度的缓存。
 
 ## 阅读顺序
 

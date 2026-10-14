@@ -34,36 +34,51 @@ flowchart LR
     OABSORB --> Y["Layer output<br/>[B,Lq,H]"]
 ```
 
-The diagram contains two timelines. `X -> CKV/KR -> Cache` **writes the current token**; `Cache -> Score/LatOut` **reads historical tokens**. In prefill, `Lq=Lkv=S`; in decode, usually `Lq=1` and `Lkv=S_past+1`.
+The diagram contains two timelines. `X -> CKV/KR -> Cache` **writes the current token**; `Cache -> Score/LatOut` **reads historical tokens**. In prefill, $`\mathrm{Lq}=\mathrm{Lkv}=S`$; in decode, usually $`\mathrm{Lq}=1`$ and $`\mathrm{Lkv}=S_{\mathrm{past}}+1`$.
 
 ### Running Shape Example
 
 The rest of the chapter uses this teaching configuration. It is chosen to make shapes concrete, not to prescribe every model:
 
+```math
+B=2,\qquad S=4096,\qquad H=4096
+```
+
+```math
+N=32,\qquad \mathrm{Dc}=512,\qquad \mathrm{Dcq}=1536
+```
+
+```math
+\mathrm{Dh}=128,\qquad \mathrm{Dr}=64,\qquad \mathrm{Dv}=128
+```
+
 ```text
-B=2, S=4096, H=4096
-N=32, Dc=512, Dcq=1536
-Dh=128, Dr=64, Dv=128
 dtype=BF16/FP16 (2 bytes per element)
 ```
 
-Axes are fixed throughout: `B` batch size, `S/Lkv` history length, `Lq` query length of this call, `N` query heads, and `H` hidden size. `[B,S,N,D]` in the exposition and `[B,N,S,D]` in many kernels differ only by layout; their mathematical meaning is identical.
+Axes are fixed throughout: `B` batch size, `S/Lkv` history length, `Lq` query length of this call, `N` query heads, and `H` hidden size. $`\left[B,S,N,D\right]`$ in the exposition and $`\left[B,N,S,D\right]`$ in many kernels differ only by layout; their mathematical meaning is identical.
 
 Standard MHA caches per token per layer:
 
-```text
-N × (Dh + Dv) = 32 × (128 + 128) = 8192 elements
-8192 × 2 bytes = 16384 bytes = 16 KiB
+```math
+N \times  \left(\mathrm{Dh} + \mathrm{Dv}\right) = 32 \times  \left(128 + 128\right) = 8192 \mathrm{elements}
+```
+
+```math
+\text{8192 × 2 bytes}= 16384 \mathrm{bytes} = 16 \mathrm{KiB}
 ```
 
 MLA caches per token per layer:
 
-```text
-Dc + Dr = 512 + 64 = 576 elements
-576 × 2 bytes = 1152 bytes = 1.125 KiB
+```math
+\mathrm{Dc} + \mathrm{Dr} = 512 + 64 = 576 \mathrm{elements}
 ```
 
-The **logical KV payload** is therefore about `8192 / 576 = 14.22×` smaller in this example. Real allocations also contain page alignment, block tables, quantization scales, and allocator metadata.
+```math
+\text{576 × 2 bytes}= 1152 \mathrm{bytes} = 1.125 \mathrm{KiB}
+```
+
+The **logical KV payload** is therefore about $`\text{8192 / 576}= 14.22\times`$ smaller in this example. Real allocations also contain page alignment, block tables, quantization scales, and allocator metadata.
 
 ### One Decode Step, End to End
 
@@ -71,16 +86,16 @@ Assume `4095` tokens already exist and token `4096` is appended:
 
 | Stage | Input shape | Operation | Output shape | Persistent? |
 |---|---:|---|---:|---|
-| Layer input | `[2,1,4096]` | Previous sublayer/RMSNorm | `[2,1,4096]` | No |
-| KV write | `[2,1,4096]` | `W_DKV_R` | `Ckv [2,1,512]`, `Krope [2,1,64]` | Yes |
-| Q compression | `[2,1,4096]` | `W_DQ` | `Cq [2,1,1536]` | No |
-| Q expansion | `[2,1,1536]` | `W_UQ` + split | `Qc [2,1,32,128]`, `Qr [2,1,32,64]` | No |
+| Layer input | $`\left[2,1,4096\right]`$ | Previous sublayer/RMSNorm | $`\left[2,1,4096\right]`$ | No |
+| KV write | $`\left[2,1,4096\right]`$ | `W_DKV_R` | `Ckv [2,1,512]`, `Krope [2,1,64]` | Yes |
+| Q compression | $`\left[2,1,4096\right]`$ | `W_DQ` | `Cq [2,1,1536]` | No |
+| Q expansion | $`\left[2,1,1536\right]`$ | `W_UQ` + split | `Qc [2,1,32,128]`, `Qr [2,1,32,64]` | No |
 | History view | Block table | gather/page view | `Ckv_hist [2,4096,512]`, `Kr_hist [2,4096,64]` | Already cached |
-| Content score | `Qc,Ckv_hist` | absorbed latent dot product | `[2,32,1,4096]` | No |
-| Position score | `RoPE(Qr),RoPE(Kr)` | dot product after head broadcast | `[2,32,1,4096]` | No |
-| Probabilities | both score terms | scale + causal mask + softmax | `[2,32,1,4096]` | No |
-| Latent reduction | probabilities, `Ckv_hist` | weighted sum over history | `[2,1,32,512]` | No |
-| Output | latent reduction | absorbed V/O transform and head merge | `[2,1,4096]` | No |
+| Content score | `Qc,Ckv_hist` | absorbed latent dot product | $`\left[2,32,1,4096\right]`$ | No |
+| Position score | `RoPE(Qr),RoPE(Kr)` | dot product after head broadcast | $`\left[2,32,1,4096\right]`$ | No |
+| Probabilities | both score terms | scale + causal mask + softmax | $`\left[2,32,1,4096\right]`$ | No |
+| Latent reduction | probabilities, `Ckv_hist` | weighted sum over history | $`\left[2,1,32,512\right]`$ | No |
+| Output | latent reduction | absorbed V/O transform and head merge | $`\left[2,1,4096\right]`$ | No |
 
 This table is the ledger behind every later equation. If an implementation step cannot be found as an explicit operation, a layout transform, matrix absorption, or fused kernel has usually hidden it—the mathematical step has not vanished.
 
@@ -88,12 +103,15 @@ This table is the ledger behind every later equation. If an implementation step 
 
 Standard Multi-Head Attention stores complete K and V for every historical token, every layer:
 
-```text
-K_cache: [B,S,N,Dk]
-V_cache: [B,S,N,Dv]
+```math
+\mathrm{shape}\left(K_{\mathrm{cache}}\right)=\left[B,S,N,\mathrm{Dk}\right]
 ```
 
-Cache elements per token: `N * (Dk + Dv)`. For long-context generation, KV Cache becomes the primary bottleneck for memory capacity and read bandwidth.
+```math
+\mathrm{shape}\left(V_{\mathrm{cache}}\right)=\left[B,S,N,\mathrm{Dv}\right]
+```
+
+Cache elements per token: $`N\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)`$. For long-context generation, KV Cache becomes the primary bottleneck for memory capacity and read bandwidth.
 
 MLA's core idea: **Don't directly cache each head's expanded K/V. Instead, cache a shared low-dimensional latent vector; when attention is needed, up-project it to recover per-head content information.**
 
@@ -103,15 +121,15 @@ MLA's core idea: **Don't directly cache each head's expanded K/V. Instead, cache
 
 | Symbol | Meaning |
 |---|---|
-| `X` | Input hidden states, `[B,S,H]` |
+| `X` | Input hidden states, $`\left[B,S,H\right]`$ |
 | `N` | Number of attention heads |
 | `Dc` | KV latent compression dimension |
 | `Dcq` | Query latent compression dimension |
 | `Dh` | Content key/query dimension per head |
 | `Dr` | RoPE dimension per head |
 | `Dv` | Value dimension per head |
-| `Ckv` | Compressed KV latent, `[B,S,Dc]` |
-| `Cq` | Compressed Query latent, `[B,S,Dcq]` |
+| `Ckv` | Compressed KV latent, $`\left[B,S,\mathrm{Dc}\right]`$ |
+| `Cq` | Compressed Query latent, $`\left[B,S,\mathrm{Dcq}\right]`$ |
 
 MLA typically satisfies:
 
@@ -125,18 +143,30 @@ Thus caching `Ckv` is more compact than caching all heads' K/V.
 
 For each token's hidden vector `x in R^H`, content latent and position key can be produced by a single joint projection:
 
-```text
-[c_kv, k_rope_raw] = x @ W_DKV_R
+```math
+\left[c_{\mathrm{kv}},\mathrm{k\_rope\_raw}\right]=x\,\mathrm{W\_DKV\_R}
 ```
 
 Batch shapes:
 
-```text
-X:          [B,S,H]
-W_DKV_R:    [H,Dc+Dr]
-projected:  [B,S,Dc+Dr]
-Ckv:        [B,S,Dc]
-K_rope_raw: [B,S,Dr]
+```math
+\mathrm{shape}\left(X\right)=\left[B,S,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{W\_DKV\_R}\right)=\left[H,\mathrm{Dc}+\mathrm{Dr}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{projected}\right)=\left[B,S,\mathrm{Dc}+\mathrm{Dr}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Ckv}\right)=\left[B,S,\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{K\_rope\_raw}\right)=\left[B,S,\mathrm{Dr}\right]
 ```
 
 Two independent but equivalent logical projections can also separately produce `Ckv` and `K_rope_raw`. Content compression from `H` to `Dc` is not lossless copy — it's a learned low-rank representation.
@@ -145,22 +175,38 @@ Two independent but equivalent logical projections can also separately produce `
 
 Two logically independent up-projections:
 
-```text
-K_content = Ckv @ W_UK
-V         = Ckv @ W_UV
+```math
+K_{\mathrm{content}}=\mathrm{Ckv}\,W_{\mathrm{UK}}
+```
+
+```math
+V=\mathrm{Ckv}\,W_{\mathrm{UV}}
 ```
 
 Shapes:
 
-```text
-W_UK: [Dc,N*Dh]
-W_UV: [Dc,N*Dv]
+```math
+\mathrm{shape}\left(W_{\mathrm{UK}}\right)=\left[\mathrm{Dc},N\cdot \mathrm{Dh}\right]
+```
 
-K_content_flat: [B,S,N*Dh]
-V_flat:         [B,S,N*Dv]
+```math
+\mathrm{shape}\left(W_{\mathrm{UV}}\right)=\left[\mathrm{Dc},N\cdot \mathrm{Dv}\right]
+```
 
-K_content: [B,S,N,Dh]
-V:         [B,S,N,Dv]
+```math
+\mathrm{shape}\left(\mathrm{K\_content\_flat}\right)=\left[B,S,N\cdot \mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{flat}}\right)=\left[B,S,N\cdot \mathrm{Dv}\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(V\right)=\left[B,S,N,\mathrm{Dv}\right]
 ```
 
 Each head's K/V is no longer independently projected from `X` directly, but shares the same `Ckv`, then recovers using different up-projection parameters.
@@ -169,38 +215,53 @@ Each head's K/V is no longer independently projected from `X` directly, but shar
 
 Query can also use low-rank decomposition:
 
-```text
-Cq = X @ W_DQ
-Q_full = RMSNorm(Cq) @ W_UQ
+```math
+\mathrm{Cq}=X\,W_{\mathrm{DQ}}
+```
+
+```math
+Q_{\mathrm{full}}=\mathrm{RMSNorm}\left(\mathrm{Cq}\right)\,W_{\mathrm{UQ}}
 ```
 
 Shapes:
 
+```math
+\mathrm{shape}\left(W_{\mathrm{DQ}}\right)=\left[H,\mathrm{Dcq}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Cq}\right)=\left[B,S,\mathrm{Dcq}\right]
+```
+
 ```text
-W_DQ: [H,Dcq]
-Cq:   [B,S,Dcq]
 W_UQ: [Dcq,N*(Dh+Dr)]
 Q_full: [B,S,N*(Dh+Dr)]
 ```
 
 Split:
 
-```text
-Q_content: [B,S,N,Dh]
-Q_rope:    [B,S,N,Dr]
+```math
+\mathrm{shape}\left(Q_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{rope}}\right)=\left[B,S,N,\mathrm{Dr}\right]
 ```
 
 Query doesn't need caching across generation steps, so Query compression mainly reduces parameter structure or changes projection computation — it doesn't directly determine KV Cache capacity.
 
 ## 6. Why RoPE Must Be Decoupled
 
-If RoPE were directly applied to the complete K recovered from `Ckv @ W_UK`, the position-dependent rotation would block matrix absorption: the rotation matrix depends on token position and cannot be simply merged into fixed `W_UK`.
+If RoPE were directly applied to the complete K recovered from $`\mathrm{Ckv}\,W_{\mathrm{UK}}`$, the position-dependent rotation would block matrix absorption: the rotation matrix depends on token position and cannot be simply merged into fixed `W_UK`.
 
 MLA therefore splits each Q/K head into two parts:
 
-```text
-Q_head = concat(Q_content, Q_rope)
-K_head = concat(K_content, K_rope)
+```math
+Q_{\mathrm{head}}=\mathrm{concat}\left(Q_{\mathrm{content}},Q_{\mathrm{rope}}\right)
+```
+
+```math
+K_{\mathrm{head}}=\mathrm{concat}\left(K_{\mathrm{content}},K_{\mathrm{rope}}\right)
 ```
 
 Where:
@@ -210,47 +271,74 @@ Where:
 
 Shapes:
 
+```math
+\mathrm{shape}\left(Q_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+\mathrm{shape}\left(Q_{\mathrm{rope}}\right)=\left[B,S,N,\mathrm{Dr}\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{content}}\right)=\left[B,S,N,\mathrm{Dh}\right]
+```
+
 ```text
-Q_content: [B,S,N,Dh]
-Q_rope:    [B,S,N,Dr]
-K_content: [B,S,N,Dh]
 K_rope:    [B,S,1,Dr] -> broadcast [B,S,N,Dr]
 ```
 
 Final per-head Query/Key dimension:
 
-```text
-Dqk = Dh + Dr
+```math
+\mathrm{Dqk}=\mathrm{Dh}+\mathrm{Dr}
 ```
 
 ## 7. MLA Attention Scores
 
 For head `n`, query position `i`, key position `j`:
 
-```text
-score[n,i,j] = Q_content[n,i] · K_content[n,j] + Q_rope[n,i] · K_rope[j]
+```math
+{\mathrm{score}}_{n,i,j}={Q_{\mathrm{content}}}_{n,i}\cdot {K_{\mathrm{content}}}_{n,j}+{Q_{\mathrm{rope}}}_{n,i}\cdot {K_{\mathrm{rope}}}_{j}
 ```
 
-Scaled: `score = score / sqrt(Dh + Dr)`. After causal mask and softmax:
+Scaled: $`\mathrm{score}=\frac{\mathrm{score}}{\sqrt{\mathrm{Dh}+\mathrm{Dr}}}`$. After causal mask and softmax:
 
-```text
-O[n,i,:] = sum_j alpha[n,i,j] * V[n,j,:]
-O: [B,S,N,Dv]
+```math
+O\left[n,i,:\right] = \sum_{j} \alpha\left[n,i,j\right] \cdot  V\left[n,j,:\right]
 ```
 
-Merge heads then restore `[B,S,H]` via output projection.
+```math
+\mathrm{shape}\left(O\right)=\left[B,S,N,\mathrm{Dv}\right]
+```
+
+Merge heads then restore $`\left[B,S,H\right]`$ via output projection.
 
 ## 8. Naive Implementation: Recover K/V First, Then Attention
 
 Most direct:
 
-```text
-Ckv = X @ W_DKV                         [B,S,Dc]
-Kc = reshape(Ckv @ W_UK)                [B,S,N,Dh]
-V  = reshape(Ckv @ W_UV)                [B,S,N,Dv]
-Q  = build_query(X)                     [B,S,N,Dh+Dr]
-K  = concat(Kc, broadcast(K_rope))      [B,S,N,Dh+Dr]
-O = softmax(Q @ K^T + mask) @ V
+```math
+\mathrm{Ckv}=X\,W_{\mathrm{DKV}}\qquad\mathrm{shape}:\left[B,S,\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{Kc}=\mathrm{reshape}\left(\mathrm{Ckv}\,W_{\mathrm{UK}}\right)\qquad\mathrm{shape}:\left[B,S,N,\mathrm{Dh}\right]
+```
+
+```math
+V=\mathrm{reshape}\left(\mathrm{Ckv}\,W_{\mathrm{UV}}\right)\qquad\mathrm{shape}:\left[B,S,N,\mathrm{Dv}\right]
+```
+
+```math
+Q = \mathrm{build\_query}\left(X\right) \left[B,S,N,\mathrm{Dh}+\mathrm{Dr}\right]
+```
+
+```math
+K = \mathrm{concat}\left(\mathrm{Kc}, \mathrm{broadcast}\left(K_{\mathrm{rope}}\right)\right) \left[B,S,N,\mathrm{Dh}+\mathrm{Dr}\right]
+```
+
+```math
+O=\mathrm{softmax}\left(Q\,{K}^{\mathsf T}+\mathrm{mask}\right)\,V
 ```
 
 Clear mathematically, but losing the bandwidth advantage of compressed cache during decode if full K/V is recovered every round.
@@ -259,21 +347,24 @@ Clear mathematically, but losing the bandwidth advantage of compressed cache dur
 
 For a single head, content score:
 
-```text
-q_c · k_c = q_c · (c_kv @ W_UK) = (q_c @ W_UK^T) · c_kv
+```math
+q_{c}\cdot k_{c}=q_{c}\cdot c_{\mathrm{kv}}\,W_{\mathrm{UK}}=q_{c}\,{W_{\mathrm{UK}}}^{\mathsf T}\cdot c_{\mathrm{kv}}
 ```
 
 Define latent query:
 
-```text
-q_latent = q_c @ W_UK^T
-q_latent: [B,Lq,N,Dc]
+```math
+q_{\mathrm{latent}}=q_{c}\,{W_{\mathrm{UK}}}^{\mathsf T}
+```
+
+```math
+\mathrm{shape}\left(q_{\mathrm{latent}}\right)=\left[B,\mathrm{Lq},N,\mathrm{Dc}\right]
 ```
 
 Content scores can directly dot-product with cached `Ckv [B,Lkv,Dc]`:
 
-```text
-content_score: [B,N,Lq,Lkv]
+```math
+\mathrm{shape}\left(\mathrm{content\_score}\right)=\left[B,N,\mathrm{Lq},\mathrm{Lkv}\right]
 ```
 
 No need to materialize `K_content [B,Lkv,N,Dh]` for historical tokens.
@@ -282,16 +373,18 @@ No need to materialize `K_content [B,Lkv,N,Dh]` for historical tokens.
 
 Naive value aggregation:
 
-```text
-o = sum_j alpha_j * v_j = sum_j alpha_j * (c_j @ W_UV)
-  = (sum_j alpha_j * c_j) @ W_UV
+```math
+o = \sum_{j} \alpha_{j} \cdot  v_{j} = \sum_{j} \alpha_{j} \cdot  \left(c_{j} \, W_{\mathrm{UV}}\right) = \left(\sum_{j} \alpha_{j} \cdot  c_{j}\right) \, W_{\mathrm{UV}}
 ```
 
 So we can first aggregate in latent space:
 
-```text
-o_latent = alpha @ Ckv       [B,Lq,N,Dc]
-o_head = o_latent @ W_UV     [B,Lq,N,Dv]
+```math
+o_{\mathrm{latent}}=\alpha\,\mathrm{Ckv}\qquad\mathrm{shape}:\left[B,\mathrm{Lq},N,\mathrm{Dc}\right]
+```
+
+```math
+o_{\mathrm{head}}=o_{\mathrm{latent}}\,W_{\mathrm{UV}}\qquad\mathrm{shape}:\left[B,\mathrm{Lq},N,\mathrm{Dv}\right]
 ```
 
 Historical Value heads need no full expansion.
@@ -300,34 +393,46 @@ Historical Value heads need no full expansion.
 
 After decoupled RoPE, each historical token needs:
 
-```text
-Ckv:    [Dc]
-K_rope: [Dr]
+```math
+\mathrm{shape}\left(\mathrm{Ckv}\right)=\left[\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(K_{\mathrm{rope}}\right)=\left[\mathrm{Dr}\right]
 ```
 
 Single token, single layer cache elements:
 
-```text
-MLA cache elements = Dc + Dr
+```math
+\text{MLA cache elements}= \mathrm{Dc} + \mathrm{Dr}
 ```
 
-Standard MHA: `N * (Dk + Dv)`. GQA: `Nkv * (Dk + Dv)`. MLA compression ratio ≈ `(Dc + Dr) / (N * (Dk + Dv))`.
+Standard MHA: $`N\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)`$. GQA: $`\mathrm{Nkv}\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)`$. MLA compression ratio ≈ $`\frac{\mathrm{Dc}+\mathrm{Dr}}{N\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)}`$.
 
 ## 12. Decode Dataflow
 
 Current round, one new token per sequence:
 
-```text
-X_new: [B,1,H]
-Ckv_new:    [B,1,Dc]
-K_rope_new: [B,1,Dr]
+```math
+\mathrm{shape}\left(X_{\mathrm{new}}\right)=\left[B,1,H\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{Ckv\_new}\right)=\left[B,1,\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{K\_rope\_new}\right)=\left[B,1,\mathrm{Dr}\right]
 ```
 
 Cache grows:
 
-```text
-Ckv_cache:    [B,Sctx,Dc]
-K_rope_cache: [B,Sctx,Dr]
+```math
+\mathrm{shape}\left(\mathrm{Ckv\_cache}\right)=\left[B,\mathrm{Sctx},\mathrm{Dc}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{K\_rope\_cache}\right)=\left[B,\mathrm{Sctx},\mathrm{Dr}\right]
 ```
 
 Absorbed content path: `Q_content -> latent query [B,1,N,Dc] -> dot with Ckv_cache -> content scores [B,N,1,Sctx]`. Position path: `Q_rope × K_rope_cache -> position scores [B,N,1,Sctx]`. Sum, softmax, aggregate in latent space, map to head outputs.
@@ -349,7 +454,7 @@ KV projection decomposed as:
 X [H] -> Ckv [Dc] -> K/V heads [N*(Dh+Dv)]
 ```
 
-Equivalent weight matrix has factored form `W_KV_effective = W_DKV @ W_UKV`, with rank upper bound ≤ `Dc`. This imposes structural low-rank constraint.
+Equivalent weight matrix has factored form $`\mathrm{W\_KV\_effective}=W_{\mathrm{DKV}}\,W_{\mathrm{UKV}}`$, with rank upper bound ≤ `Dc`. This imposes structural low-rank constraint.
 
 ## 15. MLA, MHA, GQA Structural Comparison
 
@@ -374,10 +479,16 @@ GQA compresses cache by reducing KV head count; MLA compresses cache via low-ran
 
 MLA primarily compresses the **feature dimension** of each historical KV entry. It does not remove the sequence dimension:
 
-```text
-cache entries: O(L)
-dense prefill attention: O(L^2)
-dense decode attention per token: O(L)
+```math
+\text{cache entries}: O\left(L\right)
+```
+
+```math
+\text{dense prefill attention}: O\left(L^{2}\right)
+```
+
+```math
+\text{dense decode attention per token}: O\left(L\right)
 ```
 
 This distinction matters when reading newer architectures. DSA sparsifies which MLA entries enter the main core; CSA first compresses the sequence dimension and then selects compressed entries; KDA replaces token-addressable history with a fixed recurrent state.

@@ -8,10 +8,10 @@
 |---|---|---|
 | 宿主语言类型 | Python/C++ 表面上是什么对象？ | `torch.Tensor`、`tl.tensor`、`AscendC::LocalTensor<half>` |
 | 编译时或运行时 | 值在 JIT 编译时已知，还是 launch 后才知道？ | `BLOCK: tl.constexpr` 是编译期；`n_elements` 是运行期 |
-| 元素类型与形状 | 一个标量还是一块值？每个元素是什么 dtype？ | `int32[BLOCK_M]`、`pointer<fp16>[BLOCK_M, BLOCK_N]` |
+| 元素类型与形状 | 一个标量还是一块值？每个元素是什么 dtype？ | `int32[BLOCK_M]`、$`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[\mathrm{BLOCK\_M},\mathrm{BLOCK\_N}\right]`$ |
 | 地址空间与语义 | 它是数据、地址，还是管理资源的句柄？ | GM 指针、UB tensor view、`TQue` 队列对象 |
 
-只写“tensor”或“pointer”通常不够。本文使用 `int32[128]` 表示“元素类型为 `int32`、静态 shape 为 `[128]` 的 Triton block tensor”，使用 `pointer<fp16>[16, 32]` 表示“包含 `16×32` 个 FP16 元素地址的 pointer block”。这是一种便于教学的记法，不是 Python 的类型注解语法。
+只写“tensor”或“pointer”通常不够。本文使用 `int32[128]` 表示“元素类型为 `int32`、静态 shape 为 $`\left[128\right]`$ 的 Triton block tensor”，使用 $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[16,32\right]`$ 表示“包含 `16×32` 个 FP16 元素地址的 pointer block”。这是一种便于教学的记法，不是 Python 的类型注解语法。
 
 ## 1. 先分清四个执行时刻
 
@@ -54,7 +54,7 @@ Triton 源码中的 [`class tensor`](https://github.com/triton-lang/triton-ascen
 lane = tl.arange(0, BLOCK)
 ```
 
-当 `BLOCK=128` 时，`lane` 的类型是 `tl.tensor`，完整类型可记作 `int32[128]`。它不是 Python 的 `range`，也不会让 Python 循环 128 次。
+当 $`\mathrm{BLOCK}=128`$ 时，`lane` 的类型是 `tl.tensor`，完整类型可记作 `int32[128]`。它不是 Python 的 `range`，也不会让 Python 循环 128 次。
 
 实现上，[`semantic.arange`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L625-L644) 构造 `block_type(int32, [128])`，再通过 `create_make_range` 生成 IR。`128` 必须在编译时可知，因为 block shape 是静态类型的一部分。
 
@@ -80,17 +80,17 @@ x_ptrs = x_ptr + offsets
 x = tl.load(x_ptrs)
 ```
 
-假设 `x` 的元素 dtype 是 FP16、`BLOCK=128`，类型传播是：
+假设 `x` 的元素 dtype 是 FP16、$`\mathrm{BLOCK}=128`$，类型传播是：
 
 | 表达式 | 结果类型 | 发生了什么 |
 |---|---|---|
 | `pid` | `int32[]` | 运行时标量 |
 | `BLOCK` | 编译期整数 | 参与常量折叠 |
 | `tl.arange(0, BLOCK)` | `int32[128]` | 产生 128 个 lane offset |
-| `pid * BLOCK` | `int32[]` | 当前 tile 的标量起点 |
+| $`\mathrm{pid}\cdot \mathrm{BLOCK}`$ | `int32[]` | 当前 tile 的标量起点 |
 | `offsets` | `int32[128]` | 标量被广播后与 lane 相加 |
-| `x_ptr` | `pointer<fp16>[]` | 指向输入首元素的标量指针 |
-| `x_ptrs` | `pointer<fp16>[128]` | 标量指针广播后，对每个 lane 做 addptr |
+| `x_ptr` | $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[\right]`$ | 指向输入首元素的标量指针 |
+| `x_ptrs` | $`\mathrm{pointer} \lt \mathrm{fp16} \gt \left[128\right]`$ | 标量指针广播后，对每个 lane 做 addptr |
 | `x` | `fp16[128]` | `tl.load` 才真正从这 128 个地址读值 |
 
 这里的 `+` 是 Triton DSL 重载，不是 CPython 对裸地址做整数运算。调用链是：
@@ -142,42 +142,42 @@ def load_2d_kernel(
     tl.store(out_ptr + row_offsets + col_offsets, values, mask=mask)
 ```
 
-假设 `x_ptr/out_ptr` 指向 FP16，`BLOCK_M=16`、`BLOCK_N=32`：
+假设 `x_ptr/out_ptr` 指向 FP16，$`\mathrm{BLOCK\_M}=16`$、$`\mathrm{BLOCK\_N}=32`$：
 
 | 变量 | Triton 类型 | shape | 含义 |
 |---|---|---:|---|
 | `pid_m`, `pid_n` | `tl.tensor<int32>` | `[]` | 二维 grid 中的逻辑坐标 |
 | `M`, `N` | 整数标量 `tl.tensor` | `[]` | launch 时传入的运行时边界，不改变 block 静态 shape |
 | `stride_xm`, `stride_xn` | 整数标量 `tl.tensor` | `[]` | 相邻行/列相隔多少个元素 |
-| `offs_m` | `tl.tensor<int32>` | `[16]` | 16 个全局行坐标 |
-| `offs_n` | `tl.tensor<int32>` | `[32]` | 32 个全局列坐标 |
-| `offs_m[:, None]` | `tl.tensor<int32>` | `[16,1]` | 插入长度为 1 的列轴 |
-| `offs_n[None, :]` | `tl.tensor<int32>` | `[1,32]` | 插入长度为 1 的行轴 |
-| `row_offsets` | 整数 block tensor | `[16,1]` | 每行相对首元素的元素偏移 |
-| `col_offsets` | 整数 block tensor | `[1,32]` | 每列相对行首的元素偏移 |
-| `ptrs` | `tl.tensor<pointer<fp16>>` | `[16,32]` | 广播后得到的 512 个元素地址 |
-| `mask` | `tl.tensor<int1>` | `[16,32]` | 每个地址是否有效 |
-| `values` | `tl.tensor<fp16>` | `[16,32]` | 从有效地址加载的数据；无效位置取 FP16 的 0 |
+| `offs_m` | `tl.tensor<int32>` | $`\left[16\right]`$ | 16 个全局行坐标 |
+| `offs_n` | `tl.tensor<int32>` | $`\left[32\right]`$ | 32 个全局列坐标 |
+| `offs_m[:, None]` | `tl.tensor<int32>` | $`\left[16,1\right]`$ | 插入长度为 1 的列轴 |
+| `offs_n[None, :]` | `tl.tensor<int32>` | $`\left[1,32\right]`$ | 插入长度为 1 的行轴 |
+| `row_offsets` | 整数 block tensor | $`\left[16,1\right]`$ | 每行相对首元素的元素偏移 |
+| `col_offsets` | 整数 block tensor | $`\left[1,32\right]`$ | 每列相对行首的元素偏移 |
+| `ptrs` | `tl.tensor<pointer<fp16>>` | $`\left[16,32\right]`$ | 广播后得到的 512 个元素地址 |
+| `mask` | `tl.tensor<int1>` | $`\left[16,32\right]`$ | 每个地址是否有效 |
+| `values` | `tl.tensor<fp16>` | $`\left[16,32\right]`$ | 从有效地址加载的数据；无效位置取 FP16 的 0 |
 
-`[:, None]` 和 `[None, :]` 只改变 IR shape，不会读取内存。两个 shape 分别为 `[16,1]`、`[1,32]` 的 offset block 做二元运算时，[`broadcast_impl_value`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L767-L817) 把它们广播成 `[16,32]`。标量 `x_ptr` 也会被 splat 成同 shape 的 pointer block。
+`[:, None]` 和 `[None, :]` 只改变 IR shape，不会读取内存。两个 shape 分别为 $`\left[16,1\right]`$、$`\left[1,32\right]`$ 的 offset block 做二元运算时，[`broadcast_impl_value`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/semantic.py#L767-L817) 把它们广播成 $`\left[16,32\right]`$。标量 `x_ptr` 也会被 splat 成同 shape 的 pointer block。
 
 [`tl.load`](https://github.com/triton-lang/triton-ascend/blob/be90ac7e52267822c0ea83d20b705c1e4eaf586f/python/triton/language/core.py#L2077-L2111) 的规则是：pointer block 是 N 维，load 结果就是同 shape 的 N 维 value block；`mask` 和 `other` 会广播到 pointer shape，`other` 再转换为指针所指的元素 dtype。
 
 ## 5. MatMul 的类型传播
 
-对 `C[M,N] = A[M,K] @ B[K,N]`，某一轮 K tile 中的典型类型是：
+对 $`{C}_{M,N}={A}_{M,K}\,{B}_{K,N}`$，某一轮 K tile 中的典型类型是：
 
 | 变量 | 类型与 shape | 说明 |
 |---|---|---|
-| `a_ptrs` | `pointer<a_dtype>[BM,BK]` | A tile 的地址块 |
-| `b_ptrs` | `pointer<b_dtype>[BK,BN]` | B tile 的地址块 |
+| `a_ptrs` | $`\mathrm{pointer} \lt a_{\mathrm{dtype}} \gt \left[\mathrm{BM},\mathrm{BK}\right]`$ | A tile 的地址块 |
+| `b_ptrs` | $`\mathrm{pointer} \lt b_{\mathrm{dtype}} \gt \left[\mathrm{BK},\mathrm{BN}\right]`$ | B tile 的地址块 |
 | `a` | `a_dtype[BM,BK]` | load 后的 A tile 值 |
 | `b` | `b_dtype[BK,BN]` | load 后的 B tile 值 |
 | `acc` | `fp32[BM,BN]` | 静态 shape 的 FP32 累加块 |
 | `tl.dot(a,b)` | 通常为 `fp32[BM,BN]` | 高层 block matmul 结果，后端再降低到 Cube 路径 |
-| `c_ptrs` | `pointer<c_dtype>[BM,BN]` | 输出地址块 |
+| `c_ptrs` | $`\mathrm{pointer} \lt c_{\mathrm{dtype}} \gt \left[\mathrm{BM},\mathrm{BN}\right]`$ | 输出地址块 |
 
-源码里 `a_ptrs += BK * stride_ak` 仍然是 pointer block 加整数标量：标量先广播到 `[BM,BK]`，然后每个地址整体前进一个 K tile。它不会加载下一块；下一次 `tl.load(a_ptrs, ...)` 才会发生搬运。
+源码里 $`a_{\mathrm{ptrs}} += \mathrm{BK} \cdot  \mathrm{stride\_ak}`$ 仍然是 pointer block 加整数标量：标量先广播到 $`\left[\mathrm{BM},\mathrm{BK}\right]`$，然后每个地址整体前进一个 K tile。它不会加载下一块；下一次 `tl.load(a_ptrs, ...)` 才会发生搬运。
 
 ## 6. Ascend C：模板类型与存储位置
 
@@ -418,7 +418,7 @@ if (hasIndices) {
 
 - `has_value()` 只检查 optional 中有没有值；
 - `value()`/`*indices` 取出内部 `at::Tensor` 句柄；
-- optional 没有值不等于“有一个 shape 为 `[0]` 的 tensor”；
+- optional 没有值不等于“有一个 shape 为 $`\left[0\right]`$ 的 tensor”；
 - 有值也不保证 tensor 可用，还可能需要检查 `defined()`、`numel()`、dtype、device 和 shape。
 
 `c10::optional<at::Tensor>` 是两套 PyTorch 类型的合法组合：外层 C10 提供通用“可选值”容器，内层 ATen 提供 tensor。命名空间不同不妨碍 C++ 模板组合。

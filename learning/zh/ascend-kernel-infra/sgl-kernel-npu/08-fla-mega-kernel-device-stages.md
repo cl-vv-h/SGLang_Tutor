@@ -61,7 +61,7 @@ Device stage 是本章对“mega kernel 内部一个有明确输入、输出和�
 - `D` 是 head dimension，即每个 attention head 的向量维度。
 - `C` 是 chunk size，即每个 chunk 处理的 token 块大小。
 
-Python wrapper 里也有对应常量 `HEAD_DIM = 128`、`CHUNK_SIZE = 128`，见 [`mega_chunk_gdn.py#L6-L7`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L6-L7)。
+Python wrapper 里也有对应常量 $`\mathrm{HEAD\_DIM}=128`$、$`\mathrm{CHUNK\_SIZE}=128`$，见 [`mega_chunk_gdn.py#L6-L7`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L6-L7)。
 
 ### 2.4 PTO
 
@@ -210,13 +210,13 @@ flowchart LR
 
 源码从 `q.shape` 得到 `total_tokens` 和 `head_dim`，从 `v.shape[-2]` 得到 `num_value_heads`，见 [`mega_chunk_gdn.py#L81-L83`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L81-L83)。
 
-如果没有传 `cu_seqlens`，就构造 `[0, total_tokens]`，表示只有一条 packed 序列；否则把传入值转成 int32，见 [`mega_chunk_gdn.py#L84-L87`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L84-L87)。
+如果没有传 `cu_seqlens`，就构造 $`\left[0,\mathrm{total\_tokens}\right]`$，表示只有一条 packed 序列；否则把传入值转成 int32，见 [`mega_chunk_gdn.py#L84-L87`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L84-L87)。
 
 然后：
 
-- `num_sequences = cu32.numel() - 1`：累计长度数组有 `N + 1` 个边界，就代表 `N` 条样本。
-- `num_chunks = _total_chunks(cu32)`：每条样本按 `CHUNK_SIZE=128` 向上取整切块后求和。
-- `num_matrices = num_chunks * num_value_heads`：每个 chunk、每个 value head 都有一份逻辑矩阵工作。
+- $`\mathrm{num\_sequences} = \mathrm{cu32}.\mathrm{numel}\left(\right) - 1`$：累计长度数组有 `N + 1` 个边界，就代表 `N` 条样本。
+- `num_chunks = _total_chunks(cu32)`：每条样本按 $`\mathrm{CHUNK\_SIZE}=128`$ 向上取整切块后求和。
+- $`\mathrm{num\_matrices}=\mathrm{num\_chunks}\cdot \mathrm{num\_value\_heads}`$：每个 chunk、每个 value head 都有一份逻辑矩阵工作。
 
 `_total_chunks` 的真实循环见 [`mega_chunk_gdn.py#L40-L45`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L40-L45)。
 
@@ -226,9 +226,9 @@ Python wrapper 创建：
 
 | 张量 | shape/dtype | 作用 |
 |---|---|---|
-| `mask_lower` | `[128,128]`, FP32 | 不含对角线的下三角 mask，给 `kkt` 等阶段使用 |
-| `mask_full` | `[128,128]`, FP32 | 含对角线的下三角 mask，给输出阶段使用 |
-| `minus_identity` | `[128,128]`, FP16 | 对角线为 `-1`，给三角求解/逆相关阶段使用 |
+| `mask_lower` | $`\left[128,128\right]`$, FP32 | 不含对角线的下三角 mask，给 `kkt` 等阶段使用 |
+| `mask_full` | $`\left[128,128\right]`$, FP32 | 含对角线的下三角 mask，给输出阶段使用 |
+| `minus_identity` | $`\left[128,128\right]`$, FP16 | 对角线为 `-1`，给三角求解/逆相关阶段使用 |
 
 这些张量用 `lru_cache` 按 device 缓存。`lru_cache` 是 Python 的最近最少使用缓存装饰器，意思是相同 device 上重复调用时不必反复创建这些固定辅助矩阵。
 
@@ -241,22 +241,22 @@ wrapper 分配的张量可以分成两类。
 | 张量 | 源码位置 | shape 直觉 | 由哪个 stage 主要写入 |
 |---|---|---|---|
 | `g_sum` | [`mega_chunk_gdn.py#L96`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L96) | 和 `g` 同 shape，FP32 | cumsum |
-| `g_t` | [`#L97-L99`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L97-L99) | `[H, total_tokens]`，FP32 | transpose |
-| `beta_t` | [`#L100-L102`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L100-L102) | `[H, total_tokens]`，FP16 | transpose |
+| `g_t` | [`#L97-L99`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L97-L99) | $`\left[H,\mathrm{total\_tokens}\right]`$，FP32 | transpose |
+| `beta_t` | [`#L100-L102`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L100-L102) | $`\left[H,\mathrm{total\_tokens}\right]`$，FP16 | transpose |
 | `A/A_inv` | [`#L104-L113`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L104-L113) | chunk 内三角/关联矩阵 | kkt / solve_tril |
 | `w/u` | [`#L115-L116`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L115-L116) | 和 `v` 同 shape | wy_fast |
-| `h` | [`#L117-L123`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L117-L123) | `[num_chunks * H, D, D]` | chunk_h |
+| `h` | [`#L117-L123`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L117-L123) | $`\left[\mathrm{num\_chunks}\cdot H,D,D\right]`$ | chunk_h |
 | `v_new` | [`#L124`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L124) | 和 `v` 同 shape | chunk_h |
-| `final_state` | [`#L125-L131`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L125-L131) | `[num_sequences * H, D, D]` | chunk_h |
+| `final_state` | [`#L125-L131`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L125-L131) | $`\left[\mathrm{num\_sequences}\cdot H,D,D\right]`$ | chunk_h |
 | `out` | [`#L153`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L153) | 和 `v` 同 shape | chunk_o |
 
 第二类是 workspace，只给 device stage 临时使用：
 
 | workspace | shape 直觉 | 为什么和 `block_dim` 有关 |
 |---|---|---|
-| `kkt_workspace` | `[block_dim * 2, 128, 128]` | 每个参与 core/stage 需要私有 scratch，避免互相覆盖 |
-| `wy_workspace_a1/a2` | `[block_dim, 128, 128]` | WY 阶段的中间矩阵 scratch |
-| `h_workspace` | `[block_dim * 4, D, D]` | chunk_h 阶段需要更多 per-core 临时矩阵 |
+| `kkt_workspace` | $`\left[\mathrm{block\_dim}\cdot 2,128,128\right]`$ | 每个参与 core/stage 需要私有 scratch，避免互相覆盖 |
+| `wy_workspace_a1/a2` | $`\left[\mathrm{block\_dim},128,128\right]`$ | WY 阶段的中间矩阵 scratch |
+| `h_workspace` | $`\left[\mathrm{block\_dim}\cdot 4,D,D\right]`$ | chunk_h 阶段需要更多 per-core 临时矩阵 |
 | `o_workspace_qk/qs/gated` | `[block_dim, ...]` | chunk_o 阶段的 QK/QS/gated 中间结果 |
 
 这些 workspace 都在 [`mega_chunk_gdn.py#L135-L152`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L135-L152) 分配。
@@ -298,11 +298,11 @@ C++ Host 入口是 [`mega_chunk_gdn.cpp#L71-L101`](https://github.com/sgl-projec
 | head dimension 必须是 128 | [`#L42`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L42) | device tile、mask、workspace 都按 128 写死 |
 | `q/k/v/beta` 是 FP16，`g` 是 FP32，`cu_seqlens` 是 int32 | [`#L48-L53`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L48-L53) | device 代码用固定 dtype 解释 GM 指针 |
 | 关键输入 contiguous | [`#L55-L57`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L55-L57) | device 地址计算默认连续布局 |
-| `initial_state` 如果存在，shape 是 `[N,H,D,D]` | [`#L59-L67`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L59-L67) | 每条样本、每个 value head 都有一份状态矩阵 |
+| `initial_state` 如果存在，shape 是 $`\left[N,H,D,D\right]`$ | [`#L59-L67`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L59-L67) | 每条样本、每个 value head 都有一份状态矩阵 |
 
 这套校验看起来很“挑剔”，但它正是 mega kernel 得以成立的前提：前门越窄，device 内部越敢把 layout、tile size、dtype、同步协议写死。
 
-如果校验失败，错误信息提示可以设置 `GDN_ATTN_BACKEND_TRITON=1` 跑 alternative backend，见 [`mega_chunk_gdn.cpp#L29`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L29)。这就是 04 章讲的双路径工程价值：mega 路径快而窄，Triton 分段路径更容易覆盖复杂输入。
+如果校验失败，错误信息提示可以设置 $`\mathrm{GDN\_ATTN\_BACKEND\_TRITON}=1`$ 跑 alternative backend，见 [`mega_chunk_gdn.cpp#L29`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L29)。这就是 04 章讲的双路径工程价值：mega 路径快而窄，Triton 分段路径更容易覆盖复杂输入。
 
 ## 8. Device entry：`GM_ADDR`、`H` specialization 和 `reinterpret_cast`
 
@@ -358,7 +358,7 @@ mk_cumsum::cumsum_kernel<H, C>(g_in_ptr, g_sum_ptr, cu_seqlens_ptr, batch_size, 
 
 为什么传 `cu_seqlens`？因为 packed B=1 只是一条长 token 轴，不能跨样本累计。`cu_seqlens` 告诉 kernel 每条样本边界，避免第一条样本的尾部状态错误地接到第二条样本开头。
 
-执行完 cumsum 后，源码立刻调用 `SyncAllImpl<false>()`，见 [`mega_kernel.cpp#L329`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_kernel/mega_kernel.cpp#L329)。因为下一阶段要读 `g_sum`，必须确保所有参与 core 写完。
+执行完 cumsum 后，源码立刻调用 $`\mathrm{SyncAllImpl} \lt \mathrm{false} \gt \left[\right]`$，见 [`mega_kernel.cpp#L329`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_kernel/mega_kernel.cpp#L329)。因为下一阶段要读 `g_sum`，必须确保所有参与 core 写完。
 
 ## 11. Stage 2：`transpose` 为什么把 `T,H` 变成 `H,T`
 
@@ -391,11 +391,11 @@ mk_kkt::kkt_kernel<H, D, C>(k, beta_t, g_t, mask_lower, kkt_workspace, A, cu_seq
 
 几个变量的工程意义：
 
-- `k`：key tensor，shape 按 Host contract 是 `[1, total_tokens, Hg, 128]`。
-- `beta_t`：已经转成 `[H, total_tokens]` 的 FP16 门控写入强度。
-- `g_t`：已经转成 `[H, total_tokens]` 的 FP32 门控累计结果。
+- `k`：key tensor，shape 按 Host contract 是 $`\left[1,\mathrm{total\_tokens},\mathrm{Hg},128\right]`$。
+- `beta_t`：已经转成 $`\left[H,\mathrm{total\_tokens}\right]`$ 的 FP16 门控写入强度。
+- `g_t`：已经转成 $`\left[H,\mathrm{total\_tokens}\right]`$ 的 FP32 门控累计结果。
 - `mask_lower`：不含对角线的下三角 mask，避免 chunk 内未来 token 影响过去 token。
-- `kkt_workspace`：按 `block_dim * 2` 预留的临时 GM scratch。
+- `kkt_workspace`：按 $`\mathrm{block\_dim}\cdot 2`$ 预留的临时 GM scratch。
 - `A`：输出的 chunk 内三角/关联矩阵，后面 `solve_tril` 会读。
 
 为什么这个 stage 是 `Cube+Vec`？直觉上，`K` 和 `K^T` 的乘加部分适合 Cube；mask、门控缩放、格式转换和边界处理适合 Vector。Ascend 上高性能复杂 kernel 经常不是“只用一个单元”，而是 Cube 和 Vector 按阶段协作。
@@ -410,8 +410,8 @@ mk_kkt::kkt_kernel<H, D, C>(k, beta_t, g_t, mask_lower, kkt_workspace, A, cu_seq
 
 `mega_solve_tril` 会根据 `num_matrices` 和 `get_block_num()` 选择不同 unroll 因子：
 
-- `num_matrices <= get_block_num()`：每个 block 大致处理 1 份矩阵工作。
-- `num_matrices <= 2 * get_block_num()`：每个 block 可能展开处理 2 份。
+- $`\mathrm{num\_matrices}\le\mathrm{get\_block\_num}()`$：每个 block 大致处理 1 份矩阵工作。
+- $`\mathrm{num\_matrices}\le2\cdot\mathrm{get\_block\_num}()`$：每个 block 可能展开处理 2 份。
 - 否则：展开处理 4 份。
 
 源码见 [`mega_kernel.cpp#L286-L299`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_kernel/mega_kernel.cpp#L286-L299)。
@@ -461,7 +461,7 @@ mk_h::chunk_h_kernel<H, D, C>(k, w, u, g_t, s, v_new, final_state, initial_state
 
 `initial_state` 是输入状态；`has_initial_state` 是一个标志位，告诉 device 这一轮是否真的有历史状态。如果没有，Python wrapper 会把 `initial_state` 指到 `final_state` 这块零初始化 buffer，见 [`mega_chunk_gdn.py#L132-L133`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L132-L133)。这是一种常见工程技巧：让 device 入口永远收到一个合法 tensor 指针，同时用 flag 区分语义。
 
-为什么状态 shape 是 `[N,H,D,D]`？`N` 是 packed 后的样本数，`H` 是 value heads，`D,D` 是每个 head 的状态矩阵。Host 校验见 [`mega_chunk_gdn.cpp#L59-L64`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L59-L64)。
+为什么状态 shape 是 $`\left[N,H,D,D\right]`$？`N` 是 packed 后的样本数，`H` 是 value heads，`D,D` 是每个 head 的状态矩阵。Host 校验见 [`mega_chunk_gdn.cpp#L59-L64`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_host/mega_chunk_gdn.cpp#L59-L64)。
 
 ## 16. Stage 7：`chunk_o` 生成最终输出
 
@@ -477,7 +477,7 @@ mk_o::chunk_o_kernel<H, D, C>(q, k, v_new, s, g_t, mask_full, workspace_qk, work
 
 执行后 Cube 分支如果 `get_block_idx() < num_matrices`，会等待一个 device flag，见 [`mega_kernel.cpp#L434-L438`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/csrc/mega_chunk_gdn/op_kernel/mega_kernel.cpp#L434-L438)。这保证最终写出前相关 Cube/Vector 工作完成。
 
-Python wrapper 最终返回 `(out * scale).to(q_dtype)`，见 [`mega_chunk_gdn.py#L200-L203`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L200-L203)。`scale` 默认是 `head_dim ** -0.5`，见 [`mega_chunk_gdn.py#L75-L76`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L75-L76)，和 attention 中常见的缩放点积习惯一致。
+Python wrapper 最终返回 `(out * scale).to(q_dtype)`，见 [`mega_chunk_gdn.py#L200-L203`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L200-L203)。`scale` 默认是 $`{\mathrm{head\_dim}}^{-0.5}`$，见 [`mega_chunk_gdn.py#L75-L76`](https://github.com/sgl-project/sgl-kernel-npu/blob/b2378ee05769cf7df209ffc5e1b669728f435a7e/python/sgl_kernel_npu/sgl_kernel_npu/fla/mega_chunk_gdn.py#L75-L76)，和 attention 中常见的缩放点积习惯一致。
 
 ## 17. 整体数据流：哪些东西落 GM，哪些只是 workspace
 
@@ -536,7 +536,7 @@ flowchart TB
 
 ## 18. 同步：为什么同一个 launch 里还要这么多 barrier
 
-`mega_kernel_impl` 在几乎每个大 stage 之间都调用 `SyncAllImpl<false>()`：
+`mega_kernel_impl` 在几乎每个大 stage 之间都调用 $`\mathrm{SyncAllImpl} \lt \mathrm{false} \gt \left[\right]`$：
 
 - cumsum 后同步，再 transpose；
 - transpose 后同步，再 kkt；
@@ -577,19 +577,19 @@ Python wrapper 的 `_block_dim` 尝试读取 `torch.npu.get_device_properties(de
 这个实现只支持：
 
 - packed B=1；
-- `D=128`；
-- `C=128`；
+- $`D=128`$；
+- $`C=128`$；
 - `H` 属于 `{8,12,16,24,32,48,64}`；
 - `H % Hg == 0`；
 - `q/k/v/beta` FP16，`g` FP32；
 - contiguous layout；
-- 可选 `initial_state` 也必须是 `[N,H,128,128]` FP16 contiguous。
+- 可选 `initial_state` 也必须是 $`\left[N,H,128,128\right]`$ FP16 contiguous。
 
 原因不是作者“偷懒”，而是 mega kernel 的典型工程取舍：
 
 | 收窄条件 | 换来的好处 |
 |---|---|
-| 固定 `D/C=128` | tile shape、mask、workspace、Cube 计算路径都能写死 |
+| 固定 $`\frac{D}{C}=128`$ | tile shape、mask、workspace、Cube 计算路径都能写死 |
 | 固定 `H` 候选集合 | 编译期 specialization 更容易优化 |
 | packed B=1 + `cu_seqlens` | device 只处理一条 token 轴，变长样本由边界数组表达 |
 | contiguous | 地址计算简单，避免 stride 分支污染内核 |
@@ -656,15 +656,15 @@ Python wrapper 的 `_block_dim` 尝试读取 `torch.npu.get_device_properties(de
 
 ### 3. `num_matrices` 和 `block_dim` 有什么本质区别？
 
-**答案：**`num_matrices` 是逻辑工作量，等于 `num_chunks * num_value_heads`。它随输入序列长度、`cu_seqlens` 切出的 chunk 数和 value head 数变化。`block_dim` 是 launch 启动的 Ascend 逻辑执行实例数，wrapper 里主要按 `cube_core_num` 选择。
+**答案：**`num_matrices` 是逻辑工作量，等于 $`\mathrm{num\_chunks}\cdot \mathrm{num\_value\_heads}`$。它随输入序列长度、`cu_seqlens` 切出的 chunk 数和 value head 数变化。`block_dim` 是 launch 启动的 Ascend 逻辑执行实例数，wrapper 里主要按 `cube_core_num` 选择。
 
 二者不要求相等。如果 `num_matrices` 小于等于 `block_dim`，可以大致理解为每个 block 至多处理一份矩阵工作；如果 `num_matrices` 更大，一个 block 就需要循环或展开处理多份逻辑工作。`mega_solve_tril` 根据 `num_matrices` 相对 `get_block_num()` 的大小选择不同 unroll 因子，就是这个关系的直接体现。
 
-### 4. 为什么 stage 之间需要 `SyncAllImpl<false>()`？
+### 4. 为什么 stage 之间需要 $`\mathrm{SyncAllImpl} \lt \mathrm{false} \gt \left[\right]`$？
 
 **答案：**因为同一个 kernel launch 内部仍然是多 core、多 pipeline、多硬件单元并行执行。C++ 源码里的函数调用顺序只说明当前 core 的控制流顺序，不能自动保证所有 core 都完成了上一阶段的 GM 写入，也不能保证 AIV/AIC 协作阶段的内部事件都结束。
 
-`SyncAllImpl<false>()` 先做 `pipe_barrier(PIPE_ALL)`，再根据 AIC/AIV 编译分支执行 cross-core sync 和 `wait_flag_dev`。它的作用是把多个执行者拉到同一个 stage 边界，确保下一 stage 读到的是完整、稳定的中间结果。
+$`\mathrm{SyncAllImpl} \lt \mathrm{false} \gt \left[\right]`$ 先做 `pipe_barrier(PIPE_ALL)`，再根据 AIC/AIV 编译分支执行 cross-core sync 和 `wait_flag_dev`。它的作用是把多个执行者拉到同一个 stage 边界，确保下一 stage 读到的是完整、稳定的中间结果。
 
 ### 5. 为什么 `GM_ADDR` 要先定义成 `__gm__ uint8_t*`，再 `reinterpret_cast` 成 `half*` 或 `float*`？
 
@@ -676,7 +676,7 @@ Python wrapper 的 `_block_dim` 尝试读取 `torch.npu.get_device_properties(de
 
 **答案：**两者都是下三角 mask，但对角线处理不同。`mask_lower` 不含对角线，通常用于表示严格过去依赖，避免当前位置以同一种方式参与自身更新。`mask_full` 含对角线，输出阶段通常允许当前位置看到自己，所以用含对角线的下三角结构。
 
-从工程上看，Python wrapper 把它们预先创建成固定 `[128,128]` FP32 tensor，并传进 custom op，避免 device 侧每次动态构造 mask。代价是 `CHUNK_SIZE` 必须固定为 128。
+从工程上看，Python wrapper 把它们预先创建成固定 $`\left[128,128\right]`$ FP32 tensor，并传进 custom op，避免 device 侧每次动态构造 mask。代价是 `CHUNK_SIZE` 必须固定为 128。
 
 ### 7. 为什么这个实现需要 alternative Triton backend 兜底？
 

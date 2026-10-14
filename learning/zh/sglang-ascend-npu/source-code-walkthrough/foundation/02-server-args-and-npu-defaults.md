@@ -134,17 +134,17 @@ get_npu_memory_capacity
 
 | NPU 容量 | chunked prefill 默认值 |
 |---:|---:|
-| `<= 32 GiB` | 4096 tokens |
-| `<= 64 GiB` | 8192 tokens |
+| $`\le  32 \mathrm{GiB}`$ | 4096 tokens |
+| $`\le  64 \mathrm{GiB}`$ | 8192 tokens |
 
 只有 `chunked_prefill_size is None` 时设置。大 chunk 提高单次工作量和峰值显存；小 chunk 更容易交错 decode，但会增加调度和 launch 次数。
 
 ### 5.4 Graph batch 上限
 
-| 容量 | `tp_size < 4` | `tp_size >= 4` |
+| 容量 | $`\mathrm{tp\_size} \lt 4`$ | $`\mathrm{tp\_size} \ge 4`$ |
 |---:|---:|---:|
-| `<= 32 GiB` | 16 | 64 |
-| `<= 64 GiB` | 64 | 256 |
+| $`\le  32 \mathrm{GiB}`$ | 16 | 64 |
+| $`\le  64 \mathrm{GiB}`$ | 64 | 256 |
 
 字段名是 `cuda_graph_max_bs`，在 NPU 上映射到 NPU graph 语义。只有空值时补齐，可显式覆盖，但必须验证 capture 和显存。
 
@@ -160,8 +160,11 @@ args.disable_custom_all_reduce = True
 
 开启 hierarchical cache 后：
 
+```math
+\mathrm{hicache\_io\_backend}=\mathrm{kernel\_ascend}
+```
+
 ```text
-hicache_io_backend = kernel_ascend
 MLA 模型  -> page_first_kv_split
 非 MLA    -> page_first_direct
 ```

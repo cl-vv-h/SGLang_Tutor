@@ -71,7 +71,7 @@ SGLang 故意不把“torch_npu 存在但设备不可见”当成 False，否则
 _is_npu = is_npu()
 ```
 
-`lru_cache(maxsize=1)` 避免重复探测，并把平台视为进程生命周期内不变。因此设备可见性必须在启动 Python 前设置；进程内后改变量不会可靠地改变已导入模块。
+$`\mathrm{lru\_cache}\left(\mathrm{maxsize}=1\right)`$ 避免重复探测，并把平台视为进程生命周期内不变。因此设备可见性必须在启动 Python 前设置；进程内后改变量不会可靠地改变已导入模块。
 
 ## 3. `ServerArgs.device` 怎样确定
 
@@ -110,7 +110,7 @@ flowchart TB
   DETOK -->|"text chunks"| TM
 ```
 
-普通 `dp_size=1` 时，每个 TP/PP rank 启动一个 scheduler 进程。scheduler 不只是排队器，它还持有本 rank 的 `TpModelWorker`、`ModelRunner`、模型权重和 KV cache。
+普通 $`\mathrm{dp\_size}=1`$ 时，每个 TP/PP rank 启动一个 scheduler 进程。scheduler 不只是排队器，它还持有本 rank 的 `TpModelWorker`、`ModelRunner`、模型权重和 KV cache。
 
 ### 4.1 `_launch_subprocesses()` 顺序
 
@@ -133,10 +133,8 @@ configure_logger
 
 `Engine._launch_scheduler_processes()` 计算：
 
-```text
-gpu_id = base_gpu_id
-       + (pp_rank % pp_size_per_node) * tp_size_per_node
-       + (tp_rank % tp_size_per_node) * gpu_id_step
+```math
+\mathrm{gpu\_id}=\mathrm{base\_gpu\_id}+\mathrm{pp\_rank}\bmod \mathrm{pp\_size\_per\_node}\cdot \mathrm{tp\_size\_per\_node}+\mathrm{tp\_rank}\bmod \mathrm{tp\_size\_per\_node}\cdot \mathrm{gpu\_id\_step}
 ```
 
 然后启动：
@@ -159,11 +157,20 @@ run_scheduler_process(
 
 假设：
 
-```text
-base_gpu_id = 0
-gpu_id_step = 1
-tp_size = 4
-pp_size = 1
+```math
+\mathrm{base\_gpu\_id}=0
+```
+
+```math
+\mathrm{gpu\_id\_step}=1
+```
+
+```math
+\mathrm{tp\_size}=4
+```
+
+```math
+\mathrm{pp\_size}=1
 ```
 
 | tp_rank | gpu_id |

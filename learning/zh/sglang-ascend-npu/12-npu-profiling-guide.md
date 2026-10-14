@@ -397,16 +397,32 @@ tar -czf "/workspace/sglang-npu/profiling-runs/${RUN_ID}.tar.gz" -C "$PROF_ROOT"
 
 启动日志里重点找：
 
-```text
-device=npu
-attention_backend=ascend
-prefill_attention_backend=ascend
-decode_attention_backend=ascend
+```math
+\mathrm{device}=\mathrm{npu}
+```
+
+```math
+\mathrm{attention\_backend}=\mathrm{ascend}
+```
+
+```math
+\mathrm{prefill\_attention\_backend}=\mathrm{ascend}
+```
+
+```math
+\mathrm{decode\_attention\_backend}=\mathrm{ascend}
+```
+
 chunked_prefill_size
+
 cuda_graph_max_bs
+
 Capture npu graph begin
+
 Capture npu graph end
-backend=hccl
+
+```math
+\mathrm{backend}=\mathrm{hccl}
 ```
 
 如果 attention backend 不是 `ascend`，不要继续做 kernel profiling。先修后端选择。
@@ -727,9 +743,12 @@ duration:
 
 实验：
 
-```text
-prompt_len=4096, output_len=16, concurrency=1
-prompt_len=8192, output_len=16, concurrency=1
+```math
+\mathrm{prompt\_len}=4096,\qquad \mathrm{output\_len}=16,\qquad \mathrm{concurrency}=1
+```
+
+```math
+\mathrm{prompt\_len}=8192,\qquad \mathrm{output\_len}=16,\qquad \mathrm{concurrency}=1
 ```
 
 看：
@@ -750,8 +769,8 @@ prompt_len=8192, output_len=16, concurrency=1
 
 实验：
 
-```text
-prompt_len=128/512, output_len=256, concurrency=1/8/16
+```math
+\mathrm{prompt\_len}=\frac{128}{512},\qquad \mathrm{output\_len}=256,\qquad \mathrm{concurrency}=\frac{\frac{1}{8}}{16}
 ```
 
 看：
@@ -773,8 +792,11 @@ prompt_len=128/512, output_len=256, concurrency=1/8/16
 
 实验：
 
+```math
+\mathrm{tp\_size}=\left[1,2,4\right]
+```
+
 ```text
-tp_size=1, 2, 4
 相同模型、相同请求分布
 ```
 

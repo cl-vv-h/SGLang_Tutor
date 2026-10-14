@@ -12,8 +12,8 @@
 
 Weight-only quantization 的基本形式是：
 
-```text
-y = x_fp16 @ dequant(q_w, scale_w, zero_w)
+```math
+y = x_{\mathrm{fp16}} \, \mathrm{dequant}\left(q_{w}, \mathrm{scale\_w}, \mathrm{zero\_w}\right)
 ```
 
 activation 仍是 BF16/FP16，因此它通常比 W8A8、W4A4 更容易保质量。
@@ -50,9 +50,12 @@ activation 仍是 BF16/FP16，因此它通常比 W8A8、W4A4 更容易保质量�
 
 RTN 是最简单的量化：
 
-```text
-q = round(w / scale)
-w_hat = q * scale
+```math
+q=\mathrm{round}\left(\frac{w}{\mathrm{scale}}\right)
+```
+
+```math
+w_{\mathrm{hat}}=q\cdot \mathrm{scale}
 ```
 
 | 优点 | 缺点 |
@@ -75,30 +78,36 @@ GPTQ 的目标不是让每个权重元素都最接近原值，而是让量化后
 
 对一个 Linear：
 
-```text
-Y = X @ W
-Y_hat = X @ W_hat
+```math
+Y=X\,W
+```
+
+```math
+Y_{\mathrm{hat}}=X\,W_{\mathrm{hat}}
 ```
 
 希望最小化：
 
-```text
-loss = || X @ W - X @ W_hat ||^2
+```math
+\mathrm{loss} = \Vert X \, W - X \, W_{\mathrm{hat}} \Vert^{2}
 ```
 
 把误差写成：
 
-```text
-DeltaW = W_hat - W
-loss = || X @ DeltaW ||^2
+```math
+\mathrm{DeltaW}=W_{\mathrm{hat}}-W
+```
+
+```math
+\mathrm{loss} = \Vert X \, \mathrm{DeltaW} \Vert^{2}
 ```
 
 这里 `X` 是校准 activation。若某个权重方向对应的 activation 很大，那个方向的量化误差会更影响输出。
 
 GPTQ 使用近似二阶信息：
 
-```text
-H ≈ X^T X
+```math
+H \approx  X^{\mathsf T} X
 ```
 
 | 符号 | 含义 |
@@ -151,22 +160,22 @@ AWQ 不直接保存混合精度权重，而是通过等价缩放保护重要通�
 
 设 Linear：
 
-```text
-Y = X @ W
+```math
+Y=X\,W
 ```
 
 引入一个按 channel 的正 scale `s`：
 
-```text
-Y = (X / s) @ (W * s)
+```math
+Y=\frac{X}{s}\,W\cdot s
 ```
 
 这在数学上等价，因为一个方向缩小、另一个方向放大，乘积不变。
 
 | 变换 | 作用 |
 |---|---|
-| `W * s` | 放大重要权重通道，使其量化相对误差更小 |
-| `X / s` | 抵消权重放大，保持原始函数不变 |
+| $`W\cdot s`$ | 放大重要权重通道，使其量化相对误差更小 |
+| $`\frac{X}{s}`$ | 抵消权重放大，保持原始函数不变 |
 | 搜索 `s` | 根据校准 activation 找到质量和量化误差的折中 |
 
 读法：
@@ -203,16 +212,22 @@ SmoothQuant 主要解决 W8A8，尤其是 activation outlier 导致 INT8 activat
 
 核心等价变换：
 
-```text
-Y = X @ W
-Y = (X / s) @ (diag(s) @ W)
+```math
+Y=X\,W
+```
+
+```math
+Y=\frac{X}{s}\,\mathrm{diag}\left(s\right)\,W
 ```
 
 也可以按 channel 写成：
 
-```text
-X_smooth[:, i] = X[:, i] / s_i
-W_smooth[i, :] = W[i, :] * s_i
+```math
+{X_{\mathrm{smooth}}}_{:,i}=\frac{{X}_{:,i}}{s_{i}}
+```
+
+```math
+{W_{\mathrm{smooth}}}_{i,:}={W}_{i,:}\cdot s_{i}
 ```
 
 读法：
@@ -226,8 +241,8 @@ activation 中某些 channel 有 outlier，导致 A8 scale 被拉大；
 
 SmoothQuant 的超参数常写作 `alpha`：
 
-```text
-s_i = max(|X_i|)^alpha / max(|W_i|)^(1 - alpha)
+```math
+s_{i} = \mathrm{max}\left(\mid X_{i}\mid \right)^{\alpha} / \mathrm{max}\left(\mid W_{i}\mid \right)^{1 - \alpha}
 ```
 
 | `alpha` 趋势 | 效果 |
@@ -241,18 +256,19 @@ SmoothQuant 是理解 W8A8 的关键：activation 量化的核心难题不是 bi
 
 普通 rounding 是：
 
-```text
-q = round(w / scale)
+```math
+q=\mathrm{round}\left(\frac{w}{\mathrm{scale}}\right)
 ```
 
 但 `0.49` 一定要向下、`0.51` 一定要向上吗？对单个元素看是这样，对整层输出不一定。
 
 AutoRound/SignRound 类方法把 rounding 看成可优化变量：
 
-```text
-w_hat = quantize(w, rounding_offset)
-目标: 让层输出或模型输出误差最小
+```math
+w_{\mathrm{hat}} = \mathrm{quantize}\left(w, \mathrm{rounding\_offset}\right)
 ```
+
+目标: 让层输出或模型输出误差最小
 
 简化流程：
 
@@ -339,10 +355,16 @@ QLoRA 还使用 double quantization：
 
 QLoRA 的典型计算：
 
-```text
-base_out = X_bf16 @ dequant(W_nf4)
-lora_out = X_bf16 @ A_bf16 @ B_bf16
-Y = base_out + lora_out
+```math
+\mathrm{base\_out} = X_{\mathrm{bf16}} \, \mathrm{dequant}\left(W_{\mathrm{nf4}}\right)
+```
+
+```math
+\mathrm{lora\_out}=X_{\mathrm{bf16}}\,A_{\mathrm{bf16}}\,B_{\mathrm{bf16}}
+```
+
+```math
+Y=\mathrm{base\_out}+\mathrm{lora\_out}
 ```
 
 | 适合 | 不适合 |
@@ -433,7 +455,10 @@ input_scale:       static activation scale, optional
 ```text
 weight:            FP8 payload
 weight_scale_inv:  uint8 E8M0/UE8M0 block scales
-weight_block_size: [1, 32]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{weight\_block\_size}\right)=\left[1,32\right]
 ```
 
 ## 14. 小结

@@ -51,8 +51,11 @@ output_ids、seq_len、target KV Cache 三者描述同一个已提交前缀
 
 请求完成 prefill 后，target KV Cache 已经保存 prompt 的每层 K/V：
 
+```math
+\mathrm{request}.\mathrm{output\_ids} = \left[\right]
+```
+
 ```text
-request.output_ids = []
 request.prompt_len = S
 request.seq_len    = S
 target_kv[0:S]     = prompt KV
@@ -72,31 +75,55 @@ ngram_table/trie     # NGRAM 可能需要
 
 Draft 阶段输出候选 token。线性链的典型形状：
 
-```text
-B = 3
-K = 4
+```math
+B=3
+```
 
-draft_tokens: [3,4]
+```math
+K=4
+```
+
+```math
+\mathrm{shape}\left(\mathrm{draft\_tokens}\right)=\left[3,4\right]
+```
+
+```text
 draft_probs:  [3,4,V]  # strict sampling 需要
 ```
 
 例如：
 
-```text
-req0: [45, 18, 77, 31]
-req1: [92, 10, 10, 10]
-req2: [ 5,  6,  7,  8]
+```math
+\mathrm{shape}\left(\mathrm{req0}\right)=\left[45,18,77,31\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{req1}\right)=\left[92,10,10,10\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{req2}\right)=\left[5,6,7,8\right]
 ```
 
 Tree draft 则会输出候选节点：
 
-```text
-draft_token:      [num_nodes]
-parent_index:     [num_nodes]
-position:         [num_nodes]
-retrieve_index:   [B, max_path_len]
-custom_mask:      flattened attention allow mask
+```math
+\mathrm{shape}\left(\mathrm{draft\_token}\right)=\left[\mathrm{num\_nodes}\right]
 ```
+
+```math
+\mathrm{shape}\left(\mathrm{parent\_index}\right)=\left[\mathrm{num\_nodes}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{position}\right)=\left[\mathrm{num\_nodes}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{retrieve\_index}\right)=\left[B,\mathrm{max\_path\_len}\right]
+```
+
+custom_mask:      flattened attention allow mask
 
 Draft 阶段要回答两个问题：
 
@@ -143,8 +170,8 @@ target_kv:     候选位置对应的临时或可选择提交的 KV
 
 严格采样还需要 draft probabilities：
 
-```text
-draft_probs: [B,K,V]
+```math
+\mathrm{shape}\left(\mathrm{draft\_probs}\right)=\left[B,K,V\right]
 ```
 
 Greedy 验证只需要 target argmax：
@@ -158,19 +185,30 @@ accept if target_token_i == draft_token_i
 
 Accept 阶段输出每条请求接受了多少 draft token：
 
-```text
-accept_len: [B]
-correction_or_bonus_token: [B]
+```math
+\mathrm{shape}\left(\mathrm{accept\_len}\right)=\left[B\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{correction\_or\_bonus\_token}\right)=\left[B\right]
 ```
 
 例如：
 
-```text
-K = 4
+```math
+K=4
+```
 
-req0 draft: [45,18,77,31], accept_len=3, correction=9
-req1 draft: [92,10,10,10], accept_len=0, correction=14
-req2 draft: [ 5, 6, 7, 8], accept_len=4, bonus=22
+```math
+\text{req0 draft}: \left[45,18,77,31\right], \mathrm{accept\_len}=3, \mathrm{correction}=9
+```
+
+```math
+\text{req1 draft}: \left[92,10,10,10\right], \mathrm{accept\_len}=0, \mathrm{correction}=14
+```
+
+```math
+\text{req2 draft}: \left[ 5, 6, 7, 8\right], \mathrm{accept\_len}=4, \mathrm{bonus}=22
 ```
 
 提交结果为：
@@ -183,8 +221,8 @@ req2 commits [5,6,7,8,22]
 
 注意：`accept_len` 通常只统计接受的 draft token，不包含最后的 correction/bonus token。因此“本轮输出 token 数”是：
 
-```text
-num_new_tokens = accept_len + 1
+```math
+\mathrm{num\_new\_tokens}=\mathrm{accept\_len}+1
 ```
 
 ## 8. KV Cache 提交
@@ -249,9 +287,12 @@ draft KV prefix must match committed tokens
 
 EAGLE 类方法通常依赖 target hidden states 作为下一轮 draft 的种子。接受路径确定后，需要选出最后接受位置对应的 hidden：
 
-```text
-selected_hidden = target_hidden[accepted_path_last_node]
-next_draft_input = selected_hidden + last_token + draft state
+```math
+\mathrm{selected\_hidden}={\mathrm{target\_hidden}}_{\mathrm{accepted\_path\_last\_node}}
+```
+
+```math
+\mathrm{next\_draft\_input} = \mathrm{selected\_hidden} + \mathrm{last\_token} + \mathrm{draft} \mathrm{state}
 ```
 
 这就是为什么 verify 阶段不只返回 logits，还可能要 capture hidden states。
@@ -301,8 +342,11 @@ draft worker 同时执行 draft_extend
 
 Speculative verify 的 shape 通常比普通 decode 更动态：
 
+```math
+\text{normal decode tokens per req}= 1
+```
+
 ```text
-normal decode tokens per req = 1
 spec verify tokens per req  = K 或 ragged K_i
 tree nodes per req          = 动态
 ```
@@ -352,26 +396,42 @@ Ragged verify 的目标是减少无效候选和 padding，但 graph key、attent
 
 设：
 
-```text
-B = 2
-K = 3
+```math
+B=2
+```
+
+```math
+K=3
+```
+
 当前长度:
-  req0 seq_len = 100
-  req1 seq_len = 240
+
+```math
+\text{req0 seq\_len}= 100
+```
+
+```math
+\text{req1 seq\_len}= 240
 ```
 
 Draft 输出：
 
-```text
-req0: [a,b,c]
-req1: [d,e,f]
+```math
+\mathrm{shape}\left(\mathrm{req0}\right)=\left[a,b,c\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{req1}\right)=\left[d,e,f\right]
 ```
 
 Target verify 输入：
 
-```text
-input_ids = [a,b,c,d,e,f]
-positions = [100,101,102,240,241,242]
+```math
+\mathrm{input\_ids}=\left[a,b,c,d,e,f\right]
+```
+
+```math
+\mathrm{positions}=\left[100,101,102,240,241,242\right]
 ```
 
 Target verify 输出：
@@ -385,11 +445,22 @@ Commit 后：
 
 ```text
 req0 output append [a,b,x]
-req0 seq_len = 103
-req0 formal KV positions 100,101,102 correspond to a,b,x
+```
 
+```math
+\text{req0 seq\_len}= 103
+```
+
+```text
+req0 formal KV positions 100,101,102 correspond to a,b,x
 req1 output append [d,e,f,y]
-req1 seq_len = 244
+```
+
+```math
+\text{req1 seq\_len}= 244
+```
+
+```text
 req1 formal KV positions 240,241,242,243 correspond to d,e,f,y
 ```
 

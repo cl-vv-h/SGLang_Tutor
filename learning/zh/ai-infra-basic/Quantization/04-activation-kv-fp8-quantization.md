@@ -13,11 +13,18 @@
 
 因此 activation 量化经常使用动态 scale：
 
-```text
 对当前 token hidden vector:
-    amax = max(abs(x))
-    scale = amax / qmax
-    q_x = round(x / scale)
+
+```math
+\mathrm{amax}=\mathrm{max}\left(\mathrm{abs}\left(x\right)\right)
+```
+
+```math
+\mathrm{scale}=\frac{\mathrm{amax}}{\mathrm{qmax}}
+```
+
+```math
+q_{x}=\mathrm{round}\left(\frac{x}{\mathrm{scale}}\right)
 ```
 
 读法：
@@ -32,20 +39,20 @@
 
 设当前 packed hidden states：
 
-```text
-X: [T, H]
+```math
+\mathrm{shape}\left(X\right)=\left[T,H\right]
 ```
 
 per-token scale：
 
-```text
-scale_x: [T]
+```math
+\mathrm{shape}\left(\mathrm{scale\_x}\right)=\left[T\right]
 ```
 
 每个 token 行独立量化：
 
-```text
-q_x[t, h] = round(X[t, h] / scale_x[t])
+```math
+{q_{x}}_{t,h}=\mathrm{round}\left(\frac{{X}_{t,h}}{{\mathrm{scale\_x}}_{t}}\right)
 ```
 
 | 优点 | 缺点 |
@@ -60,17 +67,23 @@ per-token 常用于 W8A8 INT8 或 FP8 activation 动态量化。
 
 有时一个 token 的 `H` 维太宽，只用一个 scale 仍然太粗，可以沿 hidden 维再分组：
 
+```math
+\mathrm{shape}\left(X\right)=\left[T,H\right]
+```
+
 ```text
-X:       [T, H]
 group:   G
 scales: [T, ceil(H / G)]
 ```
 
 元素恢复：
 
-```text
-group_id = floor(h / G)
-X_hat[t,h] = q_x[t,h] * scales[t, group_id]
+```math
+\mathrm{group\_id}=\mathrm{floor}\left(\frac{h}{G}\right)
+```
+
+```math
+{X_{\mathrm{hat}}}_{t,h}={q_{x}}_{t,h}\cdot {\mathrm{scales}}_{t,\mathrm{group\_id}}
 ```
 
 这比 per-token 更准，但 scale metadata 更多，kernel 需要在 tile 内按 group 读取 scale。
@@ -89,21 +102,30 @@ output BF16/FP16 [T,O]
 
 ```text
 W_q:       [O,H] int8
-scale_w:   [O]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scale\_w}\right)=\left[O\right]
+```
+
+```text
 X_q:       [T,H] int8
-scale_x:   [T]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{scale\_x}\right)=\left[T\right]
 ```
 
 矩阵乘法核心先得到整数累加：
 
-```text
-acc[t,o] = sum_h X_q[t,h] * W_q[o,h]
+```math
+\mathrm{acc}\left[t,o\right] = \sum_{h} X_{q}\left[t,h\right] \cdot  W_{q}\left[o,h\right]
 ```
 
 再恢复尺度：
 
-```text
-Y[t,o] ≈ acc[t,o] * scale_x[t] * scale_w[o]
+```math
+{Y}_{t,o}\approx {\mathrm{acc}}_{t,o}\cdot {\mathrm{scale\_x}}_{t}\cdot {\mathrm{scale\_w}}_{o}
 ```
 
 读法：
@@ -119,14 +141,14 @@ W4A4 同时压权重和 activation 到 4-bit。相比 W4A16，它多了 activati
 
 对 Linear：
 
-```text
-Y_hat = dequant(A4) @ dequant(W4)
+```math
+Y_{\mathrm{hat}} = \mathrm{dequant}\left(\mathrm{A4}\right) \, \mathrm{dequant}\left(\mathrm{W4}\right)
 ```
 
 误差项包括：
 
-```text
-Y_hat - Y ≈ X @ e_w + e_x @ W + e_x @ e_w
+```math
+Y_{\mathrm{hat}}-Y\approx X\,e_{w}+e_{x}\,W+e_{x}\,e_{w}
 ```
 
 W4A4 要成功，通常需要：
@@ -159,10 +181,16 @@ X_bf16 -> cast/quantize -> X_fp8 + scale
 
 在推理中，动态 current scaling 更直观：
 
-```text
-amax = max(abs(X))
-scale = amax / fp8_max
-X_fp8 = cast(X / scale)
+```math
+\mathrm{amax}=\mathrm{max}\left(\mathrm{abs}\left(X\right)\right)
+```
+
+```math
+\mathrm{scale}=\frac{\mathrm{amax}}{\mathrm{fp8\_max}}
+```
+
+```math
+X_{\mathrm{fp8}} = \mathrm{cast}\left(X / \mathrm{scale}\right)
 ```
 
 但大模型 serving 更关心：
@@ -176,19 +204,21 @@ GEMM 是否原生支持该 FP8/MXFP8 格式
 
 ## 7. MXFP8 activation 数据流
 
-MXFP8 使用 block scale。对 `[T,H]` activation，常见 rowwise block 是：
+MXFP8 使用 block scale。对 $`\left[T,H\right]`$ activation，常见 rowwise block 是：
 
 ```text
 每个 token 行沿 H 维每 32 个元素一个 block
 ```
 
-```text
-X_bf16: [T,H]
-    -> split H into blocks of 32
-    -> each block compute amax
-    -> each block choose E8M0 scale
-    -> cast payload to FP8 E4M3
+```math
+\mathrm{shape}\left(X_{\mathrm{bf16}}\right)=\left[T,H\right]
+```
 
+```text
+-> split H into blocks of 32
+-> each block compute amax
+-> each block choose E8M0 scale
+-> cast payload to FP8 E4M3
 X_mxfp8_payload: [T,H] uint8/float8 storage
 X_mxfp8_scale:   [T,H/32] uint8 E8M0
 ```
@@ -223,9 +253,12 @@ MXFP8 的优势：
 
 KV Cache 存的是每层 attention 的历史 K/V：
 
-```text
-K_cache: [num_blocks, block_size, num_kv_heads, head_dim]
-V_cache: [num_blocks, block_size, num_kv_heads, head_dim]
+```math
+\mathrm{shape}\left(K_{\mathrm{cache}}\right)=\left[\mathrm{num\_blocks},\mathrm{block\_size},\mathrm{num\_kv\_heads},\mathrm{head\_dim}\right]
+```
+
+```math
+\mathrm{shape}\left(V_{\mathrm{cache}}\right)=\left[\mathrm{num\_blocks},\mathrm{block\_size},\mathrm{num\_kv\_heads},\mathrm{head\_dim}\right]
 ```
 
 未量化时通常是 BF16/FP16。量化后可能是：
@@ -238,27 +271,40 @@ MXFP8 KV + block scale
 
 KV Cache 显存估算：
 
-```text
-bytes_per_token =
-    num_layers * 2 * num_kv_heads * head_dim * bytes_per_element
+```math
+\mathrm{bytes\_per\_token}=\mathrm{num\_layers}\cdot 2\cdot \mathrm{num\_kv\_heads}\cdot \mathrm{head\_dim}\cdot \mathrm{bytes\_per\_element}
 ```
 
 其中 `2` 表示 K 和 V。
 
 例子：
 
-```text
-num_layers = 80
-num_kv_heads = 8
-head_dim = 128
-
-BF16 bytes_per_element = 2
-FP8  bytes_per_element = 1
+```math
+\mathrm{num\_layers}=80
 ```
 
-```text
-BF16 KV per token = 80 * 2 * 8 * 128 * 2 = 327680 bytes ≈ 320 KB
-FP8  KV per token = 80 * 2 * 8 * 128 * 1 = 163840 bytes ≈ 160 KB
+```math
+\mathrm{num\_kv\_heads}=8
+```
+
+```math
+\mathrm{head\_dim}=128
+```
+
+```math
+\text{BF16 bytes\_per\_element}= 2
+```
+
+```math
+\text{FP8  bytes\_per\_element}= 1
+```
+
+```math
+\text{BF16 KV per token}= 80 \cdot  2 \cdot  8 \cdot  128 \cdot  2 = 327680 \mathrm{bytes} \approx  320 \mathrm{KB}
+```
+
+```math
+\text{FP8  KV per token}= 80 \cdot  2 \cdot  8 \cdot  128 \cdot  1 = 163840 \mathrm{bytes} \approx  160 \mathrm{KB}
 ```
 
 不含 scale 和分页元数据时，FP8 KV 主体显存约减半。
@@ -267,16 +313,18 @@ FP8  KV per token = 80 * 2 * 8 * 128 * 1 = 163840 bytes ≈ 160 KB
 
 attention logit：
 
-```text
-score = Q @ K^T / sqrt(head_dim)
+```math
+\mathrm{score}=\frac{Q\,{K}^{\mathsf T}}{\sqrt{\mathrm{head\_dim}}}
 ```
 
 如果 K 被量化：
 
-```text
-K_hat = K + e_k
-score_hat = Q @ K_hat^T / sqrt(D)
-          = score + Q @ e_k^T / sqrt(D)
+```math
+K_{\mathrm{hat}}=K+e_{k}
+```
+
+```math
+\mathrm{score\_hat}=\frac{Q\,{K_{\mathrm{hat}}}^{\mathsf T}}{\sqrt{D}}=\mathrm{score}+\frac{Q\,{e_{k}}^{\mathsf T}}{\sqrt{D}}
 ```
 
 读法：
@@ -289,9 +337,12 @@ softmax 对相对差异敏感，尤其长上下文中候选位置很多。
 
 V 的误差进入加权求和：
 
-```text
-out = softmax(score) @ V
-out_hat = softmax(score_hat) @ (V + e_v)
+```math
+\mathrm{out}=\mathrm{softmax}\left(\mathrm{score}\right)\,V
+```
+
+```math
+\mathrm{out\_hat}=\mathrm{softmax}\left(\mathrm{score\_hat}\right)\,\left(V+e_{v}\right)
 ```
 
 K 误差会影响“看哪里”，V 误差会影响“读到什么”。K 的量化通常更需要谨慎。

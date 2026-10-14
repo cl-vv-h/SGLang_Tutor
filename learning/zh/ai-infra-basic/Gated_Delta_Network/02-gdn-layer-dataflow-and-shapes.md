@@ -16,27 +16,48 @@
 | `K` | `head_k_dim` | 每个 q/k head 的维度 |
 | `V` | `head_v_dim` | 每个 value head 的维度 |
 | `C` | `conv_kernel_size` | causal conv1d 的窗口大小 |
-| `R` | `HV / H` | 每个 key head 对应几个 value head |
+| `R` | $`\frac{\mathrm{HV}}{H}`$ | 每个 key head 对应几个 value head |
 
 本文默认描述未做 tensor parallel（TP）切分的逻辑 shape。这里的分组要求 `HV` 是 `H` 的整数倍；实际单卡张量使用该 TP rank 的本地 head 数。
 
 Qwen3-Next 默认配置中常见：
 
-```text
-H_model = 2048
-H = 16
-HV = 32
-K = 128
-V = 128
-C = 4
-R = 2
+```math
+H_{\mathrm{model}}=2048
+```
+
+```math
+H=16
+```
+
+```math
+\mathrm{HV}=32
+```
+
+```math
+K=128
+```
+
+```math
+V=128
+```
+
+```math
+C=4
+```
+
+```math
+R=2
 ```
 
 因此：
 
-```text
-key_dim   = H * K  = 16 * 128 = 2048
-value_dim = HV * V = 32 * 128 = 4096
+```math
+\mathrm{key\_dim}=H\cdot K=16\cdot 128=2048
+```
+
+```math
+\mathrm{value\_dim}=\mathrm{HV}\cdot V=32\cdot 128=4096
 ```
 
 ## 2. 层内总览
@@ -45,8 +66,8 @@ value_dim = HV * V = 32 * 128 = 4096
 
 GDN 层从主干 hidden states 开始：
 
-```text
-hidden_states: [T, H_model]
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[T,H_{\mathrm{model}}\right]
 ```
 
 然后分成几条路径：
@@ -65,34 +86,36 @@ RMSNormGated(core_attn_out, z) -> out_proj -> layer output
 
 SGLang 中 `Qwen3GatedDeltaNet` 创建：
 
-```text
 in_proj_qkvz:
-    input_size  = hidden_size
-    output part = [key_dim, key_dim, value_dim, value_dim]
+
+```math
+\mathrm{input\_size}=\mathrm{hidden\_size}
+```
+
+```math
+\text{output part}= \left[\mathrm{key\_dim}, \mathrm{key\_dim}, \mathrm{value\_dim}, \mathrm{value\_dim}\right]
 ```
 
 所以：
 
-```text
-projected_states_qkvz: [T, 2*key_dim + 2*value_dim]
+```math
+\mathrm{shape}\left(\mathrm{projected\_states\_qkvz}\right)=\left[T,2\cdot \mathrm{key\_dim}+2\cdot \mathrm{value\_dim}\right]
 ```
 
 用默认配置代入：
 
-```text
-2*key_dim + 2*value_dim
-= 2*2048 + 2*4096
-= 12288
+```math
+2\cdot \mathrm{key\_dim}+2\cdot \mathrm{value\_dim}=2\cdot 2048+2\cdot 4096=12288
 ```
 
 投影后的四段含义：
 
 | 段 | 逻辑 shape | 含义 |
 |---|---:|---|
-| `q` | `[T,H,K]` | query |
-| `k` | `[T,H,K]` | key |
-| `v` | `[T,HV,V]` | value |
-| `z` | `[T,HV,V]` | output gate/norm 的 gate 输入 |
+| `q` | $`\left[T,H,K\right]`$ | query |
+| `k` | $`\left[T,H,K\right]`$ | key |
+| `v` | $`\left[T,\mathrm{HV},V\right]`$ | value |
+| `z` | $`\left[T,\mathrm{HV},V\right]`$ | output gate/norm 的 gate 输入 |
 
 其中 `z` 不进入 recurrent state update，它用于调制 GDN 输出。
 
@@ -102,46 +125,68 @@ projected_states_qkvz: [T, 2*key_dim + 2*value_dim]
 
 以本章 Qwen3-Next 默认的 SiLU/Swish 输出门为例，源码设置 `norm_before_gate=True`。对每个 token、每个 value head，先沿 `V` 维做 RMSNorm，再逐元素相乘：
 
-```text
-o = core_attn_out[t,h,:]                         # [V]
-z = z[t,h,:]                                    # [V]
-rms = sqrt(mean(o * o) + eps)                    # scalar
-normed[t,h,:] = (weight * o / rms) * silu(z)      # [V]
-silu(z) = z * sigmoid(z)
+```math
+o={\mathrm{core\_attn\_out}}_{t,h,:}\qquad\text{[V]}
 ```
 
-这里 `weight` 是长度为 `V` 的可训练 norm 权重，`*` 是逐元素乘法。`z` 的 shape 因而和输出相同，都是 `[T,HV,V]`。SiLU 门不是 `[0,1]` 的概率：它可以大于 1，也可以为负，不能把它当成 sigmoid 门或二值开关。若模型配置显式指定其他 `output_gate_type`，应以该配置为准。
+```math
+z={z}_{t,h,:}\qquad\text{[V]}
+```
+
+```math
+\mathrm{rms}=\sqrt{\mathrm{mean}\left(o\cdot o\right)+\epsilon}\qquad\text{scalar}
+```
+
+```math
+{\mathrm{normed}}_{t,h,:}=\frac{\mathrm{weight}\odot o}{\mathrm{rms}}\odot \mathrm{silu}\left(z\right)\qquad\text{[V]}
+```
+
+```math
+\mathrm{silu}\left(z\right)=z\odot \mathrm{sigmoid}\left(z\right)
+```
+
+这里 `weight` 是长度为 `V` 的可训练 norm 权重，`*` 是逐元素乘法。`z` 的 shape 因而和输出相同，都是 $`\left[T,\mathrm{HV},V\right]`$。SiLU 门不是 $`\left[0,1\right]`$ 的概率：它可以大于 1，也可以为负，不能把它当成 sigmoid 门或二值开关。若模型配置显式指定其他 `output_gate_type`，应以该配置为准。
 
 | 控制信号 | 每 token 的 shape | 控制什么 | 直接参与当前层 recurrent state 更新？ |
 |---|---|---|---|
-| `exp(g)` | `[HV]` | 旧状态保留多少 | 是 |
-| `beta` | `[HV]` | 当前预测残差写入多少 | 是 |
-| `silu(z)` | `[HV,V]` | 读出的各个 value 通道向后续网络传递多少 | 否 |
+| $`\mathrm{exp}\left(g\right)`$ | $`\left[\mathrm{HV}\right]`$ | 旧状态保留多少 | 是 |
+| `beta` | $`\left[\mathrm{HV}\right]`$ | 当前预测残差写入多少 | 是 |
+| `silu(z)` | $`\left[\mathrm{HV},V\right]`$ | 读出的各个 value 通道向后续网络传递多少 | 否 |
 
-因此，“记住一条信息”和“当前 token 是否把它输出”可以分开控制。例如某通道的 `z=0` 时，该通道输出被置零，但这不会清空本层状态中的对应记忆；后续 token 仍可以读取它。它也不是 `core_attn_out + z`：这里是**归一化后的乘法门控**，然后才接 `out_proj`。
+因此，“记住一条信息”和“当前 token 是否把它输出”可以分开控制。例如某通道的 $`z=0`$ 时，该通道输出被置零，但这不会清空本层状态中的对应记忆；后续 token 仍可以读取它。它也不是 `core_attn_out + z`：这里是**归一化后的乘法门控**，然后才接 `out_proj`。
 
 ## 4. 输入投影：`in_proj_ba`
 
 `in_proj_ba` 输出两组 gate 激活：
 
-```text
 in_proj_ba:
-    input_size  = hidden_size
-    output part = [HV, HV]
+
+```math
+\mathrm{input\_size}=\mathrm{hidden\_size}
+```
+
+```math
+\text{output part}= \left[\mathrm{HV}, \mathrm{HV}\right]
 ```
 
 所以：
 
-```text
-projected_states_ba: [T, 2*HV]
-b: [T,HV]
-a: [T,HV]
+```math
+\mathrm{shape}\left(\mathrm{projected\_states\_ba}\right)=\left[T,2\cdot \mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(b\right)=\left[T,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(a\right)=\left[T,\mathrm{HV}\right]
 ```
 
 | 激活 | 后续计算 | 含义 |
 |---|---|---|
-| `a` | `g = -exp(A_log) * softplus(a + dt_bias)` | 控制状态遗忘 |
-| `b` | `beta = sigmoid(b)` | 控制 residual 写入强度 |
+| `a` | $`g=-\mathrm{exp}\left(A_{\mathrm{log}}\right)\cdot \mathrm{softplus}\left(a+\mathrm{dt\_bias}\right)`$ | 控制状态遗忘 |
+| `b` | $`\beta=\mathrm{sigmoid}\left(b\right)`$ | 控制 residual 写入强度 |
 
 注意：`a` 和 `b` 是 token 激活，不是参数。`in_proj_ba.weight` 是参数。
 
@@ -160,41 +205,62 @@ in_proj_a   -> in_proj_ba 的第 2 段
 
 投影输出经过 split/reshape 后得到：
 
-```text
-mixed_qkv: [T, 2*key_dim + value_dim]
-z:         [T, HV, V]
-b:         [T, HV]
-a:         [T, HV]
+```math
+\mathrm{shape}\left(\mathrm{mixed\_qkv}\right)=\left[T,2\cdot \mathrm{key\_dim}+\mathrm{value\_dim}\right]
+```
+
+```math
+\mathrm{shape}\left(z\right)=\left[T,\mathrm{HV},V\right]
+```
+
+```math
+\mathrm{shape}\left(b\right)=\left[T,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(a\right)=\left[T,\mathrm{HV}\right]
 ```
 
 默认配置：
 
+```math
+\mathrm{shape}\left(\mathrm{mixed\_qkv}\right)=\left[T,8192\right]
+```
+
+```math
+\mathrm{shape}\left(z\right)=\left[T,32,128\right]
+```
+
 ```text
-mixed_qkv: [T, 8192]
-z:         [T, 32, 128]
 b/a:       [T, 32]
 ```
 
 `mixed_qkv` 是 q/k/v 的扁平拼接：
 
-```text
-mixed_qkv = concat(flatten(q), flatten(k), flatten(v))
+```math
+\mathrm{mixed\_qkv}=\mathrm{concat}\left(\mathrm{flatten}\left(q\right),\mathrm{flatten}\left(k\right),\mathrm{flatten}\left(v\right)\right)
 ```
 
 ## 6. causal conv1d
 
 GDN 在 q/k/v 路径上加一个短 causal conv：
 
-```text
-conv_dim = 2*key_dim + value_dim
-conv_kernel_size = C
+```math
+\mathrm{conv\_dim}=2\cdot \mathrm{key\_dim}+\mathrm{value\_dim}
+```
+
+```math
+\mathrm{conv\_kernel\_size}=C
 ```
 
 对 packed q/k/v：
 
-```text
-mixed_qkv_before_conv: [T, conv_dim]
-mixed_qkv_after_conv:  [T, conv_dim]
+```math
+\mathrm{shape}\left(\mathrm{mixed\_qkv\_before\_conv}\right)=\left[T,\mathrm{conv\_dim}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{mixed\_qkv\_after\_conv}\right)=\left[T,\mathrm{conv\_dim}\right]
 ```
 
 decode 时每个请求只来一个 token，所以 conv 需要保存窗口状态：
@@ -219,7 +285,7 @@ y[t,c] = silu(w[c,0]*u[t,c]   + w[c,1]*u[t-1,c]
 
 该式对应本章默认 SiLU、无 bias 的路径；存储中的卷积权重顺序由 kernel 决定。它只访问当前位置及过去 `C-1` 个位置，不读取未来 token，因此满足自回归因果性。新请求序列开头的缺失历史视作零，继续已有请求则读取该请求的 conv state。packed batch 必须按请求边界分别处理，不能把上一个请求的末尾当成下一个请求的历史。
 
-卷积与 SiLU 不改变 `[T,conv_dim]` 的 shape，但改变每个位置的特征。q/k 随后还会做 L2 normalization（可以融合在 GDN kernel 内）；这与输出端 RMSNorm 是不同步骤。`z/a/b` 不经过这里的短卷积。
+卷积与 SiLU 不改变 $`\left[T,\mathrm{conv\_dim}\right]`$ 的 shape，但改变每个位置的特征。q/k 随后还会做 L2 normalization（可以融合在 GDN kernel 内）；这与输出端 RMSNorm 是不同步骤。`z/a/b` 不经过这里的短卷积。
 
 ### 6.2 为什么引入它：局部顺序特征 + 长期关联记忆
 
@@ -227,7 +293,7 @@ y[t,c] = silu(w[c,0]*u[t,c]   + w[c,1]*u[t-1,c]
 
 - **局部位置建模**：不同滞后量有不同权重，模型可以学到“前一个 token”和“前三个 token”的不同作用。例如窗口覆盖“not good”时，`good` 位置的特征可以包含前面的否定信息。这个例子说明可表达的能力，不表示某个卷积核一定学到了该规则。
 - **长期内容关联**：GDN 用固定大小的矩阵保存并更新 key→value 关联。短卷积先构造带局部上下文的查询、写入地址和内容，再交给矩阵记忆处理，减少其独自承担局部模式建模的负担。
-- **较低的额外成本**：固定 `C` 时，短卷积计算量为 `O(T * conv_dim * C)`，decode 只需保留每通道最近 `C-1` 个输入，与上下文长度无关。该成本是额外开销；引入卷积的主要目的在于建模质量。
+- **较低的额外成本**：固定 `C` 时，短卷积计算量为 $`O\left(T\cdot \mathrm{conv\_dim}\cdot C\right)`$，decode 只需保留每通道最近 `C-1` 个输入，与上下文长度无关。该成本是额外开销；引入卷积的主要目的在于建模质量。
 
 这是一种局部性与相对顺序的归纳偏置。即使没有短卷积，GDN 的顺序递归本身仍对顺序敏感，`hidden_states` 也可能已经包含前面层的上下文；不能说“不加卷积就完全不知道 token 顺序”。卷积也不等于 RoPE，更不是让 delta rule 数学上成立的必要条件。
 
@@ -247,16 +313,22 @@ y[t,c] = silu(w[c,0]*u[t,c]   + w[c,1]*u[t-1,c]
 
 conv 后再 split：
 
-```text
-query: [1,T,H,K]
-key:   [1,T,H,K]
-value: [1,T,HV,V]
+```math
+\mathrm{shape}\left(\mathrm{query}\right)=\left[1,T,H,K\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{key}\right)=\left[1,T,H,K\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{value}\right)=\left[1,T,\mathrm{HV},V\right]
 ```
 
 为什么第一维是 `1`？在线 serving 常把不同长度请求 packed 成一个 token 维度：
 
-```text
-query_start_loc: [N+1]
+```math
+\mathrm{shape}\left(\mathrm{query\_start\_loc}\right)=\left[N+1\right]
 ```
 
 用于描述每条请求在 packed token 序列里的起止位置。此时 batch 维常写成 `1`，真正的请求边界由 `cu_seqlens/query_start_loc` 表示。
@@ -265,27 +337,44 @@ query_start_loc: [N+1]
 
 对于 prefill/extend，SGLang 会调用 fused gating：
 
-```text
-g, beta = fused_gdn_gating(A_log, a, b, dt_bias)
+```math
+\text{g, beta}= \mathrm{fused\_gdn\_gating}\left(A_{\mathrm{log}}, a, b, \mathrm{dt\_bias}\right)
 ```
 
 逻辑 shape：
 
-```text
-a:     [T,HV]
-b:     [T,HV]
-A_log: [HV]
-dt_bias:[HV]
+```math
+\mathrm{shape}\left(a\right)=\left[T,\mathrm{HV}\right]
+```
 
-g:     [1,T,HV]
-beta:  [1,T,HV]
+```math
+\mathrm{shape}\left(b\right)=\left[T,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(A_{\mathrm{log}}\right)=\left[\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{dt\_bias}\right)=\left[\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(g\right)=\left[1,T,\mathrm{HV}\right]
+```
+
+```math
+\mathrm{shape}\left(\beta\right)=\left[1,T,\mathrm{HV}\right]
 ```
 
 公式：
 
-```text
-g[t,h] = -exp(A_log[h]) * softplus(a[t,h] + dt_bias[h])
-beta[t,h] = sigmoid(b[t,h])
+```math
+{g}_{t,h}=-\mathrm{exp}\left({A_{\mathrm{log}}}_{h}\right)\cdot \mathrm{softplus}\left({a}_{t,h}+{\mathrm{dt\_bias}}_{h}\right)
+```
+
+```math
+{\beta}_{t,h}=\mathrm{sigmoid}\left({b}_{t,h}\right)
 ```
 
 decode packed fast path 会把这个计算融合进 recurrent kernel，避免单独 materialize `q/k/v/g/beta`。
@@ -294,8 +383,8 @@ decode packed fast path 会把这个计算融合进 recurrent kernel，避免单
 
 GDN 的状态池在 serving 中和 Mamba state 放在同类 memory pool 中。逻辑上：
 
-```text
-ssm_states: [num_slots, HV, V, K]
+```math
+\mathrm{shape}\left(\mathrm{ssm\_states}\right)=\left[\mathrm{num\_slots},\mathrm{HV},V,K\right]
 ```
 
 | 维度 | 含义 |
@@ -307,20 +396,20 @@ ssm_states: [num_slots, HV, V, K]
 
 单个请求、单层的状态大小：
 
-```text
-HV * V * K
+```math
+\mathrm{HV}\cdot V\cdot K
 ```
 
 默认配置：
 
-```text
-32 * 128 * 128 = 524288 elements
+```math
+32 \cdot  128 \cdot  128 = 524288 \mathrm{elements}
 ```
 
 如果用 BF16 存储：
 
-```text
-524288 * 2 bytes = 1 MiB per linear-attention layer per request slot
+```math
+524288 \cdot  2 \mathrm{bytes} = 1 \mathrm{MiB} \mathrm{per} \mathrm{linear}-\mathrm{attention} \mathrm{layer} \mathrm{per} \mathrm{request} \mathrm{slot}
 ```
 
 这只是指定 dtype 的算例。本仓库 `mamba2_state_dtype()` 的 recurrent state 默认是 FP32，此时为 **2 MiB**；配置或环境变量可以覆盖它。以上只计算 recurrent state，不包含 conv state、额外缓存槽位和临时缓冲。它看起来不小，但关键是它不随历史 token 数增长。
@@ -329,10 +418,15 @@ HV * V * K
 
 因为每个 value head **只对应一个** q/k head，不会与全部 `H` 个 q/k heads 两两组合。对 value head `h_v`，对应的 q/k head 是：
 
-```text
-R = HV // H
-h_k = h_v // R
+```math
+R=\left\lfloor\frac{\mathrm{HV}}{H}\right\rfloor
+```
 
+```math
+h_{k}=\left\lfloor\frac{h_{v}}{R}\right\rfloor
+```
+
+```text
 H = 16, HV = 32, R = 2:
 q/k head 0  -> value heads 0, 1   -> S[0], S[1]
 q/k head 1  -> value heads 2, 3   -> S[2], S[3]
@@ -344,24 +438,45 @@ q/k head 15 -> value heads 30, 31 -> S[30], S[31]
 
 把第 01 讲的单 head 公式补上 head 下标，就能直接看出 shape（q/k 已归一化，读取缩放单独写出）：
 
-```text
-q = query[t,h_k,:]                         # [K]
-k = key[t,h_k,:]                           # [K]
-v = value[t,h_v,:]                         # [V]
-S_decay = exp(g[t,h_v]) * S_prev[h_v]       # [V,K]
-r = v - S_decay @ k                        # [V]
-S_new[h_v] = S_decay + beta[t,h_v] * r[:,None] * k[None,:]
-o[t,h_v,:] = S_new[h_v] @ (q * scale)       # [V]
+```math
+q={\mathrm{query}}_{t,h_{k},:}\qquad\text{[K]}
 ```
 
-一个状态矩阵实现从 `K` 维 key/query 空间到 `V` 维 value 空间的映射，因此是 `[V,K]`；共有 `HV` 个这样的矩阵，所以整体是 `[HV,V,K]`。`q` 只用来读取，无须另存一份 query state。q/k 的维度已体现在 `K` 中，q/k 的 head 数则体现在分组关系里：
+```math
+k={\mathrm{key}}_{t,h_{k},:}\qquad\text{[K]}
+```
+
+```math
+v={\mathrm{value}}_{t,h_{v},:}\qquad\text{[V]}
+```
+
+```math
+S_{\mathrm{decay}}=\mathrm{exp}\left({g}_{t,h_{v}}\right)\cdot {S_{\mathrm{prev}}}_{h_{v}}\qquad\text{[V,K]}
+```
+
+```math
+r=v-S_{\mathrm{decay}}\,k\qquad\text{[V]}
+```
+
+```text
+S_new[h_v] = S_decay + beta[t,h_v] * r[:,None] * k[None,:]
+```
+
+```math
+{o}_{t,h_{v},:}={S_{\mathrm{new}}}_{h_{v}}\,q\cdot \mathrm{scale}\qquad\text{[V]}
+```
+
+一个状态矩阵实现从 `K` 维 key/query 空间到 `V` 维 value 空间的映射，因此是 $`\left[V,K\right]`$；共有 `HV` 个这样的矩阵，所以整体是 $`\left[\mathrm{HV},V,K\right]`$。`q` 只用来读取，无须另存一份 query state。q/k 的维度已体现在 `K` 中，q/k 的 head 数则体现在分组关系里：
 
 ```text
 [HV,V,K] == reshape([H,R,V,K])
-HV * V * K = H * R * V * K
 ```
 
-所以 `H` 并没有被“漏算”；它已通过 `HV = H * R` 计入。再乘一次 `H`，相当于为不存在的所有 q/k-head × value-head 配对分配状态。即使 `H=HV`，也只有 `H` 个状态矩阵，而不是 `H*H` 个。
+```math
+\mathrm{HV}\cdot V\cdot K=H\cdot R\cdot V\cdot K
+```
+
+所以 `H` 并没有被“漏算”；它已通过 $`\mathrm{HV}=H\cdot R`$ 计入。再乘一次 `H`，相当于为不存在的所有 q/k-head × value-head 配对分配状态。即使 $`H=\mathrm{HV}`$，也只有 `H` 个状态矩阵，而不是 `H*H` 个。
 
 ### 9.2 对照 kernel 与 TP 下的显存计算
 
@@ -371,45 +486,54 @@ HV * V * K = H * R * V * K
 i_h = i_hv // (HV // H)
 ```
 
-q/k 按 `i_h` 寻址，v 与 state 按 `i_hv` 寻址；state 中一个 head 的偏移是 `i_hv * V * K`。这就是上面分组推导在代码中的实现，不需要先物理复制 q/k 才能表达共享。
+q/k 按 `i_h` 寻址，v 与 state 按 `i_hv` 寻址；state 中一个 head 的偏移是 $`i_{\mathrm{hv}}\cdot V\cdot K`$。这就是上面分组推导在代码中的实现，不需要先物理复制 q/k 才能表达共享。
 
-在 head 数可整除的常规 attention TP 切分下，若 TP degree 为 `P`，每个 rank 的状态为 `[num_slots,HV/P,V,K]`。单请求单层的每卡字节数为 `(HV/P)*V*K*state_element_bytes`，跨 rank 合计仍为 `HV*V*K*state_element_bytes`。有 head padding 或特殊 backend 布局时，应以实际分配为准。
+在 head 数可整除的常规 attention TP 切分下，若 TP degree 为 `P`，每个 rank 的状态为 $`\left[\mathrm{num\_slots},\frac{\mathrm{HV}}{P},V,K\right]`$。单请求单层的每卡字节数为 `(HV/P)*V*K*state_element_bytes`，跨 rank 合计仍为 `HV*V*K*state_element_bytes`。有 head padding 或特殊 backend 布局时，应以实际分配为准。
 
-另一个容易混淆的点是：**卷积状态仍直接包含 `H`**，其逻辑元素数为 `(2*H*K + HV*V)*(C-1)`。它保存短窗口的 q/k/v 投影；recurrent state 保存 key→value 的矩阵记忆，两者不是同一个缓存。
+另一个容易混淆的点是：**卷积状态仍直接包含 `H`**，其逻辑元素数为 $`\left(2\cdot H\cdot K+\mathrm{HV}\cdot V\right)\cdot \left(C-1\right)`$。它保存短窗口的 q/k/v 投影；recurrent state 保存 key→value 的矩阵记忆，两者不是同一个缓存。
 
 ## 10. GDN kernel 输出
 
 GDN recurrent/chunk kernel 输出：
 
-```text
-core_attn_out: [1,T,HV,V]
+```math
+\mathrm{shape}\left(\mathrm{core\_attn\_out}\right)=\left[1,T,\mathrm{HV},V\right]
 ```
 
 随后会 reshape：
 
-```text
-core_attn_out: [T, HV, V]
-z:             [T, HV, V]
+```math
+\mathrm{shape}\left(\mathrm{core\_attn\_out}\right)=\left[T,\mathrm{HV},V\right]
+```
+
+```math
+\mathrm{shape}\left(z\right)=\left[T,\mathrm{HV},V\right]
 ```
 
 然后进入 gated norm：
 
-```text
-normed = RMSNormGated(core_attn_out, z)
-normed: [T, HV, V]
+```math
+\mathrm{normed}=\mathrm{RMSNormGated}\left(\mathrm{core\_attn\_out},z\right)
+```
+
+```math
+\mathrm{shape}\left(\mathrm{normed}\right)=\left[T,\mathrm{HV},V\right]
 ```
 
 再 flatten：
 
-```text
-normed_flat: [T, HV*V] = [T, value_dim]
+```math
+\mathrm{normed\_flat}: \left[T, \mathrm{HV}\cdot V\right] = \left[T, \mathrm{value\_dim}\right]
 ```
 
 最后 out projection：
 
 ```text
 out_proj: [value_dim -> hidden_size]
-output:   [T, H_model]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{output}\right)=\left[T,H_{\mathrm{model}}\right]
 ```
 
 这个输出再回到 decoder layer 的残差/MLP/MoE 路径。
@@ -418,48 +542,60 @@ output:   [T, H_model]
 
 decode 每条请求通常一个新 token：
 
-```text
-hidden_states: [B,H_model]
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[B,H_{\mathrm{model}}\right]
 ```
 
 流程：
 
 ```text
 1. in_proj_qkvz:
-       [B,H_model] -> [B,2*key_dim+2*value_dim]
-
+[B,H_model] -> [B,2*key_dim+2*value_dim]
 2. in_proj_ba:
-       [B,H_model] -> [B,2*HV]
-
+[B,H_model] -> [B,2*HV]
 3. split:
-       mixed_qkv: [B,2*key_dim+value_dim]
-       z:         [B,HV,V]
-       a,b:       [B,HV]
+```
 
+```math
+\mathrm{shape}\left(\mathrm{mixed\_qkv}\right)=\left[B,2\cdot \mathrm{key\_dim}+\mathrm{value\_dim}\right]
+```
+
+```math
+\mathrm{shape}\left(z\right)=\left[B,\mathrm{HV},V\right]
+```
+
+```text
+a,b:       [B,HV]
 4. causal_conv1d_update:
-       mixed_qkv + conv_states -> mixed_qkv_after_conv [B,conv_dim]
-       conv_states 原地更新
-
+mixed_qkv + conv_states -> mixed_qkv_after_conv [B,conv_dim]
+conv_states 原地更新
 5. packed recurrent kernel:
-       读取 ssm_states[cache_indices]
-       计算 q/k/v/g/beta
-       更新 ssm_states[cache_indices]
-       输出 core_attn_out [1,B,HV,V]
-
+读取 ssm_states[cache_indices]
+计算 q/k/v/g/beta
+更新 ssm_states[cache_indices]
+输出 core_attn_out [1,B,HV,V]
 6. RMSNormGated(core_attn_out, z):
-       [B,HV,V]
+```
 
+```math
+\left[B,\mathrm{HV},V\right]
+```
+
+```text
 7. out_proj:
-       [B,HV*V] -> [B,H_model]
+[B,HV*V] -> [B,H_model]
 ```
 
 ## 12. prefill/extend 的端到端流程
 
 prefill/extend 一次处理多 token：
 
-```text
-hidden_states: [T,H_model]
-query_start_loc: [N+1]
+```math
+\mathrm{shape}\left(\mathrm{hidden\_states}\right)=\left[T,H_{\mathrm{model}}\right]
+```
+
+```math
+\mathrm{shape}\left(\mathrm{query\_start\_loc}\right)=\left[N+1\right]
 ```
 
 流程：
@@ -500,21 +636,21 @@ disable_state_update=True:
 
 | 阶段 | 张量 | shape |
 |---|---|---:|
-| 输入 | `hidden_states` | `[T,H_model]` |
-| qkvz 投影 | `projected_states_qkvz` | `[T,2*H*K+2*HV*V]` |
-| ba 投影 | `projected_states_ba` | `[T,2*HV]` |
-| split 后 | `mixed_qkv` | `[T,2*H*K+HV*V]` |
-| split 后 | `z` | `[T,HV,V]` |
-| split 后 | `a,b` | `[T,HV]` |
-| conv 后 | `mixed_qkv` | `[T,2*H*K+HV*V]` |
-| recurrent 输入 | `q,k` | `[1,T,H,K]` |
-| recurrent 输入 | `v` | `[1,T,HV,V]` |
-| gating | `g,beta` | `[1,T,HV]` |
-| state pool | `ssm_states` | `[num_slots,HV,V,K]` |
-| recurrent 输出 | `core_attn_out` | `[1,T,HV,V]` |
-| gate/norm 后 | `normed` | `[T,HV,V]` |
-| flatten | `normed_flat` | `[T,HV*V]` |
-| out projection | `output` | `[T,H_model]` |
+| 输入 | `hidden_states` | $`\left[T,H_{\mathrm{model}}\right]`$ |
+| qkvz 投影 | `projected_states_qkvz` | $`\left[T,2\cdot H\cdot K+2\cdot \mathrm{HV}\cdot V\right]`$ |
+| ba 投影 | `projected_states_ba` | $`\left[T,2\cdot \mathrm{HV}\right]`$ |
+| split 后 | `mixed_qkv` | $`\left[T,2\cdot H\cdot K+\mathrm{HV}\cdot V\right]`$ |
+| split 后 | `z` | $`\left[T,\mathrm{HV},V\right]`$ |
+| split 后 | `a,b` | $`\left[T,\mathrm{HV}\right]`$ |
+| conv 后 | `mixed_qkv` | $`\left[T,2\cdot H\cdot K+\mathrm{HV}\cdot V\right]`$ |
+| recurrent 输入 | `q,k` | $`\left[1,T,H,K\right]`$ |
+| recurrent 输入 | `v` | $`\left[1,T,\mathrm{HV},V\right]`$ |
+| gating | `g,beta` | $`\left[1,T,\mathrm{HV}\right]`$ |
+| state pool | `ssm_states` | $`\left[\mathrm{num\_slots},\mathrm{HV},V,K\right]`$ |
+| recurrent 输出 | `core_attn_out` | $`\left[1,T,\mathrm{HV},V\right]`$ |
+| gate/norm 后 | `normed` | $`\left[T,\mathrm{HV},V\right]`$ |
+| flatten | `normed_flat` | $`\left[T,\mathrm{HV}\cdot V\right]`$ |
+| out projection | `output` | $`\left[T,H_{\mathrm{model}}\right]`$ |
 
 ## 15. 小结
 
@@ -522,7 +658,7 @@ disable_state_update=True:
 2. `q/k/v` 经过短 causal conv 后进入 recurrent/chunk kernel。
 3. `a/b` 生成 `g/beta`，控制状态遗忘和写入。
 4. `z` 不写入状态，而是在输出阶段调制 `core_attn_out`。
-5. GDN 状态是 `[num_slots,HV,V,K]`，按请求槽位保存，不随 token 数增长。
+5. GDN 状态是 $`\left[\mathrm{num\_slots},\mathrm{HV},V,K\right]`$，按请求槽位保存，不随 token 数增长。
 
 ## 16. 源码与论文核对入口
 

@@ -56,7 +56,7 @@ Benchmark 首次调用时可能包含编译时间，不能拿第一次 wall time
 
 | 检查对象 | 应记录的内容 | 典型错误 |
 |---|---|---|
-| kernel pointer 形参 | `pointer<element_dtype>[]` | wrapper 传错 dtype，导致 JIT 生成了不同变体 |
+| kernel pointer 形参 | $`\mathrm{pointer} \lt \mathrm{element\_dtype} \gt \left[\right]`$ | wrapper 传错 dtype，导致 JIT 生成了不同变体 |
 | pointer arithmetic 结果 | `pointer<element_dtype>[block shape]` | 广播出意外二维/三维地址块，UB 预算暴涨 |
 | offset | 整数标量或整数 block，单位为元素 | 把字节 stride 当元素 stride，地址成倍偏移 |
 | mask | `int1[pointer block shape]` | shape 虽能广播，但保护了错误维度 |

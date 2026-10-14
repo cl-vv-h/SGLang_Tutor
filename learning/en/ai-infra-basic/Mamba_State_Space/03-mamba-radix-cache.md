@@ -18,7 +18,7 @@ At each radix tree node (representing a prefix), SGLang saves:
 mamba_state = {layer_idx: state_tensor}
 ```
 
-Where `state_tensor` has shape `[D_state]` (or `[N_ssm_heads, D_state_per_head]`) for each Mamba layer.
+Where `state_tensor` has shape $`\left[D_{\mathrm{state}}\right]`$ (or $`\left[\mathrm{N\_ssm\_heads},\mathrm{D\_state\_per\_head}\right]`$) for each Mamba layer.
 
 When a new request's prompt matches a cached prefix:
 1. The Mamba state is restored from the radix node
@@ -38,7 +38,7 @@ When a new request's prompt matches a cached prefix:
 
 When prefill and decode are separated (PD disaggregation):
 - The prefill worker computes and sends the final Mamba state to the decode worker
-- Unlike KV Cache transfer (which may involve large tensor transfers), Mamba state transfer is lightweight: `O(L_mamba × D_state)` bytes
+- Unlike KV Cache transfer (which may involve large tensor transfers), Mamba state transfer is lightweight: $`O\left(L_{\mathrm{mamba}}\cdot D_{\mathrm{state}}\right)`$ bytes
 
 ## 5. SGLang Code References
 

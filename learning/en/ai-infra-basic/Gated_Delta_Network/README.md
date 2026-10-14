@@ -24,8 +24,8 @@ In this topic, **GDN** means **Gated Delta Network / Gated DeltaNet**, the linea
 | Is the GDN state a parameter? | No. `S_t` or `ssm_states` is per-request runtime cache, similar to Mamba state, and is not updated by the optimizer. |
 | What is trainable? | Input projections, short convolution, `A_log`, `dt_bias`, output-gated normalization, output projection, and the model's other MLP/MoE/embedding weights. |
 | Are `a` and `b` parameters? | No. They are token-level activations produced by linear projections from hidden states; the projection weights that produce them are parameters. |
-| Are `g` and `beta` parameters? | No. `g = -exp(A_log) * softplus(a + dt_bias)` and `beta = sigmoid(b)`. They are control signals computed from parameters and activations. |
-| Why is GDN useful for long context? | Per-layer per-request state is roughly `num_value_heads * value_dim * key_dim`, and does not grow linearly with historical token count. |
+| Are `g` and `beta` parameters? | No. $`g=-\mathrm{exp}\left(A_{\mathrm{log}}\right)\cdot \mathrm{softplus}\left(a+\mathrm{dt\_bias}\right)`$ and $`\beta=\mathrm{sigmoid}\left(b\right)`$. They are control signals computed from parameters and activations. |
+| Why is GDN useful for long context? | Per-layer per-request state is roughly $`\mathrm{num\_value\_heads}\cdot \mathrm{value\_dim}\cdot \mathrm{key\_dim}`$, and does not grow linearly with historical token count. |
 | How does KDA differ? | GDN applies one retention scalar per token/head; Kimi Delta Attention applies a vector over key channels so state columns can decay independently. |
 
 After these three chapters, continue with [Kimi Delta Attention](../Model_Architecture/09-kimi-delta-attention.md) to see how fine-grained gating changes the recurrence, kernels, and serving-state contract.

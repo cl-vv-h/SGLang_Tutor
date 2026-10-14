@@ -42,10 +42,16 @@ GVA, Global Virtual Address, is the global virtual-address mapping provided by M
 
 [MemFabricBoostrap::CreateSHMSpace()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/bootstrap/memory/memfabric/zbal_mem_mf_bootstrap.cpp#L85) calls `SmemShmInit()`, `SmemShmCreate()`, and `SmemShmGetSymmetricSize()` to obtain the GVA base and symmetric address stride per rank. Its calculation can be summarized as:
 
+```math
+A=\mathrm{deviceGva}
+```
+
 ```text
-A = deviceGva
 S = symmetric address-space stride per world rank
-local_base(world_rank) = A + world_rank * S
+```
+
+```math
+\mathrm{local\_base}\left(\mathrm{world\_rank}\right) = A + \mathrm{world\_rank} \cdot  S
 ```
 
 `S` is the queried address-space stride, not a tensor length or a configured number of used bytes.
@@ -62,13 +68,19 @@ The mechanism combines **addressable memory, tensor allocation, and a kernel add
 
 The core translation in [zbal_ptr()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/operators/npu/device/common/zbal_kernel_utils.h#L88) is:
 
-```text
-remote_meta = local_meta + (world_dst - world_src) * S
-world_src = peerRanks[group_src]
-world_dst = peerRanks[group_dst]
+```math
+\mathrm{remote\_meta}=\mathrm{local\_meta}+\left(\mathrm{world\_dst}-\mathrm{world\_src}\right)\cdot S
 ```
 
-This applies to protocol regions placed at matching offsets, such as metadata. For a subgroup containing world ranks `[1,3]`, going from group rank 0 to group rank 1 crosses `2*S`, not `1*S`.
+```math
+\mathrm{world\_src}={\mathrm{peerRanks}}_{\mathrm{group\_src}}
+```
+
+```math
+\mathrm{world\_dst}={\mathrm{peerRanks}}_{\mathrm{group\_dst}}
+```
+
+This applies to protocol regions placed at matching offsets, such as metadata. For a subgroup containing world ranks $`\left[1,3\right]`$, going from group rank 0 to group rank 1 crosses $`2\cdot S`$, not $`1\cdot S`$.
 
 **Application tensors can be allocated asymmetrically.** Normal dispatch publishes and reads actual addresses for `x`, `expandx_out`, and other tensors through `PutShareAddr()/GetShareAddr()`. It does not assume the peer's output tensor has the same offset as the local one. Symmetric metadata locates the address tables; those tables locate each rank's payload.
 
@@ -98,7 +110,7 @@ An extra local copy of an `M`-byte payload creates at least approximately `M` by
 
 ### 4.1 Host Code Passes Tensor data_ptr Values to the Operator
 
-The contiguous-output [ProcessGroupZBAL::_allgather_base()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/adaptor/pytorch_npu/zbal_pytorch_process_group.cpp#L468) checks `output.numel = P * input.numel`, obtains input/output `data_ptr()` values, and calls `zbal_all_gather()`. Its post callback is empty.
+The contiguous-output [ProcessGroupZBAL::_allgather_base()](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/adaptor/pytorch_npu/zbal_pytorch_process_group.cpp#L468) checks $`\mathrm{output}.\mathrm{numel} = P \cdot  \mathrm{input}.\mathrm{numel}`$, obtains input/output `data_ptr()` values, and calls `zbal_all_gather()`. Its post callback is empty.
 
 ### 4.2 Device Code Uses the Result Tensor for Ring Propagation
 
@@ -116,7 +128,7 @@ The dataflow in [BigKernel::Process()](https://github.com/Ascend/memfabric_hybri
 7. BarrierAll before completion
 ```
 
-For example, with two ranks, each input is `[m]` and each output is `[2*m]`:
+For example, with two ranks, each input is $`\left[m\right]`$ and each output is $`\left[2\cdot m\right]`$:
 
 ```mermaid
 flowchart LR
@@ -155,11 +167,20 @@ Fields such as `num_nvl_bytes` and `num_rdma_bytes` retain DeepEP-style names. A
 
 Kernel [PutShareAddr/GetShareAddr](https://github.com/Ascend/memfabric_hybrid/blob/004d9317289fe99bd6bf13def0500b3fa3795ccc/app/zbal/src/csrc/operators/npu/device/dispatch_combine_normal/zbal_kernel_dispatch_normal.h#L292) exchange each rank's input, routing, offset, output, and scale addresses. In the direct-send `InputToDstOutput()` branch, the destination row calculation is:
 
-```text
-dst_rank = expert_id // experts_per_rank
-base_row = put_offset_flat[expert_id * P + src_rank]
-row = base_row + send_token_idx[token_assignment]
-dst_addr = shared_expandx_out_addr[dst_rank] + aligned_row_bytes * row
+```math
+\mathrm{dst\_rank}=\left\lfloor\frac{\mathrm{expert\_id}}{\mathrm{experts\_per\_rank}}\right\rfloor
+```
+
+```math
+\mathrm{base\_row}={\mathrm{put\_offset\_flat}}_{\mathrm{expert\_id}\cdot P+\mathrm{src\_rank}}
+```
+
+```math
+\mathrm{row}=\mathrm{base\_row}+{\mathrm{send\_token\_idx}}_{\mathrm{token\_assignment}}
+```
+
+```math
+\mathrm{dst\_addr}={\mathrm{shared\_expandx\_out\_addr}}_{\mathrm{dst\_rank}}+\mathrm{aligned\_row\_bytes}\cdot \mathrm{row}
 ```
 
 This deliberately uses the kernel's **flat indexing**; do not infer different indexing from a host-allocated two-dimensional shape. `aligned_row_bytes` corresponds to `hUBAlignSize` in the implementation, so alignment must be preserved.
@@ -219,7 +240,7 @@ SGLang's [init_zbal()/lazy_init_zbal_gva_mem()](../../../../python/sglang/srt/ha
 
 Thus “weights/KV use DMA/VMM while activations use GVA” is an intended usage **implemented through allocation timing**, not semantic tensor-label recognition. Other tensors created after initialization also follow the active allocation path.
 
-The current SGLang helper contains a `total_memory = 61.2` estimate, budget subtraction, and 128 MiB alignment. These are baseline platform assumptions, not universal NPU capacity settings. `SGLANG_ZBAL_LOCAL_MEM_SIZE` is a memory budget, not a requirement to reserve an additional send/receive staging allocation of the same size.
+The current SGLang helper contains a $`\mathrm{total\_memory}=61.2`$ estimate, budget subtraction, and 128 MiB alignment. These are baseline platform assumptions, not universal NPU capacity settings. `SGLANG_ZBAL_LOCAL_MEM_SIZE` is a memory budget, not a requirement to reserve an additional send/receive staging allocation of the same size.
 
 ## 8. Memory, Copies, and Synchronization That Remain in the Source
 

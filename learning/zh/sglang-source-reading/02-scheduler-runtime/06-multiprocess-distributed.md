@@ -289,7 +289,7 @@ flowchart TD
 PP 维度把模型层分成多个 pipeline stage。`SchedulerRequestReceiver._pull_raw_reqs()` 中可以看到：
 
 - `pp_rank == 0` 的 leader 从 tokenizer/RPC 收请求。
-- `pp_rank > 0` 的 leader 通过 `point_to_point_pyobj()` 从前一个 PP stage 接收请求对象。
+- $`\mathrm{pp\_rank} \gt 0`$ 的 leader 通过 `point_to_point_pyobj()` 从前一个 PP stage 接收请求对象。
 
 ```mermaid
 flowchart LR
@@ -386,7 +386,7 @@ flowchart TD
 |---|---|---|---|
 | OS 进程 | `Scheduler` 子进程、`DataParallelController` 子进程、`DetokenizerManager` 子进程、主进程中的 `TokenizerManager` | 不完全一一对应 | 模型计算 rank 通常是一个 Scheduler 子进程；Tokenizer/Detokenizer 通常不绑定 GPU/NPU。 |
 | GPU / NPU / device | `gpu_id` / `local_rank` | 通常一个模型 rank 绑定一个加速器 device | `Engine._launch_scheduler_processes()` 计算 `gpu_id`，传给 `run_scheduler_process()`、`TpModelWorker`、`ModelRunner`。变量仍叫 `gpu_id`，但 `device="npu"` 时表示本地 NPU 索引。 |
-| global rank | torch distributed world 内的 rank | 一个模型计算进程一个 global rank | 在 `ModelRunner.init_torch_distributed()` 中，rank 计算为 `tp_size * pp_rank + tp_rank`。 |
+| global rank | torch distributed world 内的 rank | 一个模型计算进程一个 global rank | 在 `ModelRunner.init_torch_distributed()` 中，rank 计算为 $`\mathrm{tp\_size}\cdot \mathrm{pp\_rank}+\mathrm{tp\_rank}`$。 |
 | logical rank | `tp_rank`、`pp_rank`、`dp_rank`、`attn_cp_rank`、`moe_ep_rank` 等 | 一个进程同时拥有多个 logical rank | 同一个进程/device 会在 TP、PP、DP attention、MoE EP 等多个维度中分别有自己的 rank。 |
 | process group | `get_tp_group()`、`get_pp_group()`、`get_attn_tp_group()` 等 | 一个进程可加入多个 group | group 是 collective 的边界；不同并行策略使用不同 group 通信。 |
 
@@ -425,9 +425,12 @@ flowchart TD
 
 `ModelRunner.init_torch_distributed()` 中初始化 torch distributed 时，global rank 是：
 
-```text
-global_rank = tp_size * pp_rank + tp_rank
-world_size  = tp_size * pp_size
+```math
+\mathrm{global\_rank}=\mathrm{tp\_size}\cdot \mathrm{pp\_rank}+\mathrm{tp\_rank}
+```
+
+```math
+\mathrm{world\_size}=\mathrm{tp\_size}\cdot \mathrm{pp\_size}
 ```
 
 这意味着在一个 DP group 内，SGLang 的模型计算 world 可以先看成二维矩阵：
@@ -439,12 +442,12 @@ pp_rank 0    r0   r1   r2   r3
 pp_rank 1    r4   r5   r6   r7
 ```
 
-如果 `tp_size=4`、`pp_size=2`，则：
+如果 $`\mathrm{tp\_size}=4`$、$`\mathrm{pp\_size}=2`$，则：
 
-- `pp_rank=0,tp_rank=0` 的 global rank 是 `0`
-- `pp_rank=0,tp_rank=3` 的 global rank 是 `3`
-- `pp_rank=1,tp_rank=0` 的 global rank 是 `4`
-- `pp_rank=1,tp_rank=3` 的 global rank 是 `7`
+- $`\mathrm{pp\_rank}=0,\qquad \mathrm{tp\_rank}=0`$ 的 global rank 是 `0`
+- $`\mathrm{pp\_rank}=0,\qquad \mathrm{tp\_rank}=3`$ 的 global rank 是 `3`
+- $`\mathrm{pp\_rank}=1,\qquad \mathrm{tp\_rank}=0`$ 的 global rank 是 `4`
+- $`\mathrm{pp\_rank}=1,\qquad \mathrm{tp\_rank}=3`$ 的 global rank 是 `7`
 
 `initialize_model_parallel()` 会基于这个 world 创建不同 group：
 
@@ -462,12 +465,12 @@ flowchart TD
 
 ### TP 与 PP group 怎么看
 
-以 8 个 rank、`tp_size=2`、`pp_size=4` 为例，`initialize_model_parallel()` 注释中的 group 是：
+以 8 个 rank、$`\mathrm{tp\_size}=2`$、$`\mathrm{pp\_size}=4`$ 为例，`initialize_model_parallel()` 注释中的 group 是：
 
 | group 类型 | group 列表 | 含义 |
 |---|---|---|
-| TP group | `[g0,g1]`、`[g2,g3]`、`[g4,g5]`、`[g6,g7]` | 每个 PP stage 内，两个 TP rank 合作算该 stage 的层。 |
-| PP group | `[g0,g2,g4,g6]`、`[g1,g3,g5,g7]` | 固定同一个 TP 分片编号，跨 PP stage 传 hidden states。 |
+| TP group | $`\left[\mathrm{g0},\mathrm{g1}\right]`$、$`\left[\mathrm{g2},\mathrm{g3}\right]`$、$`\left[\mathrm{g4},\mathrm{g5}\right]`$、$`\left[\mathrm{g6},\mathrm{g7}\right]`$ | 每个 PP stage 内，两个 TP rank 合作算该 stage 的层。 |
+| PP group | $`\left[\mathrm{g0},\mathrm{g2},\mathrm{g4},\mathrm{g6}\right]`$、$`\left[\mathrm{g1},\mathrm{g3},\mathrm{g5},\mathrm{g7}\right]`$ | 固定同一个 TP 分片编号，跨 PP stage 传 hidden states。 |
 
 换句话说：
 
@@ -486,11 +489,13 @@ attn_tp_size = tp_size / attn_dp_size / attn_cp_size
 attn_dp_size = dp_size if enable_dp_attention else 1
 ```
 
-如果 `tp_size=8`、`enable_dp_attention=True`、`dp_size=2`、`attn_cp_size=2`：
+如果 $`\mathrm{tp\_size}=8`$、`enable_dp_attention=True`、$`\mathrm{dp\_size}=2`$、$`\mathrm{attn\_cp\_size}=2`$：
+
+```math
+\mathrm{attn\_tp\_size}=\frac{\frac{8}{2}}{2}=2
+```
 
 ```text
-attn_tp_size = 8 / 2 / 2 = 2
-
 tp_rank 0 -> attn_dp_rank=0, attn_cp_rank=0, attn_tp_rank=0
 tp_rank 1 -> attn_dp_rank=0, attn_cp_rank=0, attn_tp_rank=1
 tp_rank 2 -> attn_dp_rank=0, attn_cp_rank=1, attn_tp_rank=0
@@ -524,17 +529,27 @@ MoE 的层级是：
 ```text
 MoE hierarchy:
 Global(TP) -> MOE_DP -> EP -> MOE_TP
-
-moe_dp_rank = tp_rank // (tp_size / moe_dp_size)
-moe_ep_rank = tp_rank % (tp_size / moe_dp_size) // (tp_size / moe_dp_size / ep_size)
-moe_tp_size = tp_size / moe_dp_size / ep_size
 ```
 
-如果 `tp_size=8`、`moe_dp_size=2`、`ep_size=2`：
+```math
+\mathrm{moe\_dp\_rank}=\left\lfloor\frac{\mathrm{tp\_rank}}{\frac{\mathrm{tp\_size}}{\mathrm{moe\_dp\_size}}}\right\rfloor
+```
+
+```math
+\mathrm{moe\_ep\_rank}=\left\lfloor\frac{\mathrm{tp\_rank}\bmod \frac{\mathrm{tp\_size}}{\mathrm{moe\_dp\_size}}}{\frac{\frac{\mathrm{tp\_size}}{\mathrm{moe\_dp\_size}}}{\mathrm{ep\_size}}}\right\rfloor
+```
+
+```math
+\mathrm{moe\_tp\_size}=\frac{\frac{\mathrm{tp\_size}}{\mathrm{moe\_dp\_size}}}{\mathrm{ep\_size}}
+```
+
+如果 $`\mathrm{tp\_size}=8`$、$`\mathrm{moe\_dp\_size}=2`$、$`\mathrm{ep\_size}=2`$：
+
+```math
+\mathrm{moe\_tp\_size}=\frac{\frac{8}{2}}{2}=2
+```
 
 ```text
-moe_tp_size = 8 / 2 / 2 = 2
-
 tp_rank 0 -> moe_dp_rank=0, moe_ep_rank=0, moe_tp_rank=0
 tp_rank 1 -> moe_dp_rank=0, moe_ep_rank=0, moe_tp_rank=1
 tp_rank 2 -> moe_dp_rank=0, moe_ep_rank=1, moe_tp_rank=0
@@ -660,7 +675,7 @@ process 3 -> gpu 3 -> pp_rank 0, tp_rank 3 -> global_rank 3
 
 请求关系：
 
-- `tp_rank=0` 的 Scheduler leader 从 TokenizerManager 收请求。
+- $`\mathrm{tp\_rank}=0`$ 的 Scheduler leader 从 TokenizerManager 收请求。
 - 4 个 TP rank 通过 `tp_cpu_group` 广播 Python 请求对象。
 - 4 个 `ModelRunner` 分别在自己的 GPU 上执行权重分片。
 - 必要时通过 TP group 做 all-reduce / all-gather。
@@ -852,33 +867,39 @@ EP 和 TP 的直觉差异：
 
 核心思想：
 
-```text
-pp_size_per_node = max(pp_size // nnodes, 1)
-nnodes_per_pp_rank = max(nnodes // pp_size, 1)
-tp_size_per_node = tp_size // nnodes_per_pp_rank
+```math
+\mathrm{pp\_size\_per\_node}=\mathrm{max}\left(\left\lfloor\frac{\mathrm{pp\_size}}{\mathrm{nnodes}}\right\rfloor,1\right)
+```
+
+```math
+\mathrm{nnodes\_per\_pp\_rank}=\mathrm{max}\left(\left\lfloor\frac{\mathrm{nnodes}}{\mathrm{pp\_size}}\right\rfloor,1\right)
+```
+
+```math
+\mathrm{tp\_size\_per\_node}=\left\lfloor\frac{\mathrm{tp\_size}}{\mathrm{nnodes\_per\_pp\_rank}}\right\rfloor
 ```
 
 这段逻辑服务两个场景：
 
 1. **PP stage 跨节点放置。**
-   如果 `pp_size >= nnodes`，每个节点可能负责一个或多个 PP stage。
+   如果 $`\mathrm{pp\_size} \ge \mathrm{nnodes}`$，每个节点可能负责一个或多个 PP stage。
 
 2. **TP group 跨节点放置。**
-   如果 `nnodes > pp_size`，一个 PP stage 可能跨多个节点组成 TP group。
+   如果 $`\mathrm{nnodes} \gt \mathrm{pp\_size}`$，一个 PP stage 可能跨多个节点组成 TP group。
 
 简化例子：
 
 | 配置 | 节点上的 rank 分布直觉 |
 |---|---|
-| `nnodes=1,tp_size=8,pp_size=1` | 单节点 8 个 TP rank。 |
-| `nnodes=2,tp_size=8,pp_size=1` | 一个 TP group 跨 2 节点，每节点 4 个 TP rank。 |
-| `nnodes=2,tp_size=4,pp_size=2` | 每个节点可负责一个 PP stage，每个 stage 内 4 个 TP rank 的一部分或全部，取决于 `tp_size_per_node`。 |
-| `nnodes=4,tp_size=8,pp_size=2` | 每个 PP stage 跨 2 个节点组成 TP group。 |
+| $`\mathrm{nnodes}=1,\qquad \mathrm{tp\_size}=8,\qquad \mathrm{pp\_size}=1`$ | 单节点 8 个 TP rank。 |
+| $`\mathrm{nnodes}=2,\qquad \mathrm{tp\_size}=8,\qquad \mathrm{pp\_size}=1`$ | 一个 TP group 跨 2 节点，每节点 4 个 TP rank。 |
+| $`\mathrm{nnodes}=2,\qquad \mathrm{tp\_size}=4,\qquad \mathrm{pp\_size}=2`$ | 每个节点可负责一个 PP stage，每个 stage 内 4 个 TP rank 的一部分或全部，取决于 `tp_size_per_node`。 |
+| $`\mathrm{nnodes}=4,\qquad \mathrm{tp\_size}=8,\qquad \mathrm{pp\_size}=2`$ | 每个 PP stage 跨 2 个节点组成 TP group。 |
 
 多节点时还要记住第 17 节的结论：
 
 - `node_rank == 0`：运行 HTTP、TokenizerManager、DetokenizerManager，以及本节点 Scheduler ranks。
-- `node_rank > 0`：只运行本节点 Scheduler ranks 和 dummy health check。
+- $`\mathrm{node\_rank} \gt 0`$：只运行本节点 Scheduler ranks 和 dummy health check。
 
 所以“哪个节点接用户请求”和“哪个节点参与模型计算”不是同一件事。用户请求从 node 0 进入，但模型计算 rank 可以分布在所有节点。
 
@@ -1047,7 +1068,7 @@ SGLang 还支持多个 tokenizer worker 或 detokenizer worker。
 - `MultiTokenizerRouter`
 - `run_multi_detokenizer_router_process()`
 
-当 `detokenizer_worker_num > 1` 时：
+当 $`\mathrm{detokenizer\_worker\_num} \gt 1`$ 时：
 
 ```mermaid
 flowchart TD
@@ -1060,7 +1081,7 @@ flowchart TD
   E --> F
 ```
 
-当 `tokenizer_worker_num > 1` 时，HTTP worker 会有自己的 TokenizerManager/TokenizerWorker，主进程通过 shared memory 写入 `PortArgs`、`ServerArgs`、`scheduler_info`。这部分是为了提升高并发场景下的 CPU tokenization/JSON 处理吞吐。
+当 $`\mathrm{tokenizer\_worker\_num} \gt 1`$ 时，HTTP worker 会有自己的 TokenizerManager/TokenizerWorker，主进程通过 shared memory 写入 `PortArgs`、`ServerArgs`、`scheduler_info`。这部分是为了提升高并发场景下的 CPU tokenization/JSON 处理吞吐。
 
 ---
 
