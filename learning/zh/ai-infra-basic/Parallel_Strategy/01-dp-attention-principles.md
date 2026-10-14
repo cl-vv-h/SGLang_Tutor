@@ -61,13 +61,13 @@ T = attention_tp_size = P / (D*C)
 
 必须满足整除关系。在源码中，rank 的排列顺序是 `(DP, CP, TP)`，TP 变化最快：
 
-$$
+```math
 p=(dC+c)T+a
-$$
+```
 
-$$
+```math
 a=p\bmod T,\qquad c=\lfloor p/T\rfloor\bmod C,\qquad d=\lfloor p/(TC)\rfloor
-$$
+```
 
 本章主例子取 `P=4,D=2,C=1,T=2`：
 
@@ -99,28 +99,28 @@ flowchart LR
 
 ## 4. 为什么请求可以分开做 Attention
 
-对请求 $r$、head $h$、query position $i$：
+对请求 $`r`$、head $`h`$、query position $`i`$：
 
-$$
-o_{r,h,i}=\sum_{j\in\mathcal V_r(i)}
-\operatorname{softmax}_{j}\left(q_{r,h,i}^{\mathsf T}k_{r,g(h),j}/\sqrt{D_k}\right)v_{r,g(h),j}
-$$
+```math
+o_{r,h,i}=\sum_{j\in\mathcal{V}_r(i)}
+\mathrm{softmax}_{j}\left(q_{r,h,i}^{\mathsf T}k_{r,g(h),j}/\sqrt{D_k}\right)v_{r,g(h),j}
+```
 
-$g(h)$ 是 GQA 的 query-head 到 KV-head 映射，$\mathcal V_r(i)$ 是该请求的因果可见历史。式子里没有另一个请求 $r'$ 的 K/V。
+$`g(h)`$ 是 GQA 的 query-head 到 KV-head 映射，$`\mathcal{V}_r(i)`$ 是该请求的因果可见历史。式子里没有另一个请求 $`r'`$ 的 K/V。
 
 多个请求可以把 token 行打包进同一个张量，但必须保持 request boundary、长度和 page table。正确的 packed attention 只在各自请求内部归一化；把所有请求的 K/V 拼起来且不加边界约束，会改变模型函数。
 
 FFN 则逐 token 执行：
 
-$$
-f(x)=W_{\mathrm{down}}\bigl(\operatorname{SiLU}(W_{\mathrm{gate}}x)\odot W_{\mathrm{up}}x\bigr)
-$$
+```math
+f(x)=W_{\mathrm{down}}\bigl(\mathrm{SiLU}(W_{\mathrm{gate}}x)\odot W_{\mathrm{up}}x\bigr)
+```
 
 它对不同 token 行独立。因此把 DP0/DP1 的 hidden rows 拼到同一 FFN 输入中，只要输出按原顺序返回，就保持数学等价。MoE 也按 token 产生路由和加权专家输出，但通信要保持 token 到原位置的映射。
 
 ## 5. Attention TP 切权重，DP 切请求
 
-以 row-vector 记法描述 GQA。令 `H=4096,Nq=32,Nkv=8,Dk=Dv=128`，DP0 本轮有 $n_0=4$ 个 token，DP1 有 $n_1=2$ 个 token；`T=2`：
+以 row-vector 记法描述 GQA。令 `H=4096,Nq=32,Nkv=8,Dk=Dv=128`，DP0 本轮有 $`n_0=4`$ 个 token，DP1 有 $`n_1=2`$ 个 token；`T=2`：
 
 ```text
 每 Attention DP 子组输入 X_d: [n_d,4096]
@@ -137,9 +137,9 @@ A_partial = O_flat @ W_O_local: [n_d,4096]
 
 两个组内 rank 的输出投影给出的是不同输入通道的**部分和**：
 
-$$
+```math
 A_d=A_{d,0}^{\mathrm{partial}}+A_{d,1}^{\mathrm{partial}}
-$$
+```
 
 它们 shape 相同，但数值尚未完整。后续通信必须先完成加和，再做残差与 RMSNorm 的正确组合。
 
@@ -182,19 +182,19 @@ flowchart TD
 
 数学上，MLP 输入是：
 
-$$
-U=\operatorname{concat}_{d}\operatorname{RMSNorm}(X_d+A_d)
-$$
+```math
+U=\mathrm{concat}_{d}\mathrm{RMSNorm}(X_d+A_d)
+```
 
 “gather”需要同时完成 partial 加和和 DP 行拼接。不同 padding 模式决定这些工作由哪个 collective 完成。
 
 ### 7.1 SUM_LEN：零填充加 all-reduce，模拟拼接
 
-先按各 DP 的有效通信长度 $n_d$ 分配互不重叠的全局行区间：
+先按各 DP 的有效通信长度 $`n_d`$ 分配互不重叠的全局行区间：
 
-$$
-N=\sum_dn_d,\qquad s_d=\sum_{j<d}n_j
-$$
+```math
+N=\sum_dn_d,\qquad s_d=\sum_{j=0}^{d-1}n_j
+```
 
 每 rank 建 `[N,H]` 的零 buffer，只在本 DP 的区间 `[s_d:s_d+n_d]` 放数据，然后对全 world 求和。
 
@@ -223,11 +223,11 @@ rank2 partial: [3,4]；rank3 partial: [27,36]      -> DP1 [30,40]
 
 把每 DP 补到相同长度：
 
-$$
+```math
 m=\max_dn_d,\qquad N=Dm
-$$
+```
 
-当 $T>1$，先在 Attention TP group 内执行 reduce-scatter：完成 partial 加和，同时让每 rank 只保留 $m/T$ 行。随后在全 world all-gather：
+当 $`T>1`$，先在 Attention TP group 内执行 reduce-scatter：完成 partial 加和，同时让每 rank 只保留 $`m/T`$ 行。随后在全 world all-gather：
 
 ```text
 组内 reduce-scatter:
@@ -244,26 +244,26 @@ replicated 输入先将组内非 rank0 副本清零，才能使用同一 reduce-
 
 ### 7.3 为什么残差只加一次，Norm 放在求和后
 
-如果 $A_0$ 和 $A_1$ 是同一个 DP 的 Attention partial，完整残差为：
+如果 $`A_0`$ 和 $`A_1`$ 是同一个 DP 的 Attention partial，完整残差为：
 
-$$
+```math
 R=X+A_0+A_1
-$$
+```
 
-如果每 rank 都先加 $X$ 再 reduce，结果会变成 $2X+A_0+A_1$。源码因此只在组内 rank0 加 replicated residual。
+如果每 rank 都先加 $`X`$ 再 reduce，结果会变成 $`2X+A_0+A_1`$。源码因此只在组内 rank0 加 replicated residual。
 
 此外：
 
-$$
-\operatorname{RMSNorm}(A_0+A_1+X)
-\ne\operatorname{RMSNorm}(A_0+X)+\operatorname{RMSNorm}(A_1)
-$$
+```math
+\mathrm{RMSNorm}(A_0+A_1+X)
+\ne\mathrm{RMSNorm}(A_0+X)+\mathrm{RMSNorm}(A_1)
+```
 
-当 $T=1$ 时本地 Attention 输出已经完整，Norm 可以先在较小本地数据上执行，再 gather；$T>1$ 时须先合并数值贡献。
+当 $`T=1`$ 时本地 Attention 输出已经完整，Norm 可以先在较小本地数据上执行，再 gather；$`T>1`$ 时须先合并数值贡献。
 
 ## 8. 路径 B：token 保持分片，MoE 自己 dispatch/combine
 
-专用 MoE A2A backend 启用时，`LayerScatterModes` 通常选择 `SCATTERED`。当 $T>1$，Attention 后在子组内 reduce-scatter，得到完整数值但只含部分 token 行的张量：
+专用 MoE A2A backend 启用时，`LayerScatterModes` 通常选择 `SCATTERED`。当 $`T>1`$，Attention 后在子组内 reduce-scatter，得到完整数值但只含部分 token 行的张量：
 
 ```text
 Attention 输出 [n_d,H] partial
@@ -288,11 +288,13 @@ flowchart LR
     C --> S["各 source rank 收回自己的 rows"]
 ```
 
-若 world 有 $P=4$、`ep_size=4`、`moe_dp_size=1`，则：
+若 world 有 $`P=4`$、`ep_size=4`、`moe_dp_size=1`，则：
 
-$$
-\mathrm{moe\_tp\_size}=P/(\mathrm{moe\_dp\_size}\cdot\mathrm{ep\_size})=1
-$$
+```math
+T_{\mathrm{MoE}}=\frac{P}{D_{\mathrm{MoE}}\,E_{\mathrm{MoE}}}=1
+```
+
+其中 $`T_{\mathrm{MoE}}`$、$`D_{\mathrm{MoE}}`$、$`E_{\mathrm{MoE}}`$ 分别对应源码的 `moe_tp_size`、`moe_dp_size`、`ep_size`。
 
 每 rank 持不同专家，source token 的归属与 expert 的归属独立。没有本地请求的 rank 仍可能拥有其他 rank 要用的专家。
 
@@ -323,9 +325,9 @@ sequenceDiagram
 
 ## 10. Padding 的三个长度必须区分
 
-1. **真实长度** $n_d$：本轮有效 token 数。Decode 通常为请求数，prefill 为新增 token 数，speculative verify 则可能每请求含多个 token。
-2. **通信对齐长度** $a_d$：为了 reduce-scatter 等要求进行对齐。
-3. **图捕获长度** $b$：选中的 capture bucket，可能比真实长度更大。
+1. **真实长度** $`n_d`$：本轮有效 token 数。Decode 通常为请求数，prefill 为新增 token 数，speculative verify 则可能每请求含多个 token。
+2. **通信对齐长度** $`a_d`$：为了 reduce-scatter 等要求进行对齐。
+3. **图捕获长度** $`b`$：选中的 capture bucket，可能比真实长度更大。
 
 本快照 `ForwardBatch.prepare_mlp_sync_batch()` 先按 `attn_tp_size` 对齐，再按 `attn_cp_size*2` 对齐。主例子 `T=2,C=1` 下，真实 `[3,1]` 会先变为 `[4,2]`。不能把真实 token 数直接当 collective buffer 长度。
 
@@ -352,7 +354,7 @@ sequenceDiagram
 单 rank 请求历史 K/V: [L_request,Nkv/T,D]
 ```
 
-当 KV heads 太少时，实现可能复制 KV heads，不能对所有 GQA 配置机械使用 $N_{\mathrm{kv}}/T$。
+当 KV heads 太少时，实现可能复制 KV heads，不能对所有 GQA 配置机械使用 $`N_{\mathrm{kv}}/T`$。
 
 对 MLA，一个 latent entry 在组内可能随 TP 被复制；降低 Attention TP 能减少这类复制的份数，但会增加每 rank 的 query heads 和 Attention 权重份额。DP Attention 同时改变请求负载和参数复制，显存收益要按实际 cache pool 与权重布局计算。
 
@@ -360,7 +362,7 @@ sequenceDiagram
 
 ## 12. 一张性能账本
 
-设单层全模型的 Attention 权重为 $W_A$、FFN/专家权重为 $W_F$，只是数量级估算：
+设单层全模型的 Attention 权重为 $`W_A`$、FFN/专家权重为 $`W_F`$，只是数量级估算：
 
 ```text
 Attention 每 rank 权重份额 ≈ W_A/T       # replicated 子投影另计
@@ -390,7 +392,7 @@ python3 learning/zh/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
 
 1. 对 `P=8,D=4,C=1` 写出全部 rank 坐标与 Attention TP groups。
 2. 对 `P=8,D=2,C=2` 写出 Attention TP 与 CP groups，说明它们传递的是哪些请求的数据。
-3. 把 demo 中 replicated 的去重去掉，观察为何输出被乘以 $T$。
+3. 把 demo 中 replicated 的去重去掉，观察为何输出被乘以 $`T`$。
 4. 对真实 token counts `[7,1,0,2]`，依本快照先做 `T=2,C=1` 的对齐，再判断 eager padding mode。
 5. 解释为什么 `dp_scatter()` 可以只是一次本地 copy，而 `dp_reduce_scatter_tensor()` 必须执行 collective。
 
