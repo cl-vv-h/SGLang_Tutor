@@ -11,7 +11,7 @@ This course follows **what is split → why the mathematics permits it → how d
 | [00: map and version boundaries](./00-parallelism-map-and-version-boundaries.md) | Where does each strategy act? How do local and upstream APIs differ? | Strategy table and execution-stage map |
 | [Foundations: DP / TP / PP / EP](./tutorial.md) | How are requests, matrices, layers, and experts split? | Column/row TP, pipelines, token dispatch |
 | [01: DP Attention](./01-dp-attention-principles.md) | How do attention request subgroups cooperate with global FFN/MoE? | Partial/replica, gather/scatter, padding/IDLE |
-| [02: SP versus CP](./02-sp-versus-context-parallelism.md) | Why can Norm split by rows while attention needs history? | ReduceScatter → Norm → AllGather |
+| [02: SP versus CP](./02-sp-versus-context-parallelism.md) | Why can Norm split by rows while attention needs history? | Four-token arithmetic, full TP flow, RS → Norm → AG, CP numerical comparison |
 | [03: PCP](./03-prefill-context-parallelism.md) | How does query work split while preserving causality? | Zigzag/interleave, triangular load, request boundaries |
 | [04: DCP](./04-decode-context-parallelism.md) | How does sharded KV reconstruct exact softmax? | Two derivations, LSE example, virtual/physical slots |
 | [05: DWDP](./05-dwdp-weight-parallelism.md) | When should weights move to tokens? | EP comparison, traffic crossover, VMM and double buffering |
@@ -30,12 +30,15 @@ Every new topic has corresponding English/Chinese files, mathematical derivation
 
 ## Runnable math experiments
 
-These two use only Python's standard library. Run from the repository root:
+These three use only Python's standard library. Run from the repository root:
 
 ```bash
+python3 learning/en/ai-infra-basic/Parallel_Strategy/sp_step_by_step_demo.py
 python3 learning/en/ai-infra-basic/Parallel_Strategy/parallelism_math_demo.py
 python3 learning/en/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
 ```
+
+[sp_step_by_step_demo.py](./sp_step_by_step_demo.py) accompanies chapter 02, printing partials, complete rows, Norm, weight shards, and residuals. It compares full FFN, ordinary TP, and TP+SP, then demonstrates why CP needs remote KV.
 
 [parallelism_math_demo.py](./parallelism_math_demo.py) compares decompositions against unsharded results: SP, ragged PCP, stable DCP merging (empty shards and large scores), EP/DWDP, rank topology, PD head remapping, encoder DP, and Ulysses/CFG. It neither simulates network latency nor proves device/backend support for the same combinations.
 
