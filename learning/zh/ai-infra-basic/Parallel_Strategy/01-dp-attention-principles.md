@@ -314,6 +314,8 @@ SGLang `ScatterMode` 用以下词描述 **token 行的分布**，而不是最后
 
 主例子先取无专用 MoE A2A backend、`moe_dense_tp_size=None`、不启用 CP/TBO/通信融合。此时 MLP 布局为 `FULL`。
 
+为什么要跨 DP 合并行？因为 Attention 的合作范围是各自的两卡子组，而这条 FFN/无 A2A MoE 路径由整个四卡 TP world 协同处理。各 rank 要对所有 DP 的 token 执行自己负责的权重/专家工作，所以先收齐这些 token 行。**这不是把不同请求的 Attention 历史合并，而是为下一段计算准备共同的 batch。**
+
 ```mermaid
 flowchart TD
     IN["组内相同输入<br/>rank0/1: X0；rank2/3: X1"] --> ATT["Attention 分 head 计算"]
@@ -336,119 +338,302 @@ U=\mathrm{concat}_{d}\mathrm{RMSNorm}(X_d+A_d)
 
 ### 7.1 SUM_LEN：零填充加 all-reduce，模拟拼接
 
-先按各 DP 的有效通信长度 $`n_d`$ 分配互不重叠的全局行区间：
+**这一小节回答：能不能用一次全局求和，同时完成“组内 partial 相加”和“不同 DP 的行拼接”？答案是可以，前提是先把各 DP 放进不同的行区间。**
+
+沿用四卡例子：rank0/1 属于 DP0，rank2/3 属于 DP1，Attention TP 为 2。为先看清通信，暂时不加入 residual，也不执行 Norm；真实的残差与归一化顺序在 7.3 恢复。令 hidden width 为 1，各 DP 有两行：
+
+| rank | 行对应的 token | Attention 输出的 partial 数值 |
+|---|---|---|
+| rank0 | a0、a1 | $`[1,2]`$ |
+| rank1 | a0、a1 | $`[9,18]`$ |
+| rank2 | b0、b1 | $`[3,4]`$ |
+| rank3 | b0、b1 | $`[27,36]`$ |
+
+注意：rank0/1 的第 0 行都对应 a0，可以相加；rank0 与 rank2 的第 0 行分别对应 a0、b0，不能直接相加。目标结果是：
 
 ```math
-N=\sum_dn_d,\qquad s_d=\sum_{j=0}^{d-1}n_j
-```
-
-每 rank 建 $`\left[N,H\right]`$ 的零 buffer，只在本 DP 的区间 `[s_d:s_d+n_d]` 放数据，然后对全 world 求和。
-
-```text
-DP0 -> rows [0:n0]
-DP1 -> rows [n0:n0+n1]
-其余行置零
-all_reduce(sum) -> 两段都出现在每个 rank 上
-```
-
-partial 数据允许每个 Attention TP rank 填自己的贡献；replicated 数据只让组内 rank0 填一份，否则组内重复副本会被相加。
-
-一个最小例子，$`H=1`$、每 DP 两行：
-
-```text
-rank0 partial: [1,2]；rank1 partial: [9,18]       -> DP0 [10,20]
-rank2 partial: [3,4]；rank3 partial: [27,36]      -> DP1 [30,40]
-各自放入不重叠区间后，全 world all-reduce:
+A_{\mathrm{DP0}}=[1,2]+[9,18]=[10,20],\qquad A_{\mathrm{DP1}}=[3,4]+[27,36]=[30,40]
 ```
 
 ```math
-\left[10,20,30,40\right]
+A_{\mathrm{global}}=\mathrm{concat}_{\mathrm{rows}}(A_{\mathrm{DP0}},A_{\mathrm{DP1}})=[10,20,30,40]
 ```
 
-若 rank0/1 都已经持有 $`\left[10,20\right]`$，却同时写入再求和，就会错误地得到 `[20,40,...]`。
+**第一步：每张卡先准备四行全零 buffer。** 前两行留给 DP0，后两行留给 DP1。各卡只把自己的 partial 写入本 DP 的区间：
+
+| rank | 写入后的全局 buffer；列顺序为 a0、a1、b0、b1 |
+|---|---|
+| rank0 | $`[1,2,0,0]`$ |
+| rank1 | $`[9,18,0,0]`$ |
+| rank2 | $`[0,0,3,4]`$ |
+| rank3 | $`[0,0,27,36]`$ |
+
+**第二步：四卡对这些 buffer 做 all-reduce(sum)。** 同一列里只会出现同一个 token 的贡献：
+
+```math
+[1,2,0,0]+[9,18,0,0]+[0,0,3,4]+[0,0,27,36]=[10,20,30,40]
+```
+
+通信结束后，**四张卡都拿到相同的四行完整结果**。同一区间内的数值完成了 TP 求和；不同区间的位置保留下来，产生 DP 拼接效果。不是对原来四个两行张量直接 all-reduce；那会错误地把不同 token 加在一起。
+
+推广到 hidden width 为 $`H`$、DP 数为 $`D`$，以 $`a_d`$ 表示每 DP **经过对齐的通信行数**，不是未经 padding 的真实 token 数：
+
+```math
+N=\sum_{d=0}^{D-1}a_d,\qquad s_d=\sum_{j=0}^{d-1}a_j
+```
+
+```math
+\mathrm{shape}(B_r)=[N,H],\qquad B_r[s_d:s_d+a_d,:]=A_r^{\mathrm{partial}}
+```
+
+这里 rank r 属于 DP d；buffer 的其他区间为零。具体实现见 [dp_attention.py 的 `_dp_gather_via_all_reduce()`](../../../../python/sglang/srt/layers/dp_attention.py)。
+
+还有一个必须区分的输入条件：
+
+- **partial 输入**：每张卡贡献不同的数值，所以各卡都写自己的贡献。
+- **replicated 输入**：组内已经有相同的完整结果，只允许组内 rank0 写一份。若 rank0/1 都把完整的 $`[10,20]`$ 写进去，求和就错误地变成 $`[20,40]`$。
 
 ### 7.2 MAX_LEN：组内 reduce-scatter，再全局 all-gather
 
-把每 DP 补到相同长度：
+**这一小节做的数学任务与 7.1 相同，但把工作拆成两次通信：先算完整，再收齐所有行。** 两者不是两种 Attention 算法。
+
+继续使用 7.1 的四张卡、相同 partial 数值。这里先对比两种通信算法的效果，不表示同一 batch 可以手动任选：实际 `DpPaddingMode` 的选择规则见第 10 节。
+
+**第一步：只在每个 Attention TP 两卡组内做 reduce-scatter。** 它不是普通切片，而是“先对同一 token 的 partial 求和，再把完整结果按连续行区间分给组内 rank”：
+
+| 组内通信 | 求和得到的完整行 | reduce-scatter 后由谁保留 |
+|---|---|---|
+| rank0 与 rank1 | a0、a1 的值为 $`[10,20]`$ | rank0 保留 a0，值为 $`[10]`$；rank1 保留 a1，值为 $`[20]`$ |
+| rank2 与 rank3 | b0、b1 的值为 $`[30,40]`$ | rank2 保留 b0，值为 $`[30]`$；rank3 保留 b1，值为 $`[40]`$ |
+
+此刻，每张卡只持有一段行，但每一行的数值已经完整。不是 rank0 保留自己原来的 $`[1]`$、rank1 保留自己的 $`[18]`$。
+
+**第二步：四张卡做全局 all-gather。** 按 rank 顺序收集四份一行张量：
 
 ```math
-m=\max_dn_d,\qquad N=Dm
+\mathrm{concat}_{\mathrm{rows}}([10],[20],[30],[40])=[10,20,30,40]
 ```
 
-当 $`T\gt 1`$，先在 Attention TP group 内执行 reduce-scatter：完成 partial 加和，同时让每 rank 只保留 $`m/T`$ 行。随后在全 world all-gather：
+四张卡又都拿到相同的四行，正好与 7.1 相同。**all-gather 只收集行，不再把这些行相加**，因为组内 partial 已经在第一步合并了。
 
-```text
-组内 reduce-scatter:
-rank0 -> DP0 的前 m/2 行
-rank1 -> DP0 的后 m/2 行
-rank2 -> DP1 的前 m/2 行
-rank3 -> DP1 的后 m/2 行
-
-全 world all-gather:
-每 rank 得到 [DP0 m行, DP1 m行]，shape [D*m,H]
+```mermaid
+flowchart LR
+    P0["rank0/1：相同行、不同 partial"] --> RS0["组内 reduce-scatter"]
+    P1["rank2/3：相同行、不同 partial"] --> RS1["组内 reduce-scatter"]
+    RS0 --> S0["rank0 持 a0；rank1 持 a1"]
+    RS1 --> S1["rank2 持 b0；rank3 持 b1"]
+    S0 --> AG["四卡 all-gather：只拼接、不求和"]
+    S1 --> AG
+    AG --> ALL["每卡都有 a0、a1、b0、b1 的完整值"]
 ```
 
-replicated 输入先将组内非 rank0 副本清零，才能使用同一 reduce-scatter 逻辑。
+为什么叫 `MAX_LEN`？不同 DP 的行数可能不同，需要先统一补到最大通信长度，才能让这条普通等长 collective 路径中每个 rank 提供同样大小的片段：
+
+```math
+m=\max_d a_d,\qquad N=Dm,\qquad \mathrm{shape}(X_{\mathrm{local}})=[m,H]
+```
+
+```math
+[m,H]\xrightarrow{\mathrm{attn\ TP\ reduce\ scatter}}[m/T,H]\xrightarrow{\mathrm{world\ all\ gather}}[Dm,H]
+```
+
+例如两个 DP 的对齐长度分别为 $`4`$、$`2`$，`SUM_LEN` 的全局 buffer 有 $`6`$ 行；`MAX_LEN` 将两组都补到 $`4`$ 行，全局 buffer 有 $`8`$ 行。其中多出来的是 padding，不是新请求。
+
+replicated 输入也可以走这条路径，但先将组内非 rank0 的副本清零，避免 reduce-scatter 重复累加。若 $`T=1`$，没有组内 partial 需要合并，可以直接做全局 all-gather。对应源码是 [dp_attention.py 的 `_dp_gather_via_all_gather()`](../../../../python/sglang/srt/layers/dp_attention.py)。
 
 ### 7.3 为什么残差只加一次，Norm 放在求和后
 
-如果 $`A_0`$ 和 $`A_1`$ 是同一个 DP 的 Attention partial，完整残差为：
+**7.1/7.2 先只追踪 Attention 输出；真实 Transformer 还要计算“原输入 + Attention 输出”，然后做 RMSNorm，才能送入 FFN。**
+
+对同一个 DP，组内两个 rank 都有一份原输入 $`X`$，但分别计算 Attention partial $`A_0`$、$`A_1`$。应该得到：
 
 ```math
 R=X+A_0+A_1
 ```
 
-如果每 rank 都先加 $`X`$ 再 reduce，结果会变成 $`2X+A_0+A_1`$。源码因此只在组内 rank0 加 replicated residual。
-
-此外：
+**残差为什么不能每卡各加一次？** 用一个 token 的一个特征演示，取 $`X=100`$、$`A_0=1`$、$`A_1=9`$：
 
 ```math
-\mathrm{RMSNorm}(A_0+A_1+X)
-\ne\mathrm{RMSNorm}(A_0+X)+\mathrm{RMSNorm}(A_1)
+R_{\mathrm{correct}}=(100+1)+9=110
 ```
 
-当 $`T=1`$ 时本地 Attention 输出已经完整，Norm 可以先在较小本地数据上执行，再 gather；$`T\gt 1`$ 时须先合并数值贡献。
+```math
+R_{\mathrm{wrong}}=(100+1)+(100+9)=210
+```
+
+原输入是相同完整副本，不是 partial，重复相加就会多算一次。源码这条路径只让组内 rank0 把 residual 加到自己的 partial，再执行 7.1 或 7.2 的通信。
+
+**Norm 为什么要等 partial 加完？** RMSNorm 要看一个 token 的完整 hidden 向量。它的分母依赖该向量所有特征的平方均值；各 partial 单独归一化再相加，不等于对完整结果归一化。
+
+下面只为演示，令可训练缩放为 1、忽略 epsilon，并换成二维 hidden：
+
+```math
+X=[1,0],\quad A_0=[0,1],\quad A_1=[2,0],\quad R=[3,1]
+```
+
+```math
+\mathrm{RMSNorm}(R)=\frac{[3,1]}{\sqrt{(3^2+1^2)/2}}=[3/\sqrt5,1/\sqrt5]
+```
+
+```math
+\mathrm{RMSNorm}(X+A_0)+\mathrm{RMSNorm}(A_1)=[1,1]+[\sqrt2,0]=[1+\sqrt2,1]
+```
+
+两个结果显然不同。真实计算顺序因此是：**同一 token 的 Attention partial 求和，残差只加一次，再对完整 hidden 做 Norm。**
+
+还要区分“组内求和”与“跨 DP 拼接”：Norm 对不同 token 行独立，完整行之间的拼接可以放在 Norm 前或后；**不能提前的是 partial 尚未合并时的 Norm**。当 $`T=1`$，本地 Attention 输出已经完整，源码就可以先在本 DP 的较小张量上做 residual + Norm，再 gather。
+
+在路径 A 的实际实现中，MLP 输入与 residual 的持有范围也不一样：MLP hidden 是所有 DP 的归一化行，residual 可以只保留本 DP 的未归一化完整行，留给后续残差连接。这不是少了一次拼接，而是两者用途不同。源码入口为 [communicator.py 的 `_gather_hidden_states_and_residual()`](../../../../python/sglang/srt/layers/communicator.py)。
 
 ## 8. 路径 B：token 保持分片，MoE 自己 dispatch/combine
 
-专用 MoE A2A backend 启用时，`LayerScatterModes` 通常选择 `SCATTERED`。当 $`T\gt 1`$，Attention 后在子组内 reduce-scatter，得到完整数值但只含部分 token 行的张量：
+**与路径 A 的关键区别：路径 B 不先让每张卡都拿到全部 token，而是让每个 token 的来源 rank 把它发给需要的专家，算完后再收回自己的结果。**
 
-```text
-Attention 输出 [n_d,H] partial
-  -> attn-TP reduce-scatter
-  -> 每 rank [n_d/T,H] 完整 token rows
-  -> 本地 router/top-k
-  -> expert dispatch
-  -> 目标 rank 的专家 FFN
-  -> combine 回 token 来源 rank
+本节选择一个具体、可逐行追踪的教学配置：四卡、Attention DP 为 2、Attention TP 为 2，无 CP/TBO/通信融合；稀疏层启用专用 MoE A2A backend。MoE 配置为四个 routed experts、EP 为 4、MoE DP 为 1，因此每卡一个专家、MoE TP 为 1：
+
+```math
+P=4,\quad D=2,\quad T=2,\quad E_{\mathrm{MoE}}=4,\quad D_{\mathrm{MoE}}=1,\quad T_{\mathrm{MoE}}=\frac{4}{1\times4}=1
 ```
+
+忽略 shared experts、量化与容量限制，只跟踪 routed experts；为方便演示，router 的 top-k 取 2。实际模型的专家数和 top-k 不必等于本例。
+
+### 8.1 第一次分行：确定每个 token 的来源 rank
+
+假设 DP0 本轮处理请求 R0 的三个 token 和 R1 的一个 token；DP1 处理 R2 的一个 token 和 R3 的三个 token。每组当前各有四行，无需额外 padding：
+
+| Attention DP 组 | packed 行顺序 | Attention 后哪些 rank 持有这些行的 partial？ |
+|---|---|---|
+| DP0 | a0、a1、a2、b0 | rank0、rank1 |
+| DP1 | c0、d0、d1、d2 | rank2、rank3 |
+
+a0/a1/a2 属于 R0，b0 属于 R1，c0 属于 R2，d0/d1/d2 属于 R3。这些名字是 token 标识，不是特征数值。
+
+Attention 后，先在各自两卡组内做 reduce-scatter：合并 Attention partial，并沿第 0 维连续均分。相同的行区间也用于对应 residual；完成 residual + Norm 后，进入 router 的每行数值已经完整。
+
+| 来源 rank | 原组内行区间 | 自己负责的 token 行 | 送入 router 的 shape |
+|---|---|---|---|
+| rank0 | DP0 前两行 | a0、a1 | $`[2,H]`$ |
+| rank1 | DP0 后两行 | a2、b0 | $`[2,H]`$ |
+| rank2 | DP1 前两行 | c0、d0 | $`[2,H]`$ |
+| rank3 | DP1 后两行 | d1、d2 | $`[2,H]`$ |
+
+这就是 `SCATTERED`。请求 R0 的行跨了 rank0/1；rank1 的两行属于不同请求。**这次分行由连续行号决定，还没有按专家分类。**
+
+源码的关键三行如下，`tensor_split()` 默认沿第 0 维操作：
+
+```python
+input_hidden_states = hidden_states
+hidden_states = hidden_states.tensor_split(context.attn_tp_size)[context.attn_tp_rank]
+attn_tp_reduce_scatter_tensor(hidden_states, input_hidden_states)
+```
+
+`tensor_split()` 选中的是输出区间；紧随其后的 reduce-scatter 会把**求和后的完整结果**写入该区间，而不是直接拿一个未求和的 partial 去跑专家。
+
+### 8.2 第二次分发：router 按 token 选择专家
+
+假设 E0/E1/E2/E3 分别放在 rank0/1/2/3。每个来源 rank 在自己的两行上执行 router，产生两个专家 ID 和对应权重。以下是假定的一次路由结果，不是请求到专家的固定绑定：
+
+| token | 来源 rank / 本地行号 | 选中的专家及有效 combine 权重 |
+|---|---|---|
+| a0 | rank0 / 0 | E1：$`0.7`$，E3：$`0.3`$ |
+| a1 | rank0 / 1 | E0：$`0.6`$，E3：$`0.4`$ |
+| a2 | rank1 / 0 | E2：$`0.8`$，E3：$`0.2`$ |
+| b0 | rank1 / 1 | E0：$`0.4`$，E1：$`0.6`$ |
+| c0 | rank2 / 0 | E1：$`0.9`$，E2：$`0.1`$ |
+| d0 | rank2 / 1 | E0：$`0.3`$，E2：$`0.7`$ |
+| d1 | rank3 / 0 | E2：$`0.5`$，E3：$`0.5`$ |
+| d2 | rank3 / 1 | E0：$`0.2`$，E1：$`0.8`$ |
+
+每个 rank 的 router logits shape 为 $`[2,4]`$，top-k IDs 和 weights 都为 $`[2,2]`$。token 的来源和专家的位置是两回事，例如 a2 来源于 rank1，却要到 rank2、rank3 的专家计算。
+
+### 8.3 Dispatch：不是把整个来源行块原封不动发给一个 rank
+
+dispatcher 会把来源行块**按路由拆开、按目的专家重新分组**，并保留回排所需的来源信息。以 rank1 为例：
+
+- a2 的 hidden 发给 rank2 的 E2 和 rank3 的 E3。
+- b0 的 hidden 发给 rank0 的 E0 和本 rank 的 E1。
+- a2 与 b0 虽然来自同一个连续行块，目的地却不同。发送到本 rank 的专家可以走本地路径，不一定产生跨卡网络传输。
+
+目标专家逻辑上收到的行如下；接收顺序仅为示意，真实 backend 可以使用不同的分桶、重排和 padding：
+
+| 专家计算 rank | 本地专家 | 接收的 token 行 |
+|---|---|---|
+| rank0 | E0 | a1、b0、d0、d2 |
+| rank1 | E1 | a0、b0、c0、d2 |
+| rank2 | E2 | a2、c0、d0、d1 |
+| rank3 | E3 | a0、a1、a2、d1 |
+
+这里每专家恰好四行只是选例结果，不是负载均衡保证。比如 rank0 作为**来源 rank**只负责 a0/a1，但作为**专家 owner**要计算 a1/b0/d0/d2。
+
+本例全局有八个 token、每 token 两条专家路线：
+
+```math
+R_{\mathrm{routes}}=8\times2=16
+```
+
+这是 16 次逻辑 token-expert 计算，不是 16 个新 token，也不一定是 16 次独立网络发送。实际实现可以合并传输，并在同一目的地复用 hidden；物理 buffer 还可能包含 padding、量化 scales 等信息。
+
+### 8.4 专家计算：改变特征，不改变 token 的来源
+
+每个专家对收到的行执行自己的 FFN。本例每专家输入、输出均为 $`[4,H]`$，中间宽度为 $`I_e`$ 时，SwiGLU 的中间张量为 $`[4,I_e]`$。不同专家的权重不同，但计算不会因为接收行来自不同请求就混合上下文。
+
+对 token a2，E2 和 E3 分别得到两个专家输出向量：
+
+```math
+z_{\mathrm{a2},2}=E_2(u_{\mathrm{a2}})\in\mathbb{R}^{H},\qquad z_{\mathrm{a2},3}=E_3(u_{\mathrm{a2}})\in\mathbb{R}^{H}
+```
+
+这里 $`u_{\mathrm{a2}}`$ 是送入 MoE 的归一化 hidden，不是 token ID。**两份专家输出是 MoE 的两条加权分支，不是之前 Attention TP 的两个 head partial。**
+
+### 8.5 Combine：返回来源 rank，再按原 token 行加权合并
+
+a2 的来源标识是 `(rank1, local_row=0)`。dispatcher 的索引/handle 必须能够把 E2、E3 的结果都映射回这个位置，而不是按接收顺序随意拼回去：
+
+```math
+y_{\mathrm{a2}}=0.8\,z_{\mathrm{a2},2}+0.2\,z_{\mathrm{a2},3}\in\mathbb{R}^{H}
+```
+
+类似地，b0 的两个专家结果回到 `(rank1, local_row=1)`：
+
+```math
+y_{\mathrm{b0}}=0.4\,E_0(u_{\mathrm{b0}})+0.6\,E_1(u_{\mathrm{b0}})
+```
+
+因此 combine 后各来源 rank 拿回：
+
+| 来源 rank | 按原行顺序返回的 MoE 输出 | shape |
+|---|---|---|
+| rank0 | a0、a1 的输出 | $`[2,H]`$ |
+| rank1 | a2、b0 的输出 | $`[2,H]`$ |
+| rank2 | c0、d0 的输出 | $`[2,H]`$ |
+| rank3 | d1、d2 的输出 | $`[2,H]`$ |
+
+权重可以在专家计算路径或 combine 路径中施加，取决于 backend；数学上每条分支必须恰好乘一次。这里的加权公式不要求实现一定“先发送未加权结果，再在来源卡乘权重”。
 
 ```mermaid
 flowchart LR
-    R0["rank0 source tokens"] --> D["dispatch 到 expert owner"]
-    R1["rank1 source tokens"] --> D
-    R2["rank2 source tokens"] --> D
-    R3["rank3 source tokens"] --> D
-    D --> E0["专家组 0"]
-    D --> E1["专家组 1"]
-    E0 --> C["加权 combine + 原位置映射"]
-    E1 --> C
-    C --> S["各 source rank 收回自己的 rows"]
+    A["rank1 来源行0：a2"] --> D["router / dispatch：选择 E2、E3"]
+    D --> E2["rank2：E2 计算 a2"]
+    D --> E3["rank3：E3 计算 a2"]
+    E2 --> C["按来源索引回排<br/>两条分支加权合并"]
+    E3 --> C
+    C --> R["返回 rank1 行0：a2 的 MoE 输出"]
 ```
 
-若 world 有 $`P=4`$、$`\mathrm{ep\_size}=4`$、$`\mathrm{moe\_dp\_size}=1`$，则：
+### 8.6 下一层 Attention 怎样再次拿到本 DP 的完整行？
 
-```math
-T_{\mathrm{MoE}}=\frac{P}{D_{\mathrm{MoE}}\,E_{\mathrm{MoE}}}=1
-```
+combine 先恢复的是**来源 rank 的行块**，不是全局 `FULL`。下一次需要 `TP_ATTN_FULL` 时，在对应 Attention TP 组内 all-gather：
 
-其中 $`T_{\mathrm{MoE}}`$、$`D_{\mathrm{MoE}}`$、$`E_{\mathrm{MoE}}`$ 分别对应源码的 `moe_tp_size`、`moe_dp_size`、`ep_size`。
+| 收集范围 | 来源行块 | 组内每张卡恢复的行顺序 |
+|---|---|---|
+| rank0/1 | a0、a1 与 a2、b0 | a0、a1、a2、b0 |
+| rank2/3 | c0、d0 与 d1、d2 | c0、d0、d1、d2 |
 
-每 rank 持不同专家，source token 的归属与 expert 的归属独立。没有本地请求的 rank 仍可能拥有其他 rank 要用的专家。
+残差与 hidden 需要保持相同行映射；残差加法和收集可能在层边界处理，也可能推迟到下一层入口或融合路径，不能把这张教学流程图当成所有配置的唯一调用顺序。本节普通路径可对照 [communicator.py 的 `_scatter_hidden_states_and_residual()`、`_scattered_to_tp_attn_full()`](../../../../python/sglang/srt/layers/communicator.py)，以及 [MoE dispatcher 源码目录](../../../../python/sglang/srt/layers/moe/token_dispatcher)。
 
-这一分支的 dispatch/combine 会移动数据，但通常无需让每个 rank 在 MoE 前持有所有 token。backend 的具体实现可以使用 all-to-all、RDMA 或融合通信算子；应以选中的 dispatcher 为准。
+整个过程没有把 R0 的历史 KV 发给 R1。移动的是当前 token 的 hidden rows 和专家输出，KV cache 的请求归属仍按第 11 节管理。
 
-下一层 Attention 需要组内完整 token 行时，`prepare_attn()` 会按布局做 Attention TP all-gather。若仍保持 `SCATTERED`，通信也可能推迟到下一层入口。
+总结两次“分发”的区别：**reduce-scatter 按连续行号确定来源 rank；expert dispatch 按 router 结果确定计算目的地；combine 按来源索引返回；Attention all-gather 恢复组内行布局。** 具体 backend 可以用 all-to-all、RDMA 或融合算子承载这些步骤，不应把一种实现的物理打包顺序推广到所有 backend。
 
 ## 9. 为什么空闲 rank 还要参加一轮 forward
 

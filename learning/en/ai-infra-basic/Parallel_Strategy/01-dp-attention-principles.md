@@ -314,6 +314,8 @@ A separate property is whether values are **partial** or **replicated**:
 
 For the initial example, use no dedicated MoE A2A backend, `moe_dense_tp_size=None`, and no CP/TBO/communication fusion. The MLP layout is `FULL`.
 
+Why gather across DP groups? Attention cooperates within each two-rank subgroup, while this FFN/non-A2A MoE path uses the entire four-rank TP world. Each rank must perform its assigned weight/expert work for tokens from all DP groups, so those rows are collected first. **This prepares a shared batch for the next computation; it does not merge different requests' attention histories.**
+
 ```mermaid
 flowchart TD
     IN["Shared subgroup inputs<br/>rank0/1: X0; rank2/3: X1"] --> ATT["Attention over sharded heads"]
@@ -336,119 +338,302 @@ Gathering must perform both partial-value reduction and DP-row concatenation. Pa
 
 ### 7.1 SUM_LEN: Zero-Filled All-Reduce Implements Concatenation
 
-Assign non-overlapping global intervals from communication lengths $`n_d`$:
+**This subsection asks: can one world-wide sum both combine attention-TP partials and concatenate different DP groups' rows? Yes, provided each DP group first writes into a separate row interval.**
+
+Use four ranks: rank0/1 belong to DP0, rank2/3 to DP1, with attention TP of 2. To isolate communication, temporarily omit the residual and normalization; Section 7.3 restores them. Set hidden width to 1, with two rows per DP:
+
+| Rank | Tokens represented by the rows | Partial attention values |
+|---|---|---|
+| rank0 | a0, a1 | $`[1,2]`$ |
+| rank1 | a0, a1 | $`[9,18]`$ |
+| rank2 | b0, b1 | $`[3,4]`$ |
+| rank3 | b0, b1 | $`[27,36]`$ |
+
+Row 0 on rank0 and rank1 represents the same token a0, so these contributions can be added. Row 0 on rank0 and rank2 represents different tokens, a0 and b0, so those rows must not be added. The desired result is:
 
 ```math
-N=\sum_dn_d,\qquad s_d=\sum_{j=0}^{d-1}n_j
-```
-
-Each rank creates a zero $`\left[N,H\right]`$ buffer and writes only its subgroup interval `[s_d:s_d+n_d]`. A world all-reduce sums these buffers:
-
-```text
-DP0 -> rows [0:n0]
-DP1 -> rows [n0:n0+n1]
-all other rows zero
-all_reduce(sum) -> both intervals appear on every rank
-```
-
-For partial data, every attention-TP rank writes its own contribution. For replicated data, only subgroup rank0 writes; otherwise identical copies are incorrectly summed.
-
-Minimal example with $`H=1`$ and two rows per DP:
-
-```text
-rank0 partial: [1,2]; rank1 partial: [9,18]       -> DP0 [10,20]
-rank2 partial: [3,4]; rank3 partial: [27,36]      -> DP1 [30,40]
-World all-reduce after writing separate intervals:
+A_{\mathrm{DP0}}=[1,2]+[9,18]=[10,20],\qquad A_{\mathrm{DP1}}=[3,4]+[27,36]=[30,40]
 ```
 
 ```math
-\left[10,20,30,40\right]
+A_{\mathrm{global}}=\mathrm{concat}_{\mathrm{rows}}(A_{\mathrm{DP0}},A_{\mathrm{DP1}})=[10,20,30,40]
 ```
 
-If rank0/1 already both hold $`\left[10,20\right]`$ and both contribute, the result incorrectly becomes `[20,40,...]`.
+**Step 1: create a four-row zero buffer on every rank.** Reserve the first two rows for DP0 and the last two for DP1. Each rank writes its partial values only into its own DP interval:
+
+| Rank | Buffer after writing; columns represent a0, a1, b0, b1 |
+|---|---|
+| rank0 | $`[1,2,0,0]`$ |
+| rank1 | $`[9,18,0,0]`$ |
+| rank2 | $`[0,0,3,4]`$ |
+| rank3 | $`[0,0,27,36]`$ |
+
+**Step 2: all-reduce(sum) these buffers across all four ranks.** Every column contains contributions for only one token:
+
+```math
+[1,2,0,0]+[9,18,0,0]+[0,0,3,4]+[0,0,27,36]=[10,20,30,40]
+```
+
+After communication, **all four ranks hold the same four complete rows**. Values within each interval have undergone TP reduction; separate intervals retain their positions, producing DP concatenation. This is not a direct all-reduce on the original two-row tensors, which would incorrectly add different tokens together.
+
+Generalize to hidden width $`H`$, $`D`$ DP groups, and $`a_d`$ **aligned communication rows** per DP, rather than the unpadded real token count:
+
+```math
+N=\sum_{d=0}^{D-1}a_d,\qquad s_d=\sum_{j=0}^{d-1}a_j
+```
+
+```math
+\mathrm{shape}(B_r)=[N,H],\qquad B_r[s_d:s_d+a_d,:]=A_r^{\mathrm{partial}}
+```
+
+Here rank r belongs to DP d; all other intervals remain zero. See [`_dp_gather_via_all_reduce()` in dp_attention.py](../../../../python/sglang/srt/layers/dp_attention.py).
+
+One input distinction is essential:
+
+- **Partial input:** ranks hold different numerical contributions, so each contributes its own values.
+- **Replicated input:** subgroup ranks already hold identical complete results, so only subgroup rank0 contributes. If both rank0/1 write the complete $`[10,20]`$, reduction incorrectly produces $`[20,40]`$.
 
 ### 7.2 MAX_LEN: Subgroup Reduce-Scatter, Then World All-Gather
 
-Pad every DP subgroup to the same length:
+**This subsection performs the same mathematical task as 7.1, but uses two collectives: first make the values complete, then collect all rows.** These are not different attention algorithms.
+
+Keep the four ranks and partial values from 7.1. We compare the algorithms on the same values for clarity, not to imply an arbitrary per-batch choice: actual `DpPaddingMode` selection is explained in Section 10.
+
+**Step 1: reduce-scatter only within each two-rank attention-TP subgroup.** This is not plain slicing: it sums partial values for the same tokens, then assigns consecutive intervals of the complete result to subgroup ranks:
+
+| Subgroup collective | Complete values after summation | Ownership after reduce-scatter |
+|---|---|---|
+| rank0 and rank1 | a0, a1 have values $`[10,20]`$ | rank0 keeps a0, value $`[10]`$; rank1 keeps a1, value $`[20]`$ |
+| rank2 and rank3 | b0, b1 have values $`[30,40]`$ | rank2 keeps b0, value $`[30]`$; rank3 keeps b1, value $`[40]`$ |
+
+Each rank now owns only a slice of rows, but every row's value is complete. Rank0 does not simply retain its original $`[1]`$, nor rank1 its original $`[18]`$.
+
+**Step 2: all-gather across all four ranks.** Collect their one-row tensors in rank order:
 
 ```math
-m=\max_dn_d,\qquad N=Dm
+\mathrm{concat}_{\mathrm{rows}}([10],[20],[30],[40])=[10,20,30,40]
 ```
 
-When $`T\gt 1`$, first reduce-scatter within attention TP: sum partial values and assign $`m/T`$ rows to each rank. Then all-gather over the entire world:
+All four ranks again hold identical four-row results, matching 7.1. **All-gather only collects rows; it does not add them again**, because the subgroup partials were already combined in Step 1.
 
-```text
-Subgroup reduce-scatter:
-rank0 -> first m/2 rows of DP0
-rank1 -> last m/2 rows of DP0
-rank2 -> first m/2 rows of DP1
-rank3 -> last m/2 rows of DP1
-
-World all-gather:
-every rank gets [DP0 m rows, DP1 m rows], shape [D*m,H]
+```mermaid
+flowchart LR
+    P0["rank0/1: same rows, different partial values"] --> RS0["Subgroup reduce-scatter"]
+    P1["rank2/3: same rows, different partial values"] --> RS1["Subgroup reduce-scatter"]
+    RS0 --> S0["rank0 owns a0; rank1 owns a1"]
+    RS1 --> S1["rank2 owns b0; rank3 owns b1"]
+    S0 --> AG["World all-gather: concatenate, do not sum"]
+    S1 --> AG
+    AG --> ALL["Every rank has complete a0, a1, b0, b1"]
 ```
 
-For replicated inputs, non-leader subgroup copies are zeroed first so the same reduce-scatter remains correct.
+Why `MAX_LEN`? Different DP groups can have different row counts. This ordinary equal-sized collective path first pads them to the largest communication length so every rank supplies an equally sized slice:
+
+```math
+m=\max_d a_d,\qquad N=Dm,\qquad \mathrm{shape}(X_{\mathrm{local}})=[m,H]
+```
+
+```math
+[m,H]\xrightarrow{\mathrm{attn\ TP\ reduce\ scatter}}[m/T,H]\xrightarrow{\mathrm{world\ all\ gather}}[Dm,H]
+```
+
+For aligned DP lengths of $`4`$ and $`2`$, the `SUM_LEN` global buffer has $`6`$ rows; `MAX_LEN` pads both groups to $`4`$ rows, giving $`8`$ global rows. Extra rows are padding, not additional requests.
+
+Replicated inputs can use this path too, but non-leader subgroup copies are zeroed before reduce-scatter to prevent double counting. If $`T=1`$, there are no subgroup partials to combine, so a direct world all-gather suffices. See [`_dp_gather_via_all_gather()` in dp_attention.py](../../../../python/sglang/srt/layers/dp_attention.py).
 
 ### 7.3 Residual Is Added Once; Norm Follows Reduction
 
-For attention partials $`A_0`$ and $`A_1`$, the complete residual is:
+**Sections 7.1/7.2 tracked attention output alone. A real Transformer also adds the original input to that output, then applies RMSNorm before the FFN.**
+
+Within a DP group, both ranks hold the same original input $`X`$, but compute different attention partials $`A_0`$ and $`A_1`$. The desired result is:
 
 ```math
 R=X+A_0+A_1
 ```
 
-Adding $`X`$ on both ranks before reduction produces $`2X+A_0+A_1`$. The source therefore adds the replicated residual only on subgroup rank0.
-
-Also:
+**Why not add the residual on every rank?** Take one feature of one token: $`X=100`$, $`A_0=1`$, and $`A_1=9`$:
 
 ```math
-\mathrm{RMSNorm}(A_0+A_1+X)
-\ne\mathrm{RMSNorm}(A_0+X)+\mathrm{RMSNorm}(A_1)
+R_{\mathrm{correct}}=(100+1)+9=110
 ```
 
-When $`T=1`$, local attention output is already complete: normalization may run on smaller local data before gathering. With $`T\gt 1`$, contributions must be combined first.
+```math
+R_{\mathrm{wrong}}=(100+1)+(100+9)=210
+```
+
+The original input is a replicated complete value, not a partial contribution. Adding every copy counts it twice. In this source path, only subgroup rank0 adds the residual to its attention partial before the communication from 7.1 or 7.2.
+
+**Why wait for partial reduction before Norm?** RMSNorm needs a token's complete hidden vector. Its denominator depends on the mean square of all features in that vector. Normalizing partials separately and adding them is not equivalent to normalizing the complete result.
+
+For illustration only, set the learned scale to 1, ignore epsilon, and use a two-feature hidden vector:
+
+```math
+X=[1,0],\quad A_0=[0,1],\quad A_1=[2,0],\quad R=[3,1]
+```
+
+```math
+\mathrm{RMSNorm}(R)=\frac{[3,1]}{\sqrt{(3^2+1^2)/2}}=[3/\sqrt5,1/\sqrt5]
+```
+
+```math
+\mathrm{RMSNorm}(X+A_0)+\mathrm{RMSNorm}(A_1)=[1,1]+[\sqrt2,0]=[1+\sqrt2,1]
+```
+
+The results differ. The correct dependency is therefore: **combine attention partials for the same token, include the residual once, and normalize the complete hidden vector.**
+
+Distinguish subgroup reduction from cross-DP concatenation: Norm acts independently on token rows, so concatenating complete rows can happen before or after Norm. **What cannot move earlier is Norm while the values are still partial.** When $`T=1`$, local attention output is complete, so the source can apply residual + Norm to the smaller local tensor before gathering.
+
+Path A can also keep different ownership for MLP input and residual: the MLP hidden tensor contains normalized rows from all DP groups, whereas the residual can retain only this DP's unnormalized complete rows for the later residual connection. This is intentional, not missing concatenation. See [`_gather_hidden_states_and_residual()` in communicator.py](../../../../python/sglang/srt/layers/communicator.py).
 
 ## 8. Path B: Sharded Source Tokens and Expert Dispatch/Combine
 
-With a dedicated MoE A2A backend, `LayerScatterModes` normally selects `SCATTERED`. For $`T\gt 1`$, attention-subgroup reduce-scatter produces complete values for only a slice of token rows:
+**Unlike Path A, Path B does not first give every rank all token rows. Each token's source rank sends its hidden vector to the selected experts and receives its results back.**
 
-```text
-Attention output [n_d,H], partial values
-  -> attention-TP reduce-scatter
-  -> each rank [n_d/T,H], complete token values
-  -> local router/top-k
-  -> expert dispatch
-  -> expert FFN on destination ranks
-  -> combine back to source-token ranks
+Use a concrete teaching configuration: four ranks, attention DP of 2, attention TP of 2, no CP/TBO/communication fusion, and a dedicated MoE A2A backend on the sparse layer. Four routed experts, EP of 4, and MoE DP of 1 give one expert per rank and MoE TP of 1:
+
+```math
+P=4,\quad D=2,\quad T=2,\quad E_{\mathrm{MoE}}=4,\quad D_{\mathrm{MoE}}=1,\quad T_{\mathrm{MoE}}=\frac{4}{1\times4}=1
 ```
+
+Ignore shared experts, quantization, and capacity limits; follow routed experts only. Use router top-k of 2. Real models need not have this expert count or top-k.
+
+### 8.1 First Row Partition: Establish Each Token's Source Rank
+
+DP0 processes three current tokens from request R0 and one from R1. DP1 processes one from R2 and three from R3. Each group has four rows, without additional padding:
+
+| Attention DP group | Packed row order | Ranks holding partial values after attention |
+|---|---|---|
+| DP0 | a0, a1, a2, b0 | rank0, rank1 |
+| DP1 | c0, d0, d1, d2 | rank2, rank3 |
+
+a0/a1/a2 belong to R0, b0 to R1, c0 to R2, and d0/d1/d2 to R3. These names identify tokens, not feature values.
+
+After attention, reduce-scatter within each two-rank group combines partial values and divides consecutive rows along dimension 0. The corresponding residual uses the same intervals. After residual + Norm, each row entering the router has complete values.
+
+| Source rank | Interval within its DP group | Owned token rows | Router input shape |
+|---|---|---|---|
+| rank0 | DP0 first two rows | a0, a1 | $`[2,H]`$ |
+| rank1 | DP0 last two rows | a2, b0 | $`[2,H]`$ |
+| rank2 | DP1 first two rows | c0, d0 | $`[2,H]`$ |
+| rank3 | DP1 last two rows | d1, d2 | $`[2,H]`$ |
+
+This is `SCATTERED`. Request R0 spans rank0/1; rank1's block contains two requests. **This partition follows consecutive row positions, not expert assignments.**
+
+The key source lines are below; `tensor_split()` defaults to dimension 0:
+
+```python
+input_hidden_states = hidden_states
+hidden_states = hidden_states.tensor_split(context.attn_tp_size)[context.attn_tp_rank]
+attn_tp_reduce_scatter_tensor(hidden_states, input_hidden_states)
+```
+
+`tensor_split()` selects an output interval. Reduce-scatter then writes the **summed, complete values** into it; it does not send an unsummed attention partial to expert computation.
+
+### 8.2 Second Distribution: The Router Selects Experts per Token
+
+Place E0/E1/E2/E3 on rank0/1/2/3 respectively. Each source rank runs the router on its two rows, producing two expert IDs and weights per row. The following is one assumed routing outcome, not a fixed request-to-expert mapping:
+
+| Token | Source rank / local row | Selected experts and effective combine weights |
+|---|---|---|
+| a0 | rank0 / 0 | E1: $`0.7`$, E3: $`0.3`$ |
+| a1 | rank0 / 1 | E0: $`0.6`$, E3: $`0.4`$ |
+| a2 | rank1 / 0 | E2: $`0.8`$, E3: $`0.2`$ |
+| b0 | rank1 / 1 | E0: $`0.4`$, E1: $`0.6`$ |
+| c0 | rank2 / 0 | E1: $`0.9`$, E2: $`0.1`$ |
+| d0 | rank2 / 1 | E0: $`0.3`$, E2: $`0.7`$ |
+| d1 | rank3 / 0 | E2: $`0.5`$, E3: $`0.5`$ |
+| d2 | rank3 / 1 | E0: $`0.2`$, E1: $`0.8`$ |
+
+Each rank's router logits have shape $`[2,4]`$; top-k IDs and weights both have shape $`[2,2]`$. Source ownership and expert placement differ: a2 comes from rank1 but needs experts on rank2 and rank3.
+
+### 8.3 Dispatch: Do Not Send an Entire Source Block to One Destination
+
+The dispatcher **splits source blocks according to routes and regroups rows by destination expert**, retaining metadata for the return path. For rank1:
+
+- Send a2's hidden vector to E2 on rank2 and E3 on rank3.
+- Send b0's hidden vector to E0 on rank0 and E1 on the same rank.
+- a2 and b0 share a consecutive source block but have different destinations. A local expert can use a local path rather than cross-device network transfer.
+
+Destination experts logically receive the rows below. Receive order is illustrative; real backends can bucket, reorder, and pad differently:
+
+| Expert-compute rank | Local expert | Received token rows |
+|---|---|---|
+| rank0 | E0 | a1, b0, d0, d2 |
+| rank1 | E1 | a0, b0, c0, d2 |
+| rank2 | E2 | a2, c0, d0, d1 |
+| rank3 | E3 | a0, a1, a2, d1 |
+
+Four rows per expert is an outcome of this example, not a load-balancing guarantee. Rank0 owns a0/a1 as a **source rank**, but computes a1/b0/d0/d2 as an **expert owner**.
+
+Eight tokens with two expert routes each produce:
+
+```math
+R_{\mathrm{routes}}=8\times2=16
+```
+
+These are 16 logical token-expert computations, not 16 new tokens or necessarily 16 independent network sends. Implementations can coalesce transfers and reuse a hidden vector at the same destination. Physical buffers may additionally contain padding, quantization scales, and metadata.
+
+### 8.4 Expert Compute Changes Features, Not Source Ownership
+
+Each expert runs its own FFN on received rows. Here each expert's input and output have shape $`[4,H]`$; a SwiGLU intermediate has shape $`[4,I_e]`$ for intermediate width $`I_e`$. Experts have different weights, but rows from different requests do not exchange context merely because they share an expert batch.
+
+For token a2, E2 and E3 produce two output vectors:
+
+```math
+z_{\mathrm{a2},2}=E_2(u_{\mathrm{a2}})\in\mathbb{R}^{H},\qquad z_{\mathrm{a2},3}=E_3(u_{\mathrm{a2}})\in\mathbb{R}^{H}
+```
+
+$`u_{\mathrm{a2}}`$ is the normalized hidden vector entering MoE, not the token ID. **These are two weighted MoE branches, not the earlier attention-TP head partials.**
+
+### 8.5 Combine: Return to the Source and Merge by Original Token Row
+
+a2's source identity is `(rank1, local_row=0)`. Dispatcher indices/handles must map both E2 and E3 results back to that position, rather than concatenate them arbitrarily in receive order:
+
+```math
+y_{\mathrm{a2}}=0.8\,z_{\mathrm{a2},2}+0.2\,z_{\mathrm{a2},3}\in\mathbb{R}^{H}
+```
+
+Similarly, b0's two expert results return to `(rank1, local_row=1)`:
+
+```math
+y_{\mathrm{b0}}=0.4\,E_0(u_{\mathrm{b0}})+0.6\,E_1(u_{\mathrm{b0}})
+```
+
+After combine, source ranks recover:
+
+| Source rank | MoE outputs in original local row order | Shape |
+|---|---|---|
+| rank0 | outputs for a0, a1 | $`[2,H]`$ |
+| rank1 | outputs for a2, b0 | $`[2,H]`$ |
+| rank2 | outputs for c0, d0 | $`[2,H]`$ |
+| rank3 | outputs for d1, d2 | $`[2,H]`$ |
+
+Depending on the backend, weights may be applied along the expert-compute path or during combine. Mathematically, each branch must be weighted exactly once. The formula does not require sending unweighted outputs and applying weights only on the source device.
 
 ```mermaid
 flowchart LR
-    R0["rank0 source tokens"] --> D["Dispatch to expert owners"]
-    R1["rank1 source tokens"] --> D
-    R2["rank2 source tokens"] --> D
-    R3["rank3 source tokens"] --> D
-    D --> E0["Expert group 0"]
-    D --> E1["Expert group 1"]
-    E0 --> C["Weighted combine + source-position mapping"]
-    E1 --> C
-    C --> S["Each source rank receives its own rows"]
+    A["rank1 source row0: a2"] --> D["Router / dispatch: choose E2, E3"]
+    D --> E2["rank2: E2 computes a2"]
+    D --> E3["rank3: E3 computes a2"]
+    E2 --> C["Restore source position<br/>Weighted merge of two branches"]
+    E3 --> C
+    C --> R["Return a2 output to rank1 row0"]
 ```
 
-With $`P=4,\qquad \mathrm{ep\_size}=4,\qquad \mathrm{moe\_dp\_size}=1`$:
+### 8.6 How Does the Next Attention Layer Recover All Local-DP Rows?
 
-```math
-T_{\mathrm{MoE}}=\frac{P}{D_{\mathrm{MoE}}\,E_{\mathrm{MoE}}}=1
-```
+Combine restores **source-rank blocks**, not global `FULL`. When `TP_ATTN_FULL` is next required, all-gather within each corresponding attention-TP subgroup:
 
-Here $`T_{\mathrm{MoE}}`$, $`D_{\mathrm{MoE}}`$, and $`E_{\mathrm{MoE}}`$ correspond to `moe_tp_size`, `moe_dp_size`, and `ep_size` in the source.
+| Gather group | Source blocks | Row order restored on every subgroup rank |
+|---|---|---|
+| rank0/1 | a0, a1 and a2, b0 | a0, a1, a2, b0 |
+| rank2/3 | c0, d0 and d1, d2 | c0, d0, d1, d2 |
 
-Ranks own different experts. Source-token ownership and expert ownership are independent; a rank with no local requests can still own experts needed by other ranks.
+Hidden states and residual must preserve the same row mapping. Residual addition and gathering can occur at a layer boundary, be deferred to the next layer entrance, or use a fused path; this teaching sequence is not the only call order for every configuration. Compare [`_scatter_hidden_states_and_residual()` and `_scattered_to_tp_attn_full()` in communicator.py](../../../../python/sglang/srt/layers/communicator.py) and the [MoE dispatcher source directory](../../../../python/sglang/srt/layers/moe/token_dispatcher).
 
-Dispatch/combine moves data but normally does not require every rank to hold all tokens before MoE. The backend may use all-to-all, RDMA, or fused communication; inspect the selected dispatcher.
+None of this sends R0's historical KV to R1. The moving tensors are current hidden rows and expert outputs. KV-cache request ownership remains as described in Section 11.
 
-When the next attention layer needs all subgroup rows, `prepare_attn()` performs attention-TP all-gather. A `SCATTERED` output may therefore defer that communication to the next layer's entrance.
+Keep the distributions separate: **reduce-scatter assigns source ranks by consecutive row position; expert dispatch chooses compute destinations from router results; combine returns by source identity; attention all-gather restores the subgroup layout.** Backends can implement these steps using all-to-all, RDMA, or fused operators; one backend's physical packing order is not universal.
 
 ## 9. Why an Idle Rank Still Runs Forward
 
