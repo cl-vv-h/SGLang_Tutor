@@ -6,6 +6,8 @@ This chapter develops the mathematics and system principles of DP Attention. Fol
 
 The source baseline is repository snapshot `587eb0b3a56cd2f014daf3b0fc8ba333da88df36`. Teaching configurations expose shapes and semantics; they do not assert that every model/backend supports every combination.
 
+Newer upstream separates `attn_dp_size` from ordinary DP. See [version boundaries](./00-parallelism-map-and-version-boundaries.md) for compatibility conversion and SP/PCP/DCP APIs. The rest of this chapter retains the local baseline above.
+
 ## 1. The Conflict It Resolves
 
 Attention and FFN/MoE have different parallelism needs:

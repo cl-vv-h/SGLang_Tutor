@@ -1,5 +1,7 @@
 # SGLang DP Attention Walkthrough: From Request Dispatch to the Next Layer and Logits
 
+See the [strategy map](../../ai-infra-basic/Parallel_Strategy/00-parallelism-map-and-version-boundaries.md) for modern terminology and local/upstream boundaries, and the [parallelism course](../../ai-infra-basic/Parallel_Strategy/README.md) for SP/PCP/DCP, DWDP, and PD composition. This walkthrough retains its local source baseline.
+
 [简体中文](../../../zh/sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md) | **English**
 
 This walkthrough uses repository snapshot `587eb0b3a56cd2f014daf3b0fc8ba333da88df36`, following the non-CP `DeepseekV2DecoderLayer` path and distinguishing global gathering from expert dispatch. Excerpts and teaching pseudocode retain only relevant branches; linked complete functions define actual execution.

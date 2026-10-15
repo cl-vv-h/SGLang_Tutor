@@ -16,7 +16,7 @@ This directory supplements the foundational knowledge needed before and during S
 | 6 | [Execution_Graph](./Execution_Graph/) | From computation graph concepts to CUDA/NPU Graph, torch.compile, static shape reuse, and replay dataflow | [01-what-is-graph.md](./Execution_Graph/01-what-is-graph.md), [02-graph-execution-dataflow.md](./Execution_Graph/02-graph-execution-dataflow.md) |
 | 7 | [Mamba_State_Space](./Mamba_State_Space/) | Mamba/SSM principles, Mamba state, MambaPool, scheduler strategy, and radix cache states | [01-mamba-and-sglang-state.md](./Mamba_State_Space/01-mamba-and-sglang-state.md) |
 | 8 | [Gated_Delta_Network](./Gated_Delta_Network/) | Gated DeltaNet/GDN math, trainable parameters, recurrent state, prefill/decode shapes, and serving state management | [README.md](./Gated_Delta_Network/README.md) |
-| 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP, TP, PP, SP/CP, EP, and DP Attention request/tensor layouts, communication, and CPU simulation | [README.md](./Parallel_Strategy/README.md), [DP Attention principles](./Parallel_Strategy/01-dp-attention-principles.md) |
+| 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP/TP/PP/EP, DPA, SP/PCP/DCP, DWDP, topology, encoder DP/elastic EP, and diffusion | [Strategy map](./Parallel_Strategy/00-parallelism-map-and-version-boundaries.md), [course index](./Parallel_Strategy/README.md) |
 | 10 | [Communication](./Communication/) | Primitives, RDMA, Gloo/NCCL/HCCL, DeepEP/ZBAL, Mooncake/NIXL, and performance diagnosis | [README.md](./Communication/README.md) |
 | 11 | [KV_Transfer](./KV_Transfer/) | PD disaggregation, KV sender/receiver, remote KV cache | [README.md](./KV_Transfer/README.md) |
 | 12 | [Speculative_Decoding](./Speculative_Decoding/) | Speculative sampling math, target verify, KV commit, EAGLE/MTP/NGRAM/Medusa/REST, and DSpark semi-autoregression with confidence scheduling | [README.md](./Speculative_Decoding/README.md) |
@@ -31,6 +31,8 @@ This directory supplements the foundational knowledge needed before and during S
 3. Next, read [Execution_Graph](./Execution_Graph/), [Mamba_State_Space](./Mamba_State_Space/), [Gated_Delta_Network](./Gated_Delta_Network/), and [Parallel_Strategy](./Parallel_Strategy/) to understand how production inference reduces CPU overhead, manages non-Transformer states, handles linear-attention recurrent states, and scales to multiple GPUs.
 4. Then read [KV_Transfer](./KV_Transfer/) and [Speculative_Decoding](./Speculative_Decoding/) to understand how advanced serving optimizations revolve around "getting tokens faster" and "better utilizing different resources."
 5. Finally, read [Quantization](./Quantization/), [LoRA](./LoRA/), and [Benchmark_Profiling](./Benchmark_Profiling/) to close the loop on model compression, adapter serving, and performance validation.
+
+The expanded [parallelism course](./Parallel_Strategy/README.md) follows foundational DP/TP/PP/EP → DPA → SP/PCP/DCP → DWDP → topology, with mathematical derivations, data-flow diagrams, pinned source references, and standard-library experiments.
 
 Read [Communication](./Communication/README.md) after parallel strategies to connect TP collectives, EP token routing, and PD/KV transfer into one learning path.
 

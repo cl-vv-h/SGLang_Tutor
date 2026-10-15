@@ -1,8 +1,10 @@
+# Legacy filename: CP distributed softmax, not LayerNorm SP.
+# See chapters 02/03/04; this is not the upstream DCP cache protocol.
 # sp_context_parallel_demo.py
 
 """
 教学目标：
-    更接近工业实现地理解 Sequence / Context Parallelism。
+    Understand Context Parallelism through distributed softmax; this is not LayerNorm SP.
 
 和简单教学版的区别：
 

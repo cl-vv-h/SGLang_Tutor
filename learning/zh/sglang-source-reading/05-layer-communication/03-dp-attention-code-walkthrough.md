@@ -1,5 +1,7 @@
 # SGLang DP Attention 源码走读：从请求分发到下一层与 logits
 
+并行策略的现代分类与本地/上游版本边界见 [策略地图](../../ai-infra-basic/Parallel_Strategy/00-parallelism-map-and-version-boundaries.md)；SP/PCP/DCP、DWDP 和 PD 组合的数学与拓扑见 [并行课程](../../ai-infra-basic/Parallel_Strategy/README.md)。本篇继续按本地源码快照走读。
+
 **简体中文** | [English](../../../en/sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md)
 
 本章以本仓库源码快照 `587eb0b3a56cd2f014daf3b0fc8ba333da88df36` 为依据，走读默认非 CP 的 `DeepseekV2DecoderLayer` 路径，并分别展开全局 gather 与专家 dispatch 两种模式。代码块若标为“节选”或“教学伪代码”，只保留讨论所需分支；真实执行以链接中的完整函数为准。

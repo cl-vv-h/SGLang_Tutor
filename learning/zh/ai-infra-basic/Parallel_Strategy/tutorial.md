@@ -1,4 +1,8 @@
-# 大模型推理并行策略整理：DP / TP / PP / SP / EP
+# 大模型推理并行策略基础：DP / TP / PP / EP 与 CP 数学示例
+
+**简体中文** | [English](../../../en/ai-infra-basic/Parallel_Strategy/tutorial.md)
+
+先读 [00：策略地图与版本边界](./00-parallelism-map-and-version-boundaries.md)。本讲义保留基础策略的详细例子；SP、PCP、DCP 的现代定义与 SGLang 实现分别见 [02](./02-sp-versus-context-parallelism.md)、[03](./03-prefill-context-parallelism.md)、[04](./04-decode-context-parallelism.md)。
 
 本讲义的 DP 指完整模型副本的数据并行。SGLang 的 `--enable-dp-attention` 会在同一模型 world 内采用不同的 Attention 与 FFN/MoE 布局，请另读 [DP Attention 原理](./01-dp-attention-principles.md)和 [源码走读](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md)。
 
@@ -9,12 +13,14 @@
 | DP | Data Parallelism | 数据并行 | 请求 / batch | 提高吞吐 | 推理阶段通常少通信 |
 | TP | Tensor Parallelism | 张量并行 | 单层内部矩阵 / hidden 维度 | 单层太大，单卡算不动 | all-reduce / all-gather |
 | PP | Pipeline Parallelism | 流水线并行 | Transformer 层 | 模型层数太多，单卡放不下 | send / recv hidden states |
-| SP / CP | Sequence / Context Parallelism | 序列 / 上下文并行 | sequence / context 维度 | 长上下文、KV Cache 压力大 | all-gather KV / broadcast Q + all-reduce / ring attention |
+| SP | Sequence Parallelism | 逐行激活的序列并行 | Norm/residual 的 token 行 | 减少激活与重复计算 | reduce-scatter / all-gather |
+| PCP | Prefill Context Parallelism | 预填充上下文并行 | 新 query 工作 | 分摊长 prompt 计算 | 必要 KV 通信与布局恢复 |
+| DCP | Decode Context Parallelism | 解码上下文并行 | 历史 KV 与局部 attention 贡献 | 分摊 KV 容量/读取 | query 与 output/LSE 交换 |
 | EP | Expert Parallelism | 专家并行 | MoE Experts | Expert 太多，单卡放不下所有 Expert | all-to-all dispatch / combine |
 
 一句话记忆：
 
-> DP 切请求，TP 切矩阵，PP 切层，SP/CP 切序列或上下文，EP 切专家。
+> DP 切请求，TP 切矩阵，PP 切层，EP 切专家；SP 切逐行激活，PCP 切 prefill query 工作，DCP 切 decode 历史 KV。
 
 ---
 
@@ -25,7 +31,7 @@
 DP 切的是：
 
 ```math
-\frac{\frac{\text{请求}}{\mathrm{batch}}}{\text{数据}}
+\text{独立请求或 batch 样本}
 ```
 
 DP 不切模型。
@@ -780,27 +786,19 @@ continuous batching
 
 ---
 
-# 4. SP / CP：Sequence Parallelism / Context Parallelism
+# 4. CP 数学基础：历史 KV 分片与分布式 softmax
 
-## 4.1 SP 和 CP 的关系
+## 4.1 先区分 SP、PCP 与 DCP
 
-SP 和 CP 经常一起讨论。
+旧资料有时把所有 token 维切分统称为 SP/CP。本课程按作用对象区分：
 
-```text
-SP: Sequence Parallelism
-    更偏训练或激活按 sequence 维切分。
+- **SP**：逐行 Norm/residual 的激活切分，数学依据是不同行之间独立。详见 [02](./02-sp-versus-context-parallelism.md)。
+- **PCP**：prefill query 行与 indexer 工作切分，仍须保证因果历史可见。详见 [03](./03-prefill-context-parallelism.md)。
+- **DCP**：decode 历史 KV 与局部 attention 贡献切分，用 LSE 等信息精确合并。详见 [04](./04-decode-context-parallelism.md)。
 
-CP: Context Parallelism
-    更偏长上下文推理中，把 context / KV Cache 按 sequence 维分片。
-```
+下文的 CP 是按上下文拆分 attention 的教学模型，用于建立数学直觉。它不表示上游 PCP 一定永久分片 KV，也不表示旧 demo 已实现生产 DCP 的缓存协议。不同路径可能 gather KV、移动 Q 或轮转 KV，CP 不强制某一种 collective。
 
-它们的核心都可以理解为：
-
-```text
-切 sequence / context 维度
-```
-
-## 4.2 SP/CP 切的是什么？
+## 4.2 CP 切的是什么？
 
 切的是：
 
@@ -834,7 +832,7 @@ x[:, S/2:S, :]
 \mathrm{shape}=\left[B,\frac{S}{2},H\right]
 ```
 
-## 4.3 SP/CP 解决什么问题？
+## 4.3 CP 解决什么问题？
 
 主要解决：
 
@@ -1158,7 +1156,7 @@ all-reduce
 加法贡献关系 -> all-reduce
 ```
 
-## 4.9 SP/CP 的典型通信
+## 4.9 CP 的典型通信
 
 | 实现方式 | 通信方式 |
 |---|---|
@@ -1167,7 +1165,7 @@ all-reduce
 | Ring Attention | ring send/recv K/V blocks |
 | Blockwise Attention | 分块通信 + online softmax |
 
-## 4.10 SP/CP 的优点
+## 4.10 CP 的优点
 
 ```text
 1. 降低长上下文 KV/hidden 的单卡显存压力。
@@ -1176,7 +1174,7 @@ all-reduce
 4. 可以和 TP / PP / DP / EP 组合。
 ```
 
-## 4.11 SP/CP 的缺点
+## 4.11 CP 的缺点
 
 ```text
 1. Attention 跨 rank 依赖复杂。
@@ -1188,7 +1186,7 @@ all-reduce
 
 总结：
 
-> SP/CP 是“切 sequence / context”，每个 rank 保存一段 token 或 KV；attention 通过通信完成跨 context 的全局注意力。
+> CP 是“切 sequence / context”，每个 rank 保存一段 token 或 KV；attention 通过通信完成跨 context 的全局注意力。
 
 ---
 
@@ -1628,10 +1626,10 @@ t4,t5,t6,t7
 真实大模型中，经常组合：
 
 ```text
-DP × PP × TP × EP × SP/CP
+DP × PP × TP × EP × CP
 ```
 
-不是简单相加，而是多维进程网格。
+下面只讨论各维彼此独立的教学进程网格。实际 SGLang 经常复用同一批 ranks，EP/DPA/DCP 等不能一律与 TP 相乘；必须核对进程组。详见 [06：组合拓扑与 PD](./06-parallel-topology-and-pd-composition.md)。
 
 例如：
 
@@ -1651,7 +1649,7 @@ DP × PP × TP × EP × SP/CP
 \mathrm{EP}=4
 ```
 
-总进程数可能是：
+如果这四个维度明确独立，总进程数才是：
 
 ```math
 2\cdot 2\cdot 2\cdot 4=32
@@ -1697,7 +1695,7 @@ MoE dispatch:
     DP group
 
 长上下文 attention:
-    SP/CP group
+    CP group
 ```
 
 ---
@@ -1717,7 +1715,7 @@ TP:
 切矩阵 / hidden 维度
 PP:
 切 Transformer 层
-SP/CP:
+CP:
 切 sequence / context 维度
 EP:
 切 MoE experts
@@ -1735,7 +1733,7 @@ TP:
 PP:
     send / recv hidden states
 
-SP/CP:
+CP:
     通信 K/V 或 Q，做分布式 attention
 
 EP:
@@ -1754,7 +1752,7 @@ TP:
 PP:
     模型太深，层数太多放不下
 
-SP/CP:
+CP:
     上下文太长，KV / activation 太大
 
 EP:
@@ -1910,7 +1908,7 @@ CP:
 DP 切请求；
 TP 切矩阵；
 PP 切层；
-SP/CP 切序列或上下文；
+CP 切序列或上下文；
 EP 切专家。
 ```
 
@@ -1926,7 +1924,7 @@ TP:
 PP:
     不同 rank 保存不同层，hidden states 流水线传递。
 
-SP/CP:
+CP:
     不同 rank 保存不同 token/context 的 hidden 或 KV，通过分布式 attention 合并。
 
 EP:

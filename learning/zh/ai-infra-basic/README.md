@@ -16,7 +16,7 @@
 | 6 | [Execution_Graph](./Execution_Graph/) | 从计算图概念到 CUDA/NPU Graph、torch.compile、静态形状复用和 replay 数据流 | [01-what-is-graph.md](./Execution_Graph/01-what-is-graph.md)、[02-graph-execution-dataflow.md](./Execution_Graph/02-graph-execution-dataflow.md) |
 | 7 | [Mamba_State_Space](./Mamba_State_Space/) | Mamba/SSM 原理、Mamba state、MambaPool、scheduler strategy 和 radix cache 状态 | [01-mamba-and-sglang-state.md](./Mamba_State_Space/01-mamba-and-sglang-state.md) |
 | 8 | [Gated_Delta_Network](./Gated_Delta_Network/) | Gated DeltaNet/GDN 数学、可训练参数、recurrent state、prefill/decode shape 与 serving 状态管理 | [README.md](./Gated_Delta_Network/README.md) |
-| 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP、TP、PP、SP/CP、EP 与 DP Attention 的请求/张量布局、通信和 CPU 模拟 | [README.md](./Parallel_Strategy/README.md)、[DP Attention 原理](./Parallel_Strategy/01-dp-attention-principles.md) |
+| 9 | [Parallel_Strategy](./Parallel_Strategy/) | DP/TP/PP/EP、DPA、SP/PCP/DCP、DWDP、组合拓扑、Encoder DP/弹性 EP 与 Diffusion | [策略地图](./Parallel_Strategy/00-parallelism-map-and-version-boundaries.md)、[课程入口](./Parallel_Strategy/README.md) |
 | 10 | [Communication](./Communication/) | 通信原语、RDMA、Gloo/NCCL/HCCL、DeepEP/ZBAL、Mooncake/NIXL 与性能排查 | [README.md](./Communication/README.md) |
 | 11 | [KV_Transfer](./KV_Transfer/) | PD 分离、KV sender/receiver、远程 KV cache | [README.md](./KV_Transfer/README.md) |
 | 12 | [Speculative_Decoding](./Speculative_Decoding/) | 投机采样数学、target verify、KV 提交、EAGLE/MTP/NGRAM/Medusa/REST，以及 DSpark 半自回归与置信度调度 | [README.md](./Speculative_Decoding/README.md) |
@@ -31,6 +31,8 @@
 3. 然后读 [Execution_Graph](./Execution_Graph/)、[Mamba_State_Space](./Mamba_State_Space/) 和 [Gated_Delta_Network](./Gated_Delta_Network/)，理解生产推理如何减少 CPU overhead，并管理非 Transformer 的 recurrent/linear-attention 状态。
 4. 再读 [Parallel_Strategy](./Parallel_Strategy/)、[KV_Transfer](./KV_Transfer/) 和 [Speculative_Decoding](./Speculative_Decoding/)，理解高阶 serving 优化如何围绕“更快拿到 token”和“更好使用不同资源”展开。
 5. 最后读 [Quantization](./Quantization/)、[LoRA](./LoRA/) 和 [Benchmark_Profiling](./Benchmark_Profiling/)，把模型压缩、adapter serving 和性能验证闭环串起来。
+
+并行策略按“基础 DP/TP/PP/EP → DPA → SP/PCP/DCP → DWDP → 组合拓扑”展开，含数学推导、数据流图、固定版本源码与标准库实验；详见 [课程入口](./Parallel_Strategy/README.md)。
 
 通信基础建议在并行策略之后学习：[Communication](./Communication/README.md) 将 TP collective、EP token 路由和 PD/KV 传输串成一条学习路线。
 

@@ -2,40 +2,57 @@
 
 [简体中文](../../../zh/ai-infra-basic/Parallel_Strategy/README.md) | **English**
 
-This topic covers the parallelization strategies used in LLM inference: Data Parallelism (DP), Tensor Parallelism (TP), Pipeline Parallelism (PP), Sequence Parallelism (SP), and Expert Parallelism (EP).
+This course follows **what is split → why the mathematics permits it → how data moves → how source code implements it**. Separate requests, weights, activations, queries, and historical KV before composing strategies. Do not multiply every degree or treat SP, PCP, and DCP as one feature.
 
-## Strategies Overview
+## Course structure
 
-| Strategy | How It Works | Best For | Communication |
-|---|---|---|---|
-| DP | Replicate model, split batch across devices | Increasing throughput | All-reduce gradients (training only) |
-| TP | Split weight matrices column/row-wise across devices | Models too large for single GPU | All-reduce / all-gather per layer |
-| PP | Split model layers across devices, micro-batch pipeline | Very deep models | Send/recv activations between stages |
-| SP/CP | Split sequence length across devices | Long context inference | All-to-all for attention |
-| EP | Place different experts on different devices | Large MoE models | All-to-all for token dispatch/combine |
+| Chapter | Main question | Diagrams and examples |
+|---|---|---|
+| [00: map and version boundaries](./00-parallelism-map-and-version-boundaries.md) | Where does each strategy act? How do local and upstream APIs differ? | Strategy table and execution-stage map |
+| [Foundations: DP / TP / PP / EP](./tutorial.md) | How are requests, matrices, layers, and experts split? | Column/row TP, pipelines, token dispatch |
+| [01: DP Attention](./01-dp-attention-principles.md) | How do attention request subgroups cooperate with global FFN/MoE? | Partial/replica, gather/scatter, padding/IDLE |
+| [02: SP versus CP](./02-sp-versus-context-parallelism.md) | Why can Norm split by rows while attention needs history? | ReduceScatter → Norm → AllGather |
+| [03: PCP](./03-prefill-context-parallelism.md) | How does query work split while preserving causality? | Zigzag/interleave, triangular load, request boundaries |
+| [04: DCP](./04-decode-context-parallelism.md) | How does sharded KV reconstruct exact softmax? | Two derivations, LSE example, virtual/physical slots |
+| [05: DWDP](./05-dwdp-weight-parallelism.md) | When should weights move to tokens? | EP comparison, traffic crossover, VMM and double buffering |
+| [06: topology and PD](./06-parallel-topology-and-pd-composition.md) | How many identities does a rank have? How do different P/D degrees hand off KV? | Eight-rank grid, DCP subgroups, KV-head remapping |
+| [07: encoder DP and elastic EP](./07-encoder-dp-and-elastic-ep.md) | How do module parallelism, expert copies, and scaling differ? | Encoder assignment, logical/physical experts, state diagram |
+| [08: diffusion extension](./08-diffusion-parallelism.md) | How do CFG, Ulysses, Ring, and KV-gather interact? | Branch graph, shape transformations, ring data flow |
 
-## Files
+Every new topic has corresponding English/Chinese files, mathematical derivations, diagrams, source entries, and exercises. Foundations retain existing examples; legacy CP terminology is labeled explicitly. Chapters 02–04 define the distinct SP/PCP/DCP mechanisms and implementations.
 
-| File | Content |
+## Reading paths
+
+1. Beginners: 00 → foundational DP/TP/PP/EP → 01. First explain which value is replicated and which is partial.
+2. Long contexts: 02 → 03 → 04. Compare row activations, prefill queries, and decode historical KV.
+3. MoE and deployment composition: 05 → 06 → 07, followed by [Communication](../Communication/README.md) and [KV Transfer](../KV_Transfer/README.md).
+4. Image/video generation: 08. Its separate runtime does not share SRT launch settings directly.
+
+## Runnable math experiments
+
+These two use only Python's standard library. Run from the repository root:
+
+```bash
+python3 learning/en/ai-infra-basic/Parallel_Strategy/parallelism_math_demo.py
+python3 learning/en/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
+```
+
+[parallelism_math_demo.py](./parallelism_math_demo.py) compares decompositions against unsharded results: SP, ragged PCP, stable DCP merging (empty shards and large scores), EP/DWDP, rank topology, PD head remapping, encoder DP, and Ulysses/CFG. It neither simulates network latency nor proves device/backend support for the same combinations.
+
+[dp_attention_layout_demo.py](./dp_attention_layout_demo.py) focuses on SUM_LEN/MAX_LEN gathering, replica deduplication, and reduce-scatter returns.
+
+| Retained PyTorch demo | What to follow |
 |---|---|
-| [tutorial.md](./tutorial.md) | Comprehensive parallel strategy tutorial |
-| [01-dp-attention-principles.md](./01-dp-attention-principles.md) | DP Attention: request ownership, attention subgroups, FFN/MoE layouts, partial/replicated values, padding, IDLE, and KV ownership |
-| [dp_attention_layout_demo.py](./dp_attention_layout_demo.py) | Standard-library CPU simulator for SUM_LEN/MAX_LEN gathering, replica deduplication, and reduce-scatter output returns |
-| [dp_inference_demo.py](./dp_inference_demo.py) | Data Parallelism demo |
-| [tp_inference_demo.py](./tp_inference_demo.py) | Tensor Parallelism demo |
-| [pp_inference_demo.py](./pp_inference_demo.py) | Pipeline Parallelism demo |
-| [sp_inference_demo.py](./sp_inference_demo.py) | Sequence/Context Parallelism demo |
-| [ep_moe_demo.py](./ep_moe_demo.py) | Expert Parallelism demo for MoE |
+| [dp_inference_demo.py](./dp_inference_demo.py) | Independent requests and complete-model copies |
+| [tp_inference_demo.py](./tp_inference_demo.py) | Column/row weights and partial sums |
+| [pp_inference_demo.py](./pp_inference_demo.py) | Activation handoff and autoregressive dependencies |
+| [sp_inference_demo.py](./sp_inference_demo.py) | Legacy filename: CP distributed softmax, not LayerNorm SP |
+| [ep_moe_demo.py](./ep_moe_demo.py) | Token dispatch, expert execution, and combine |
 
-## SGLang Integration
+Some old demos require PyTorch, multiple processes, or multiple devices; read their launch instructions first.
 
-For `--enable-dp-attention`, read [DP Attention principles](./01-dp-attention-principles.md), run the layout simulator, then follow the [end-to-end source walkthrough](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md). DP Attention combines request parallelism, attention TP, and FFN/MoE parallelism inside one model world. Its device count and communication differ from ordinary complete-model DP replicas.
+## Source reading and versions
 
-- TP/PP ranks are initialized in `ParallelState` during `Scheduler.__init__`
-- Communication backends (NCCL/HCCL) selected based on device type
-- `LayerCommunicator` abstracts TP/EP/CP communication patterns
-- EP uses `deep_ep::Buffer` for dispatch/combine in MoE layers
+[00](./00-parallelism-map-and-version-boundaries.md) centralizes local versus pinned-upstream differences. Chapters link upstream implementations to a commit rather than moving main, and do not invent local entries for absent features.
 
-## Communication Foundations
-
-After sharding strategies, read [Communication](../Communication/README.md): tensor semantics for AllReduce/AllGather/ReduceScatter/AllToAllV, followed by Gloo, NCCL, HCCL, DeepEP, and ZBAL implementation boundaries.
+After 01, follow the [DP Attention walkthrough](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md); for rank composition and Ascend, read [TP/DP/EP source analysis](../../sglang-source-reading/05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md). The [communication course](../Communication/README.md) connects collectives with Gloo/NCCL/HCCL, DeepEP/ZBAL, and Mooncake.

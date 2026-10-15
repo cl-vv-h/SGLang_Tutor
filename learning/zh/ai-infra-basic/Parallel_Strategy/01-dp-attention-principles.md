@@ -6,6 +6,8 @@
 
 本文按本仓库源码快照 `587eb0b3a56cd2f014daf3b0fc8ba333da88df36` 解释。教学中的配置和数字用于推导，不代表目标模型在任意 backend 上都支持该组合。
 
+新版上游已将 `attn_dp_size` 与普通 DP 分开；旧开关的兼容转换及 SP/PCP/DCP 接口差异见 [版本边界](./00-parallelism-map-and-version-boundaries.md)。下文继续按上述本地快照解释。
+
 ## 1. 先看它解决的矛盾
 
 Attention 和 FFN/MoE 对并行的需求并不相同：

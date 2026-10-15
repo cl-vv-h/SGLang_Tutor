@@ -2,36 +2,57 @@
 
 **简体中文** | [English](../../../en/ai-infra-basic/Parallel_Strategy/README.md)
 
-这个目录整理 LLM 推理中常见的多卡并行策略。主讲义是 [tutorial.md](./tutorial.md)，配套 Python demo 用更小的张量和模型结构模拟 DP、TP、PP、SP/CP、EP 的切分对象和通信模式。
+本课程按“**切什么 → 为什么能这样切 → 数据怎样流动 → 源码怎样实现**”组织。先区分请求、权重、激活、query 和历史 KV，再讨论组合；不能把所有 degree 直接相乘，也不能把 SP、PCP、DCP 当成同一个功能。
 
-## 文件说明
+## 课程结构
 
-| 文件 | 主题 | 核心问题 |
+| 章节 | 核心问题 | 图与例子 |
 |---|---|---|
-| [tutorial.md](./tutorial.md) | 并行策略总讲义 | DP/TP/PP/SP/EP 分别切什么、解决什么问题、通信代价是什么 |
-| [01-dp-attention-principles.md](./01-dp-attention-principles.md) | DP Attention 原理 | 请求如何分到 Attention 子组，FFN/MoE 如何切换布局，partial/replica、padding、IDLE 和 KV 所有权如何保持正确 |
-| [dp_attention_layout_demo.py](./dp_attention_layout_demo.py) | DP Attention CPU 模拟 | SUM_LEN/MAX_LEN gather、replica 去重与 reduce-scatter 返回为何数学等价；仅依赖标准库 |
-| [dp_inference_demo.py](./dp_inference_demo.py) | Data Parallelism | 请求或 batch 维度如何分发到多个完整模型副本 |
-| [tp_inference_demo.py](./tp_inference_demo.py) | Tensor Parallelism | Linear/Attention/FFN 的矩阵如何切到多个 rank |
-| [pp_inference_demo.py](./pp_inference_demo.py) | Pipeline Parallelism | Transformer 层如何分段，hidden states 如何跨 stage 传递 |
-| [sp_inference_demo.py](./sp_inference_demo.py) | Sequence/Context Parallelism | 长序列或长上下文如何按 sequence/context 维度拆分 |
-| [ep_moe_demo.py](./ep_moe_demo.py) | Expert Parallelism | MoE token dispatch、expert 执行和结果 combine 如何配合 |
+| [00：策略地图与版本边界](./00-parallelism-map-and-version-boundaries.md) | 全部策略处于服务流程哪里？本地与上游接口有什么不同？ | 策略表、执行阶段图 |
+| [基础讲义：DP / TP / PP / EP](./tutorial.md) | 请求、矩阵、层和专家怎样切？ | Column/Row TP、流水线、token dispatch |
+| [01：DP Attention](./01-dp-attention-principles.md) | Attention 请求子组如何与全局 FFN/MoE 配合？ | partial/replica、gather/scatter、padding/IDLE |
+| [02：SP 与 CP 的区别](./02-sp-versus-context-parallelism.md) | 为什么逐行 Norm 可以分，而 attention 需要历史？ | ReduceScatter → Norm → AllGather |
+| [03：PCP](./03-prefill-context-parallelism.md) | 怎样分长 prompt 的 query 工作并保留因果关系？ | zigzag/interleave、三角负载与请求边界 |
+| [04：DCP](./04-decode-context-parallelism.md) | 怎样分历史 KV，又精确重构 softmax？ | 两种推导、LSE 数值例子、虚拟/物理 slot |
+| [05：DWDP](./05-dwdp-weight-parallelism.md) | 何时让权重来找 token？ | EP 对比、字节交点、VMM 与双缓冲时序 |
+| [06：组合拓扑与 PD](./06-parallel-topology-and-pd-composition.md) | 一个 rank 有几种身份？P/D 不同并行度如何交接？ | 八卡网格、DCP 子组、KV head 重映射 |
+| [07：Encoder DP 与弹性 EP](./07-encoder-dp-and-elastic-ep.md) | 模块并行、专家副本和动态扩容怎样区分？ | 编码工作分配、logical/physical expert、状态图 |
+| [08：Diffusion 扩展](./08-diffusion-parallelism.md) | CFG、Ulysses、Ring、KV-gather 怎样配合？ | 分支图、shape 变换、环形数据流 |
 
-## 推荐阅读顺序
+每个新增专题均有中英文对应文件、数学推导、数据流图、源码入口和练习。基础讲义保留原有详细示例；其中旧 CP 部分已明确标注历史语境，SP/PCP/DCP 的定义与具体实现以 02–04 为准。
 
-1. 先读 [tutorial.md](./tutorial.md) 的总览表，记住一句话：DP 切请求，TP 切矩阵，PP 切层，SP/CP 切序列或上下文，EP 切专家。
-2. 按 `dp -> tp -> pp -> sp -> ep` 的顺序读 demo。这个顺序从最容易理解的横向扩容，逐步走向通信更复杂的并行。
-3. 每读完一个策略，都回答三个问题：它切的对象是什么；它降低了哪类瓶颈；它引入了哪类通信。
-4. 如果要理解 SGLang 的 `--enable-dp-attention`，继续读 [DP Attention 原理](./01-dp-attention-principles.md)，运行 CPU 布局模拟，再读 [端到端源码走读](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md)。
+## 推荐路线
 
-## 和 SGLang 的连接点
+1. 初学者：00 → 基础 DP/TP/PP/EP → 01，先能解释“哪个量是副本，哪个量是 partial”。
+2. 长上下文：02 → 03 → 04，比较逐行激活、prefill query、decode 历史 KV。
+3. MoE 与组合部署：05 → 06 → 07，再接 [Communication](../Communication/README.md) 和 [KV Transfer](../KV_Transfer/README.md)。
+4. 图像/视频生成：08，注意它属于另一套 runtime，不能直接复用 SRT 启动参数。
 
-- TP/PP/DP 决定了 Scheduler 和 ModelRunner 进程组如何组织 rank。
-- EP 与 MoE 模型相关，会引入 token dispatch/combine 和 all-to-all 通信。
-- SP/CP 主要服务长上下文，和 KV Cache、attention backend、decode 阶段显存压力关系很强。
-- 实际 serving 通常会组合多种策略，例如 TP + DP、TP + EP 或 PD disaggregation + TP。
-- DP Attention 在同一个模型 world 内组合请求并行、Attention TP 和 FFN/MoE 并行；与普通 DP 的完整模型副本模式不同，$`\mathrm{tp\_size}=4,\qquad \mathrm{dp\_size}=2`$ 的计算设备数也可能不同。
+## 可运行的数学实验
 
-## 通信基础延伸
+下面两份只用 Python 标准库，在仓库根目录运行：
 
-读完切分策略后，继续学习 [Communication](../Communication/README.md)：从 AllReduce/AllGather/ReduceScatter/AllToAllV 的张量语义，到 Gloo、NCCL、HCCL、DeepEP 和 ZBAL 的实现边界。
+```bash
+python3 learning/zh/ai-infra-basic/Parallel_Strategy/parallelism_math_demo.py
+python3 learning/zh/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
+```
+
+[parallelism_math_demo.py](./parallelism_math_demo.py) 对照未分片结果，验证 SP、ragged PCP、稳定 DCP 合并（含空片和大 score）、EP/DWDP、rank 拓扑、PD head 重排、Encoder DP 和 Ulysses/CFG。它不模拟真实网络延迟，也不证明目标设备/backend 支持相同组合。
+
+[dp_attention_layout_demo.py](./dp_attention_layout_demo.py) 专门解释 SUM_LEN/MAX_LEN gather、replica 去重与 reduce-scatter 返回。
+
+| 保留的 PyTorch demo | 阅读时关注 |
+|---|---|
+| [dp_inference_demo.py](./dp_inference_demo.py) | 独立请求与完整模型副本 |
+| [tp_inference_demo.py](./tp_inference_demo.py) | Column/Row 权重与 partial 求和 |
+| [pp_inference_demo.py](./pp_inference_demo.py) | stage 间传激活与自回归依赖 |
+| [sp_inference_demo.py](./sp_inference_demo.py) | 历史文件名；内容是 CP 分布式 softmax，不是 LayerNorm SP |
+| [ep_moe_demo.py](./ep_moe_demo.py) | token dispatch、expert 执行与 combine |
+
+部分旧 demo 需要 PyTorch、多进程或多设备，先读其运行说明。
+
+## 源码阅读与版本
+
+本地源码和固定上游的差别统一见 [00](./00-parallelism-map-and-version-boundaries.md)。每章把上游实现链接到 commit，而不是会移动的 main；不存在的本地功能不伪造入口。
+
+读完 01，接 [DP Attention 源码走读](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md)；组合 rank 与 Ascend 路径接 [TP/DP/EP 源码篇](../../sglang-source-reading/05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md)。通信原语和 Gloo/NCCL/HCCL、DeepEP/ZBAL、Mooncake 的分工见 [通信课程](../Communication/README.md)。

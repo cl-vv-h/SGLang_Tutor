@@ -1,8 +1,10 @@
+# 历史文件名：此文件演示 CP 分布式 softmax，不是 LayerNorm SP。
+# SP/PCP/DCP 的区别见 02、03、04；本例不实现上游 DCP cache 协议。
 # sp_context_parallel_demo.py
 
 """
 教学目标：
-    更接近工业实现地理解 Sequence / Context Parallelism。
+    通过分布式 softmax 理解 Context Parallelism（CP）；不等同 LayerNorm SP。
 
 和简单教学版的区别：
 
