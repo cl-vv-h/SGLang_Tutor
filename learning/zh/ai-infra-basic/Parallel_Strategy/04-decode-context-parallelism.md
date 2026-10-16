@@ -157,20 +157,228 @@ o=\frac{1\cdot2+3\cdot10}{1+3}=8.
 
 ## 4. 缓存地址：逻辑位置与本卡物理行分开
 
-先采用逐 token interleave 的教学模型，DCP degree 为 $`C`$，共享虚拟 slot 为 $`v`$：
+### 4.1 先问：这个 token 的 KV，到底放在哪张卡的哪个格子？
+
+第 2、3 节解决的是“各卡算出的答案怎样合并”。在计算之前，还要解决另一个问题：**当前 token 的 KV 应该写在哪里，历史 KV 又应该从哪里读？**
+
+先固定一个 DCP 组，两张卡共同服务同一请求。采用**逐 token 交错**的布局：请求的偶数位置放 rank 0，奇数位置放 rank 1。它不是“前半段归卡 0、后半段归卡 1”。
+
+这里一个“格子”表示某层一个 token 的 KV entry：可以包含多维 K/V，也可以是 MLA latent，不是只有一个数。所谓本卡“物理行”，是本卡 cache pool 的条目编号，不是设备指针的字节地址；kernel 还会根据真实 tensor layout/stride 定位数据。
+
+### 4.2 先分清四种编号，别急着代入公式
+
+下文的 token 位置、slot、行号和页号均从零开始，所有 rank 编号均指 DCP 组内 rank。
+
+| 名字 | 回答的问题 | 本节例子 |
+|---|---|---|
+| 请求内 token 位置 $`p`$ | 这是该请求的第几个 token？ | 请求 R0 的位置 $`0`$、$`1`$、$`2`$ |
+| 虚拟 slot $`v`$ | 运行时给这个 token 的 KV 分配了哪个统一编号？ | 可以是 $`16`$、$`17`$、$`18`$，不一定从零分配 |
+| owner rank | 统一编号对应哪张卡？ | rank 0 或 rank 1 |
+| 本卡物理行 $`\lambda`$ | 到了那张卡，在它自己的 pool 中读写哪一行？ | 可以是本卡行号 $`8`$、$`9`$ |
+
+请求内位置描述**序列语义**，虚拟 slot 描述**缓存分配**。两者不能混用：R0 和 R1 都可以有位置零，但没有共享 prefix 等特殊安排时，它们应分配不同的 KV 存储。
+
+“虚拟”不是说又保存了一份完整 KV。它是一套组内一致的编号：同一个虚拟 slot，通过规则可以翻译成“哪张卡 + 哪一行”。本节假设无 prefix 共享，且从页边界开始分配。
+
+### 4.3 一个虚拟编号，怎样翻译成 rank 和行？
+
+令 DCP degree 为 $`C`$。先只看逐 token 交错的映射：
 
 ```math
 \mathrm{owner}(v)=v\bmod C,\qquad
 \mathrm{local}(v)=\lfloor v/C\rfloor.
 ```
 
-| 虚拟 slots | rank 0 的物理行 | rank 1 的物理行 |
+余数决定轮到哪张卡，商决定在这张卡上排到哪一行。取 $`C=2`$，假设请求前六个 token 分配到虚拟 slots $`16`$ 到 $`21`$：
+
+| 请求内位置 | 虚拟 slot | owner：除以二的余数 | 本卡物理行：除以二向下取整 |
+|---|---|---|---|
+| $`0`$ | $`16`$ | rank 0 | $`8`$ |
+| $`1`$ | $`17`$ | rank 1 | $`8`$ |
+| $`2`$ | $`18`$ | rank 0 | $`9`$ |
+| $`3`$ | $`19`$ | rank 1 | $`9`$ |
+| $`4`$ | $`20`$ | rank 0 | $`10`$ |
+| $`5`$ | $`21`$ | rank 1 | $`10`$ |
+
+虚拟 slots $`16`$ 和 $`17`$ 都映射到“行号八”，为什么不会覆盖？因为完整地址要带上 rank：$`(0,8)`$ 和 $`(1,8)`$ 是**不同卡的不同存储**。
+
+```mermaid
+flowchart TD
+    R["请求 R0：原始位置 0、1、2、3、4、5"] --> V["统一虚拟 slots：16、17、18、19、20、21"]
+    V --> A["rank 0：只保留 16、18、20"]
+    V --> B["rank 1：只保留 17、19、21"]
+    A --> PA["本卡物理行 8、9、10：位置 0、2、4"]
+    B --> PB["本卡物理行 8、9、10：位置 1、3、5"]
+```
+
+可以反过来验证没有丢失信息：
+
+```math
+v=C\lambda+r,\qquad r=\mathrm{owner}(v),\quad \lambda=\mathrm{local}(v).
+```
+
+### 4.4 为什么一个“虚拟页”能容纳两卡合计的 token？
+
+KV cache 通常按 page 分配，而不是每次为一个 token 单独向设备申请内存。令每卡物理页容量为 $`P=4`$，DCP degree 为 $`C=2`$：
+
+```math
+P_{\mathrm{virtual}}=PC=8.
+```
+
+一个容量为八的虚拟页，对应 rank 0 的一个四行物理页，以及 rank 1 的一个四行物理页。不是某张卡的物理页突然能装八行。
+
+以虚拟页 ID $`b=2`$ 为例，它的虚拟 slots 是 $`16`$ 到 $`23`$：
+
+| 虚拟页内 offset | 虚拟 slot | owner | 本卡物理页 ID | 本卡页内 offset | 本卡物理行 |
+|---|---|---|---|---|---|
+| $`0`$ | $`16`$ | rank 0 | $`2`$ | $`0`$ | $`8`$ |
+| $`1`$ | $`17`$ | rank 1 | $`2`$ | $`0`$ | $`8`$ |
+| $`2`$ | $`18`$ | rank 0 | $`2`$ | $`1`$ | $`9`$ |
+| $`3`$ | $`19`$ | rank 1 | $`2`$ | $`1`$ | $`9`$ |
+| $`4`$ | $`20`$ | rank 0 | $`2`$ | $`2`$ | $`10`$ |
+| $`5`$ | $`21`$ | rank 1 | $`2`$ | $`2`$ | $`10`$ |
+| $`6`$ | $`22`$ | rank 0 | $`2`$ | $`3`$ | $`11`$ |
+| $`7`$ | $`23`$ | rank 1 | $`2`$ | $`3`$ | $`11`$ |
+
+对任意虚拟 slot，可以先得到虚拟页及其页内 offset，再得到本卡行：
+
+```math
+b=\left\lfloor\frac{v}{PC}\right\rfloor,\qquad o_v=v\bmod(PC),\qquad
+\lambda=bP+\left\lfloor\frac{o_v}{C}\right\rfloor.
+```
+
+因此对应的本卡物理页 ID 与页内 offset 为：
+
+```math
+\mathrm{page}_{\mathrm{local}}=\left\lfloor\lambda/P\right\rfloor=b,\qquad
+\mathrm{offset}_{\mathrm{local}}=\lambda\bmod P.
+```
+
+两张卡上的物理页 ID 可以数值相同，但属于各自的显存。若每卡 pool 有 $`M`$ 个物理行，组内这套虚拟编号理想上覆盖 $`CM`$ 个独立条目；它描述的是**多卡合计容量**，不是给每卡凭空增加显存。实际还要扣除保留页、padding 等开销。
+
+### 4.5 请求历史连续，不代表分配的页号连续
+
+现在让 R0 增长到十个 token。假设 allocator 给它的两个虚拟页 ID 是 $`2`$ 和 $`7`$，中间的页可能已经分给其他请求。
+
+这里把请求的逻辑页到虚拟页 ID 的映射记作 $`B_{R0}`$：
+
+```math
+B_{R0}[0]=2,\qquad B_{R0}[1]=7.
+```
+
+对请求内位置，完整寻址过程为：
+
+```math
+b_{\mathrm{req}}=\left\lfloor\frac{p}{PC}\right\rfloor,\qquad
+v=B_{R0}[b_{\mathrm{req}}]\,PC+(p\bmod PC).
+```
+
+先求请求内的逻辑页编号，再查分配到的虚拟页 ID，最后使用第 4.3 节规则得到 owner 和物理行：
+
+| 请求位置 | 虚拟页 ID | 虚拟 slot | owner | 本卡物理行 |
+|---|---|---|---|---|
+| $`0,1`$ | $`2`$ | $`16,17`$ | rank 0、rank 1 各一个 | 两卡各为 $`8`$ |
+| $`2,3`$ | $`2`$ | $`18,19`$ | rank 0、rank 1 各一个 | 两卡各为 $`9`$ |
+| $`4,5`$ | $`2`$ | $`20,21`$ | rank 0、rank 1 各一个 | 两卡各为 $`10`$ |
+| $`6,7`$ | $`2`$ | $`22,23`$ | rank 0、rank 1 各一个 | 两卡各为 $`11`$ |
+| $`8,9`$ | $`7`$ | $`56,57`$ | rank 0、rank 1 各一个 | 两卡各为 $`28`$ |
+
+所以不能写“位置八的 KV 一定紧接物理行十一，放到行十二”。本例实际跳到了本卡行二十八。
+
+两请求即使位置相同，也不因此碰撞：如果 R1 的第一个虚拟页 ID 是 $`4`$，它的位置零对应虚拟 slot $`32`$、rank 0 物理行 $`16`$，与 R0 的位置零不是同一个地址。
+
+这张页表是解释分配关系的教学表示，不保证所有 backend 都有一个同名数组。SGLang 也会通过 `req_to_token` 等结构直接记录请求位置对应的 token slot，并为 kernel 构造所需 page table / 索引列表。**核心是保留请求位置到分配地址的映射，而不是假设序列对应一段连续显存。**
+
+### 4.6 写一次 Decode：位置六的新 KV 怎么落到缓存里？
+
+回到 R0 已缓存六个 token 的时刻，准备 forward 原始位置 $`p=6`$ 的当前 token。它使用虚拟页二的页内 offset 六：
+
+```math
+v=2\times8+6=22,\qquad \mathrm{owner}(22)=0,\qquad \mathrm{local}(22)=11.
+```
+
+写入可分成四步：
+
+1. allocator / 请求映射确定本 token 的虚拟 slot；各 rank 对这个编号的解释一致。
+2. 对某层待写入的 KV，检查这个 slot 是否归本 rank 所有。
+3. rank 0 将其写入本卡物理行十一；rank 1 不把这份历史条目再持久复制进自己的 DCP KV pool。
+4. 更新相应 metadata；各卡仍要拿到计算本地历史贡献所需的 query，取得 query 的方式属于第 5 节的通信/投影策略。
+
+下面只表达通用地址语义，是教学伪代码，不是某个上游函数的逐行摘录：
+
+```python
+for new_kv, virtual_slot in pending_writes:
+    if virtual_slot % dcp_size == my_dcp_rank:
+        physical_row = virtual_slot // dcp_size
+        local_cache[physical_row] = new_kv
+```
+
+写入了位置六后，rank 0 保存本请求位置 $`[0,2,4,6]`$，rank 1 保存 $`[1,3,5]`$。这指**持久化 cache 的所有权**，不代表 query 只在 owner 上计算，也不规定投影阶段的临时 KV 是否曾在其他 rank 产生。
+
+### 4.7 读一次 Decode：只读本卡历史，但保留原始因果位置
+
+对位置六的 query，完整可见历史是该请求的位置零到六，包含刚写入的当前位置。两卡各自读到：
+
+| rank | 原始请求位置 | 对应虚拟 slots | 本卡读取的物理行 | 本地有效历史条数 |
+|---|---|---|---|---|
+| rank 0 | $`[0,2,4,6]`$ | $`[16,18,20,22]`$ | $`[8,9,10,11]`$ | $`4`$ |
+| rank 1 | $`[1,3,5]`$ | $`[17,19,21]`$ | $`[8,9,10]`$ | $`3`$ |
+
+“rank 0 的本地历史序号三”对应原始位置六，但 cache pool 行是十一。**本地序号、原始位置、pool 物理行也是三个不同概念。** kernel 可以用 page table 翻译它们，不要求实际 gather 成一段连续 tensor。
+
+每卡拿到所需 query，读取自己的有效 KV，计算局部 output/LSE，再按第 3 节合并。地址转换本身不要求把所有历史 KV 重新 all-gather。
+
+```mermaid
+flowchart LR
+    P["请求 ID + 原始可见范围"] --> MAP["请求映射：查虚拟 slots"]
+    MAP --> OWN["保留归本 rank 的 slots"]
+    OWN --> LOCAL["转换本卡物理行 / page table"]
+    LOCAL --> ATTN["本地 KV + 所需 query：局部 Attention"]
+    P --> MASK["原始位置与全局长度：保证因果可见性"]
+    MASK --> ATTN
+    ATTN --> MERGE["交换 output/LSE，合并答案"]
+```
+
+原始位置不能被物理行号替代。例如位置八的 KV 在本卡行二十八，**二十八不是它的序列位置**。有因果 mask 或位置编码时，必须使用正确的原始位置/全局长度及 backend 的 DCP 映射元数据；不能把本卡读到的序号当作原始时间轴。
+
+此外，物理页已分配不等于每个格子都有有效历史。本例十个 token 使用两卡各两页，每卡预留八行而只有五行有效；页内剩余空间不能因为有内存就参与 softmax。
+
+### 4.8 对回源码：筛选归属和压缩地址是两步
+
+本节继续固定上游 commit `f2b73d4f9b4e64415b8d775b0f811c7801f1728b`，不把它当作仓内已有实现。可按以下问题阅读：
+
+| 要核对的问题 | 固定源码入口 | 关键约定 |
 |---|---|---|
-| 0、1、2、3、4、5 | 0、1、2 对应 0、2、4 | 0、1、2 对应 1、3、5 |
+| 哪些索引归本 rank，如何压缩？ | [layout.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/dcp/layout.py)：`localize_dcp_indices()` | 非本卡或无效索引置为 $`-1`$；调用者仍须说明输入属于哪个索引域 |
+| 为什么某处可以直接按 rank 步进切片？ | 同文件 `maybe_dcp_kernel_indices()` | 有页对齐起点的前提，不可对任意非对齐子列表照搬切片 |
+| 筛完 owner，编号是否已经变小？ | 同文件 `filter_dcp_local_kv_indices()` | 这里只筛选，保留的仍是 widened IDs，后续还需地址翻译 |
+| Decode metadata 怎样变成本地有效长度和索引？ | [planner.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/dcp/planner.py)：`plan_dcp_decode_metadata()` | 更新本地长度、边界、有效索引；返回的有效范围再交给 `translate_dcp_read_ids` |
 
-每张卡都看到一致的请求→虚拟 slot 映射，但只写入自己拥有的 slot。物理每页容量为 $`P`$ 时，虚拟页可容纳 $`PC`$ 个 slots；这不是每卡真的多出 $`C`$ 倍显存。
+不能只看一个整数 tensor 就猜它是原始 token 位置还是物理行。对请求内位置做压缩会得到本地历史序号；对虚拟 slot 做压缩才得到 pool 行，二者还隔着请求的分配映射。翻译前也要确认编号是否已被压缩，不能把物理行再次除以 DCP degree。
 
-上游 [layout.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/dcp/layout.py) 的 `maybe_dcp_kernel_indices()` 对应逐 slot 筛选；`localize_dcp_indices()` 还支持 block interleave 参数。因此上面只是最小模型，真实 backend 的页粒度、padding 和 sparse 索引必须按实际约定转换。
+更一般的布局可以每连续 $`I`$ 个条目再轮换 rank，而不是每个 token 轮换一次。对正确索引域中的非负编号 $`x`$：
+
+```math
+b_I=\left\lfloor x/I\right\rfloor,\qquad
+\mathrm{owner}_I(x)=b_I\bmod C,\qquad
+\mathrm{local}_I(x)=\left\lfloor b_I/C\right\rfloor I+(x\bmod I).
+```
+
+例如 $`C=2,I=2`$ 时，前八个原始位置按 $`[0,1,4,5]`$ / $`[2,3,6,7]`$ 分配。取 $`I=1`$ 才退化成本节前面的逐 token 规则。`localize_dcp_indices()` 的 `interleave_size` 支持这类分块布局；真实页粒度、稀疏 top-k、padding 与 tensor packing 要一起核对，不能只替换 owner 公式就认定所有后端可用。
+
+### 4.9 阅读后的三个检查题与 CPU 自检
+
+1. 为什么虚拟 slots 十六、十七都对应本卡行八，却不会相互覆盖？
+2. 为什么请求位置八不保证落到本卡行十二？需要先查哪张映射？
+3. 为什么把地址压缩成了本地行号，仍不能丢掉请求边界和原始因果位置？
+
+[dcp_cache_address_demo.py](./dcp_cache_address_demo.py) 不下载权重，不依赖 PyTorch。它打印本节的跨页地址表，演示 owner-only 写入和本地历史读取，并检查不同请求、页边界、无效索引和分块交错的地址不变量：
+
+```bash
+python3 learning/zh/ai-infra-basic/Parallel_Strategy/dcp_cache_address_demo.py
+```
+
+这是地址/索引教学测试，不是对完整 DCP 后端、设备性能或任意 prefix/speculation 组合的实机验证。
 
 ## 5. SGLang 的实际通信路径
 

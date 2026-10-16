@@ -157,20 +157,228 @@ Remember: **derivation one establishes a common scale, then combines numerators 
 
 ## 4. Cache Addressing: Logical Slots versus Local Physical Rows
 
-Use a teaching model with token interleaving, DCP degree $`C`$, and shared virtual slot $`v`$:
+### 4.1 Which device and which slot actually store this token's KV?
+
+Sections 2–3 explain how to merge answers. Before computing them, another question needs an answer: **where should new KV be written, and where should historical KV be read?**
+
+Fix one DCP group of two devices serving the same request. Start with **token-interleaved** storage: even request positions belong to rank 0, odd positions to rank 1. This is not a contiguous first-half/second-half split.
+
+One storage cell represents a token's KV entry in a layer: it may contain multidimensional K/V or an MLA latent, not just one number. A local physical row is an entry index in that device's cache pool, not a device-pointer byte address. The kernel still uses the real tensor layout/strides to locate data.
+
+### 4.2 Distinguish four identifiers before applying an equation
+
+Token positions, slots, rows, and pages below are zero-based. Rank IDs refer to ranks within the DCP group.
+
+| Name | Question answered | Example |
+|---|---|---|
+| Request token position $`p`$ | Which token is this within the request? | Positions $`0`$, $`1`$, $`2`$ in R0 |
+| Virtual slot $`v`$ | Which common KV identifier did the runtime allocate? | Possibly $`16`$, $`17`$, $`18`$, not necessarily starting at zero |
+| Owner rank | Which device owns this identifier? | Rank 0 or rank 1 |
+| Local physical row $`\lambda`$ | Which row in that device's own pool should be accessed? | Possibly local row $`8`$ or $`9`$ |
+
+Request position describes **sequence semantics**, whereas virtual slot describes **cache allocation**. R0 and R1 can both have position zero, but without arrangements such as prefix sharing they require different KV storage.
+
+Virtual does not mean another complete copy of KV exists. It is a group-consistent numbering scheme translated into a device plus a row. This section assumes no shared prefix and allocation starting at page boundaries.
+
+### 4.3 Translating one virtual identifier into a rank and row
+
+Let DCP degree be $`C`$. For token-interleaved storage:
 
 ```math
 \mathrm{owner}(v)=v\bmod C,\qquad
 \mathrm{local}(v)=\lfloor v/C\rfloor.
 ```
 
-| Virtual Slots | Rank 0 Physical Rows | Rank 1 Physical Rows |
+The remainder chooses the device, and the quotient chooses its local row. With $`C=2`$, suppose the request's first six tokens receive virtual slots $`16`$ through $`21`$:
+
+| Request position | Virtual slot | Owner: remainder after division by two | Local row: floor division by two |
+|---|---|---|---|
+| $`0`$ | $`16`$ | Rank 0 | $`8`$ |
+| $`1`$ | $`17`$ | Rank 1 | $`8`$ |
+| $`2`$ | $`18`$ | Rank 0 | $`9`$ |
+| $`3`$ | $`19`$ | Rank 1 | $`9`$ |
+| $`4`$ | $`20`$ | Rank 0 | $`10`$ |
+| $`5`$ | $`21`$ | Rank 1 | $`10`$ |
+
+Why do virtual slots $`16`$ and $`17`$ both mapping to row eight not overwrite each other? The complete address includes the rank: $`(0,8)`$ and $`(1,8)`$ are **different storage on different devices**.
+
+```mermaid
+flowchart TD
+    R["Request R0: original positions 0, 1, 2, 3, 4, 5"] --> V["Common virtual slots: 16, 17, 18, 19, 20, 21"]
+    V --> A["Rank 0 keeps only 16, 18, 20"]
+    V --> B["Rank 1 keeps only 17, 19, 21"]
+    A --> PA["Local rows 8, 9, 10: positions 0, 2, 4"]
+    B --> PB["Local rows 8, 9, 10: positions 1, 3, 5"]
+```
+
+The inverse checks that no information was lost:
+
+```math
+v=C\lambda+r,\qquad r=\mathrm{owner}(v),\quad \lambda=\mathrm{local}(v).
+```
+
+### 4.4 Why can a virtual page represent both devices' tokens?
+
+KV cache is normally allocated by pages rather than requesting device memory for each individual token. Let physical page capacity per device be $`P=4`$ with DCP degree $`C=2`$:
+
+```math
+P_{\mathrm{virtual}}=PC=8.
+```
+
+One eight-slot virtual page corresponds to one four-row physical page on rank 0 and one on rank 1. Neither device's physical page suddenly holds eight rows.
+
+For virtual page ID $`b=2`$, virtual slots run from $`16`$ through $`23`$:
+
+| Virtual-page offset | Virtual slot | Owner | Local physical page ID | Local page offset | Local physical row |
+|---|---|---|---|---|---|
+| $`0`$ | $`16`$ | Rank 0 | $`2`$ | $`0`$ | $`8`$ |
+| $`1`$ | $`17`$ | Rank 1 | $`2`$ | $`0`$ | $`8`$ |
+| $`2`$ | $`18`$ | Rank 0 | $`2`$ | $`1`$ | $`9`$ |
+| $`3`$ | $`19`$ | Rank 1 | $`2`$ | $`1`$ | $`9`$ |
+| $`4`$ | $`20`$ | Rank 0 | $`2`$ | $`2`$ | $`10`$ |
+| $`5`$ | $`21`$ | Rank 1 | $`2`$ | $`2`$ | $`10`$ |
+| $`6`$ | $`22`$ | Rank 0 | $`2`$ | $`3`$ | $`11`$ |
+| $`7`$ | $`23`$ | Rank 1 | $`2`$ | $`3`$ | $`11`$ |
+
+For any virtual slot, first identify its virtual page and offset, then the local row:
+
+```math
+b=\left\lfloor\frac{v}{PC}\right\rfloor,\qquad o_v=v\bmod(PC),\qquad
+\lambda=bP+\left\lfloor\frac{o_v}{C}\right\rfloor.
+```
+
+The corresponding physical page ID and offset are:
+
+```math
+\mathrm{page}_{\mathrm{local}}=\left\lfloor\lambda/P\right\rfloor=b,\qquad
+\mathrm{offset}_{\mathrm{local}}=\lambda\bmod P.
+```
+
+Equal page IDs across devices still refer to separate memory. If each pool has $`M`$ physical rows, the group's virtual numbering ideally covers $`CM`$ distinct entries: **aggregate capacity across devices**, not extra memory created on each one. Reserved pages, padding, and other overhead reduce usable capacity.
+
+### 4.5 Contiguous request history does not imply contiguous allocated page IDs
+
+Let R0 grow to ten tokens. Suppose the allocator assigns virtual page IDs $`2`$ and $`7`$; intervening pages may already belong to other requests.
+
+Denote its logical-request-page to virtual-page-ID map by $`B_{R0}`$:
+
+```math
+B_{R0}[0]=2,\qquad B_{R0}[1]=7.
+```
+
+Starting from a request token position, addressing becomes:
+
+```math
+b_{\mathrm{req}}=\left\lfloor\frac{p}{PC}\right\rfloor,\qquad
+v=B_{R0}[b_{\mathrm{req}}]\,PC+(p\bmod PC).
+```
+
+Find the logical request page, look up its allocated virtual page ID, then apply Section 4.3 to obtain the owner and row:
+
+| Request positions | Virtual page ID | Virtual slots | Owners | Local physical rows |
+|---|---|---|---|---|
+| $`0,1`$ | $`2`$ | $`16,17`$ | One each on ranks 0 and 1 | $`8`$ on both devices |
+| $`2,3`$ | $`2`$ | $`18,19`$ | One each on ranks 0 and 1 | $`9`$ on both devices |
+| $`4,5`$ | $`2`$ | $`20,21`$ | One each on ranks 0 and 1 | $`10`$ on both devices |
+| $`6,7`$ | $`2`$ | $`22,23`$ | One each on ranks 0 and 1 | $`11`$ on both devices |
+| $`8,9`$ | $`7`$ | $`56,57`$ | One each on ranks 0 and 1 | $`28`$ on both devices |
+
+Position eight therefore does not necessarily follow physical row eleven at row twelve. It jumps to row twenty-eight here.
+
+Equal positions across requests also need not collide: if R1 starts at virtual page ID $`4`$, its position zero maps to slot $`32`$, rank 0 row $`16`$, not R0's position-zero address.
+
+This page table is a teaching representation, not a guarantee that every backend has an identically named array. SGLang can record position-to-token-slot mappings through structures such as `req_to_token`, then build kernel-specific page tables/index lists. **Preserve the mapping from request positions to allocated addresses; do not assume a sequence occupies contiguous memory.**
+
+### 4.6 One Decode write: where does position six's new KV go?
+
+Return to R0 with six cached tokens, about to forward its current token at original position $`p=6`$. It uses offset six in virtual page two:
+
+```math
+v=2\times8+6=22,\qquad \mathrm{owner}(22)=0,\qquad \mathrm{local}(22)=11.
+```
+
+Split the write into four steps:
+
+1. Allocation/request mapping determines the virtual slot, interpreted consistently across ranks.
+2. For the layer's KV to be written, check whether this rank owns that slot.
+3. Rank 0 writes local physical row eleven. Rank 1 does not persist a duplicate of this history entry in its DCP KV pool.
+4. Update the corresponding metadata. Ranks still need the query heads required for their history contributions; query delivery/projection is the separate strategy in Section 5.
+
+The following is generic teaching pseudocode, not a verbatim upstream function:
+
+```python
+for new_kv, virtual_slot in pending_writes:
+    if virtual_slot % dcp_size == my_dcp_rank:
+        physical_row = virtual_slot // dcp_size
+        local_cache[physical_row] = new_kv
+```
+
+After writing position six, rank 0 holds request positions $`[0,2,4,6]`$ and rank 1 holds $`[1,3,5]`$. This describes **persistent-cache ownership**, not a restriction that queries run only on the owner, nor a statement about whether temporary projected KV existed on another rank.
+
+### 4.7 One Decode read: local history with original causal positions
+
+The position-six query can see request positions zero through six, including its newly written current entry. Each rank reads:
+
+| Rank | Original request positions | Virtual slots | Local physical rows read | Valid local history count |
+|---|---|---|---|---|
+| Rank 0 | $`[0,2,4,6]`$ | $`[16,18,20,22]`$ | $`[8,9,10,11]`$ | $`4`$ |
+| Rank 1 | $`[1,3,5]`$ | $`[17,19,21]`$ | $`[8,9,10]`$ | $`3`$ |
+
+Rank 0's local history ordinal three corresponds to original position six, but cache-pool row eleven. **Local ordinal, original position, and pool row are three distinct concepts.** A kernel can translate through page tables without gathering a contiguous tensor.
+
+Each rank obtains the required query, reads its valid KV, computes local output/LSE, and participates in the Section 3 merge. Address translation itself does not require all-gathering the entire historical KV.
+
+```mermaid
+flowchart LR
+    P["Request ID + original visible range"] --> MAP["Request mapping: look up virtual slots"]
+    MAP --> OWN["Keep slots owned by this rank"]
+    OWN --> LOCAL["Translate local rows / page table"]
+    LOCAL --> ATTN["Local KV + required query: local Attention"]
+    P --> MASK["Original positions / global lengths: causal visibility"]
+    MASK --> ATTN
+    ATTN --> MERGE["Exchange output/LSE and merge answers"]
+```
+
+Physical rows cannot replace original positions. Position eight resides at local row twenty-eight, but **twenty-eight is not its sequence position**. Causal masking or positional encoding needs correct original positions/global lengths and backend DCP metadata, not local read ordinals treated as the original timeline.
+
+Allocated pages also need not be fully valid. Ten tokens occupy two pages per device here, reserving eight rows per device but using only five. Spare page capacity must not participate in softmax merely because memory exists.
+
+### 4.8 Back to source: ownership filtering and address compression are separate
+
+Continue using upstream commit `f2b73d4f9b4e64415b8d775b0f811c7801f1728b`, not a claimed local implementation:
+
+| Question to verify | Pinned source entry | Contract |
 |---|---|---|
-| 0, 1, 2, 3, 4, 5 | 0, 1, 2 correspond to 0, 2, 4 | 0, 1, 2 correspond to 1, 3, 5 |
+| Which indices belong here, and how are they compressed? | [layout.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/dcp/layout.py): `localize_dcp_indices()` | Non-local/invalid indices become $`-1`$; the caller still identifies the input index domain |
+| Why can one path select rank-strided slices? | Same file, `maybe_dcp_kernel_indices()` | Assumes a page-aligned run start; do not copy it onto arbitrary unaligned sublists |
+| Does ownership filtering already collapse IDs? | Same file, `filter_dcp_local_kv_indices()` | Selection alone leaves widened IDs, which still need translation |
+| How does Decode metadata obtain local lengths/indices? | [planner.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/dcp/planner.py): `plan_dcp_decode_metadata()` | Updates local lengths/boundaries/valid indices; the valid range is subsequently passed to `translate_dcp_read_ids` |
 
-Ranks share a consistent request→virtual-slot map but write only their owned slots. With $`P`$ physical tokens per page, a virtual page can represent $`PC`$ slots. Physical memory per device has not increased by $`C`$.
+Do not guess from an integer tensor whether it contains original token positions or physical rows. Compressing request positions yields local history ordinals; compressing virtual slots yields pool rows. The allocation mapping still separates those domains. Also verify whether translation already occurred: do not divide physical rows by the DCP degree a second time.
 
-Upstream [layout.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/dcp/layout.py) implements slot filtering through `maybe_dcp_kernel_indices()`; `localize_dcp_indices()` also accepts block-interleave parameters. The equation is the minimal model; real page granularity, padding, and sparse indices follow backend contracts.
+More general layouts rotate ranks after each run of $`I`$ entries rather than after every token. For a nonnegative identifier $`x`$ in the correct domain:
+
+```math
+b_I=\left\lfloor x/I\right\rfloor,\qquad
+\mathrm{owner}_I(x)=b_I\bmod C,\qquad
+\mathrm{local}_I(x)=\left\lfloor b_I/C\right\rfloor I+(x\bmod I).
+```
+
+For example, $`C=2,I=2`$ partitions the first eight original positions as $`[0,1,4,5]`$ / $`[2,3,6,7]`$. Only $`I=1`$ gives the earlier token-interleaved rule. `localize_dcp_indices()` supports such block layouts through `interleave_size`. Check actual page granularity, sparse top-k, padding, and tensor packing together; changing the owner formula alone does not establish backend compatibility.
+
+### 4.9 Three questions and a CPU self-check
+
+1. Why can virtual slots sixteen and seventeen both map to local row eight without overwriting each other?
+2. Why need request position eight not reside at local row twelve? Which mapping must be consulted first?
+3. Why do compressed local row IDs not eliminate request boundaries and original causal positions?
+
+[dcp_cache_address_demo.py](./dcp_cache_address_demo.py) downloads no weights and needs no PyTorch. It prints the cross-page address table, demonstrates owner-only writes/local-history reads, and checks invariants for separate requests, page boundaries, invalid indices, and block interleaving:
+
+```bash
+python3 learning/en/ai-infra-basic/Parallel_Strategy/dcp_cache_address_demo.py
+```
+
+These are address/index teaching checks, not full-backend execution, device performance measurements, or validation of arbitrary prefix/speculation combinations.
 
 ## 5. SGLang Communication Paths
 
