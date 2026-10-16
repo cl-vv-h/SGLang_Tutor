@@ -161,7 +161,13 @@ flowchart TB
 
 这篇样例以 GLM-5.2 的 DSA + MLA + IndexShare + Sparse MoE 路径为主线，给出 BF16/TP=16 下每个投影、cache 与 NPU 算子的精确 shape，逐步推导 DSA token top-2048、MLA K/V 吸收、跨层索引复用、256 选 8 expert 路由、Prefix Cache、NPU Graph 与 NextN 的数据流。
 
-先读端到端样例的目的，是让后续每个组件都能放回真实模型执行路径中，而不是把 backend、metadata 和 custom op 当成互不相干的文件。GLM-4.7 样例适合理解 dense-Prefill / absorbed-Decode MLA，GLM-5.2 样例适合理解 DSA、IndexShare 和超大规模 MoE；Qwen3.5 样例适合理解 hybrid attention、GDN state 和多 backend 协同。
+#### GLM-5.3-Flash Hybrid 与多模态完整执行路径
+
+已完成：[examples/03-glm-5.3-flash-end-to-end.md](./examples/03-glm-5.3-flash-end-to-end.md)
+
+这篇样例固定官方 checkpoint 与较新的上游 commit，逐步解释 34 个 KDA / 11 个 NoPE DSA-MLA 层、四路 mHC、KPool 四-token 检索组与因果 tail、288 选 8 MoE、视觉注入、hybrid cache 与 MTP 回滚。包含 TP=8 的投影/状态 shape、手算例子、流程图及无权重 CPU 自检；明确区分仓内旧源码快照、上游模型支持与未经整模型实测的 Ascend 路径。
+
+先读端到端样例的目的，是让后续每个组件都能放回真实模型执行路径中，而不是把 backend、metadata 和 custom op 当成互不相干的文件。GLM-4.7 样例适合理解 dense-Prefill / absorbed-Decode MLA，GLM-5.2 样例适合理解 DSA、IndexShare 和超大规模 MoE；Qwen3.5 样例适合理解 hybrid attention、GDN state 和多 backend 协同；GLM-5.3-Flash 则进一步串起 KDA、KPool、mHC、多模态与多种持久状态的协作。
 
 ### 第二讲至第十八讲：逐组件追踪
 
@@ -213,7 +219,7 @@ flowchart TB
 - [模型加载、权重放置与 dtype/layout](./foundation/04-model-loading-dtype-and-layout.md)
 - [ModelRunner、ForwardBatch 与输入缓冲区](./foundation/05-model-runner-forward-batch-and-input-buffers.md)
 
-推荐阅读顺序：第一讲组件地图 → GLM-4.7-Flash 端到端样例 → GLM-5.2 端到端样例 → Qwen3.5 Hybrid 端到端样例 → 按需补充 `foundation/` → 进入对应组件讲次。
+推荐阅读顺序：第一讲组件地图 → GLM-4.7-Flash 端到端样例 → GLM-5.2 端到端样例 → Qwen3.5 Hybrid 端到端样例 → GLM-5.3-Flash 端到端样例 → 按需补充 `foundation/` → 进入对应组件讲次。
 
 ## 6. 版本记录要求
 

@@ -6,6 +6,8 @@
 
 需要按组件追踪 Ascend 源码分支时，进入 [source-code-walkthrough](./source-code-walkthrough/README.md)。该专题先建立 SGLang 与 `sgl-kernel-npu` 的完整组件地图，再用 GLM-4.7-Flash、Qwen3.5 Hybrid 与 GLM-5.2 串起 dense/latent、hybrid 与 DSA/IndexShare 三类端到端模型路径，最后逐组件讲解分支入口、初始化与运行时调用链、内部代码组成、kernel/通信边界和验证方法；旧版公共执行链讲义保留为基础补充材料。
 
+新增 [GLM-5.3-Flash 端到端详解](./source-code-walkthrough/examples/03-glm-5.3-flash-end-to-end.md)：以固定上游源码补充 KDA / NoPE 稀疏 MLA、KPool、mHC、多模态与 hybrid cache；同时说明仓内旧快照与 Ascend 整模型验证的边界。
+
 ## 适合谁阅读
 
 - 已经读过 SGLang 普通请求生命周期，知道 `TokenizerManager -> Scheduler -> TpModelWorker -> ModelRunner` 主链路。

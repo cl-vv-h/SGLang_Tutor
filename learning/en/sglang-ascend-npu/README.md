@@ -6,6 +6,8 @@ This directory breaks down SGLang's adaptation, deployment, and source code prac
 
 To track Ascend source code branches by component, enter [source-code-walkthrough](./source-code-walkthrough/README.md). That topic first establishes a complete component map of SGLang & `sgl-kernel-npu`, then contrasts GLM-4.7-Flash's dense/latent path with GLM-5.2's DSA/IndexShare path, and finally explains branch entry points, initialization and runtime call chains, internal code composition, kernel/communication boundaries, and verification methods component by component.
 
+The new [GLM-5.3-Flash end-to-end walkthrough](./source-code-walkthrough/examples/03-glm-5.3-flash-end-to-end.md) uses pinned upstream source to explain KDA / NoPE sparse MLA, KPool, mHC, multimodal input, and hybrid caches, explicitly separating the older local snapshot from full-model Ascend validation.
+
 ## Who Should Read
 
 - Already familiar with SGLang's standard request lifecycle, knowing the `TokenizerManager -> Scheduler -> TpModelWorker -> ModelRunner` main chain.
