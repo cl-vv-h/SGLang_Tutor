@@ -12,7 +12,7 @@
 | [基础讲义：DP / TP / PP / EP](./tutorial.md) | 请求、矩阵、层和专家怎样切？ | Column/Row TP、流水线、token dispatch |
 | [01：DP Attention](./01-dp-attention-principles.md) | Attention 请求子组如何与全局 FFN/MoE 配合？ | partial/replica、gather/scatter、padding/IDLE |
 | [02：SP 与 CP 的区别](./02-sp-versus-context-parallelism.md) | 为什么逐行 Norm 可以分，而 attention 需要历史？ | 四 token 手算、TP 完整链路、RS → Norm → AG、CP 数值对照 |
-| [03：PCP](./03-prefill-context-parallelism.md) | 怎样分长 prompt 的 query 工作并保留因果关系？ | zigzag/interleave、三角负载与请求边界 |
+| [03：PCP](./03-prefill-context-parallelism.md) | 怎样分长 prompt 的 query 工作并保留因果关系？ | prefix 与 query 编号手算、逐行 softmax、输出恢复、zigzag/interleave |
 | [04：DCP](./04-decode-context-parallelism.md) | 怎样分历史 KV，又精确重构 softmax？ | 两种推导、LSE 数值例子、虚拟/物理 slot |
 | [05：DWDP](./05-dwdp-weight-parallelism.md) | 何时让权重来找 token？ | EP 对比、字节交点、VMM 与双缓冲时序 |
 | [06：组合拓扑与 PD](./06-parallel-topology-and-pd-composition.md) | 一个 rank 有几种身份？P/D 不同并行度如何交接？ | 八卡网格、DCP 子组、KV head 重映射 |
@@ -30,15 +30,18 @@
 
 ## 可运行的数学实验
 
-下面三份只用 Python 标准库，在仓库根目录运行：
+下面四份只用 Python 标准库，在仓库根目录运行：
 
 ```bash
 python3 learning/zh/ai-infra-basic/Parallel_Strategy/sp_step_by_step_demo.py
+python3 learning/zh/ai-infra-basic/Parallel_Strategy/pcp_query_rows_demo.py
 python3 learning/zh/ai-infra-basic/Parallel_Strategy/parallelism_math_demo.py
 python3 learning/zh/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
 ```
 
 [sp_step_by_step_demo.py](./sp_step_by_step_demo.py) 配合 02，逐步打印 partial、完整行、Norm、矩阵分片与 residual，并用完整 FFN 对照普通 TP 和 TP+SP，最后演示 CP 为什么需要远端 KV。
+
+[pcp_query_rows_demo.py](./pcp_query_rows_demo.py) 配合 03 第二节，用两个 prefix token 和三个新 token 展示可见历史、权重计算、query 分配与输出恢复，并复现遗漏 KV 和使用本地行号的错误。
 
 [parallelism_math_demo.py](./parallelism_math_demo.py) 对照未分片结果，验证 SP、ragged PCP、稳定 DCP 合并（含空片和大 score）、EP/DWDP、rank 拓扑、PD head 重排、Encoder DP 和 Ulysses/CFG。它不模拟真实网络延迟，也不证明目标设备/backend 支持相同组合。
 
