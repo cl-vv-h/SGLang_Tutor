@@ -12,7 +12,7 @@ This course follows **what is split → why the mathematics permits it → how d
 | [Foundations: DP / TP / PP / EP](./tutorial.md) | How are requests, matrices, layers, and experts split? | Column/row TP, pipelines, token dispatch |
 | [01: DP Attention](./01-dp-attention-principles.md) | How do attention request subgroups cooperate with global FFN/MoE? | Partial/replica, gather/scatter, padding/IDLE |
 | [02: SP versus CP](./02-sp-versus-context-parallelism.md) | Why can Norm split by rows while attention needs history? | Four-token arithmetic, full TP flow, RS → Norm → AG, CP numerical comparison |
-| [03: PCP](./03-prefill-context-parallelism.md) | How does query work split while preserving causality? | Prefix/query indexing by hand, row-wise softmax, output restoration, zigzag/interleave |
+| [03: PCP](./03-prefill-context-parallelism.md) | How does query work split while preserving causality? | Prefix/query arithmetic, row-wise softmax, zigzag/interleave execution and source walkthrough |
 | [04: DCP](./04-decode-context-parallelism.md) | How does sharded KV reconstruct exact softmax? | Two derivations, LSE example, virtual/physical slots |
 | [05: DWDP](./05-dwdp-weight-parallelism.md) | When should weights move to tokens? | EP comparison, traffic crossover, VMM and double buffering |
 | [06: topology and PD](./06-parallel-topology-and-pd-composition.md) | How many identities does a rank have? How do different P/D degrees hand off KV? | Eight-rank grid, DCP subgroups, KV-head remapping |
@@ -62,3 +62,5 @@ Some old demos require PyTorch, multiple processes, or multiple devices; read th
 [00](./00-parallelism-map-and-version-boundaries.md) centralizes local versus pinned-upstream differences. Chapters link upstream implementations to a commit rather than moving main, and do not invent local entries for absent features.
 
 After 01, follow the [DP Attention walkthrough](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md); for rank composition and Ascend, read [TP/DP/EP source analysis](../../sglang-source-reading/05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md). The [communication course](../Communication/README.md) connects collectives with Gloo/NCCL/HCCL, DeepEP/ZBAL, and Mooncake.
+
+For the function-by-function implementation, read the [PCP source walkthrough](../../sglang-source-reading/05-layer-communication/04-prefill-context-parallel-code-walkthrough.md): runner, KV reordering, kernels, padding, DSA, and older NPU paths. Its [CPU layout trace](../../sglang-source-reading/05-layer-communication/pcp_layout_trace_demo.py) prints concrete metadata and permutations without device communication.

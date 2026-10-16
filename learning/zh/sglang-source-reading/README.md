@@ -36,6 +36,7 @@ flowchart TD
   - [01-layer-communicator-and-common-layers.md](./05-layer-communication/01-layer-communicator-and-common-layers.md)：顺着 `DecoderLayer.forward()` 讲清楚 layer 层、`LayerCommunicator`、TP/EP/CP 通信、attention backend、linear/MoE kernel 的配合。
   - [02-tp-dp-ep-sharding-and-ascend-npu.md](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md)：从启动参数、进程和 rank 网格走到 Linear 权重切片、expert 所有权与 token dispatch，区分通用切分逻辑和 Ascend NPU 的 HCCL、NPU MoE、`ascend_fuseep` 实现。
   - [03-dp-attention-code-walkthrough.md](./05-layer-communication/03-dp-attention-code-walkthrough.md)：从 DP 请求分发、Scheduler 元数据与 IDLE batch，走到 ForwardBatch padding、partial/replica gather、LayerCommunicator、MoE dispatch、Graph 和 LM Head 的完整张量流程。
+  - [04-prefill-context-parallel-code-walkthrough.md](./05-layer-communication/04-prefill-context-parallel-code-walkthrough.md)：PCP 的参数/进程组、eager runner、zigzag metadata、KV gather/reorder、FA callback、interleave DSA、FFN/MoE 边界与旧 NPU 路径；配套 CPU layout trace。
 - [06-advanced-features](./06-advanced-features/)
   - [05-speculative-decoding.md](./06-advanced-features/05-speculative-decoding.md)：理解 draft worker、target verify、`spec_info`、EAGLE/NGRAM、spec v1/v2 与接受 token 后处理。
   - [07-disaggregation-pd.md](./06-advanced-features/07-disaggregation-pd.md)：理解 Prefill/Decode 分离部署、bootstrap/prealloc/transfer 队列、KV sender/receiver 和 transfer backend。
@@ -49,6 +50,7 @@ flowchart TD
 3. 接着读 [Scheduler 核心](./02-scheduler-runtime/02-scheduler-core.md)、[KV Cache](./03-cache-memory/03-kv-cache-radix-cache.md)、[ModelRunner 与 attention](./04-model-execution/04-model-runner-attention.md)。
 4. 如果你正在看 decoder layer、MoE、TP/EP/CP 通信，先读 [Layer 层导读](./05-layer-communication/01-layer-communicator-and-common-layers.md)，再用 [TP/DP/EP 切分与 Ascend NPU](./05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md) 把 rank 拓扑、参数所有权和设备执行串起来。
    对 `--enable-dp-attention`，先补 [数学与布局原理](../ai-infra-basic/Parallel_Strategy/01-dp-attention-principles.md)，再读 [DP Attention 完整源码走读](./05-layer-communication/03-dp-attention-code-walkthrough.md)。
+   对 PCP，先看 [原理与数学](../ai-infra-basic/Parallel_Strategy/03-prefill-context-parallelism.md)，再读 [完整源码走读](./05-layer-communication/04-prefill-context-parallel-code-walkthrough.md)，不要把策略概念表当作实际调用链。
 5. 最后按需要阅读 [Speculative Decoding](./06-advanced-features/05-speculative-decoding.md)、[DSpark 端到端源码走读](./06-advanced-features/09-dspark-code-walkthrough.md)、[PD 分离](./06-advanced-features/07-disaggregation-pd.md)、[LoRA Serving](./06-advanced-features/08-lora-serving.md) 和 [Router](./01-entry-routing/09-router.md)。
 
 ## 怎么使用这些笔记

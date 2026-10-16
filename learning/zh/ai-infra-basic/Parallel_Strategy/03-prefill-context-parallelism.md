@@ -361,20 +361,101 @@ flowchart TB
 
 请求 B 的第一行属于 rank 1，但只能看 B 的合法历史，不能看请求 A。metadata 必须同时保留请求边界、原始 position、prefix 长度和输出恢复映射。
 
-## 4. SGLang 实现：从 layout 到 backend
+## 4. SGLang 实现：一次 prefill 怎样真正跑起来
 
-基线说明见 [00](./00-parallelism-map-and-version-boundaries.md)。上游 [prefill CP 文档](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/docs/docs/advanced_features/prefill_cp.mdx) 与以下源码对应：
+完整逐函数走读在 [PCP 源码篇](../../sglang-source-reading/05-layer-communication/04-prefill-context-parallel-code-walkthrough.md)。这一节先把调用链串起来，不只列文件名。
 
-| 文件/对象 | 责任 |
-|---|---|
-| [parallel_hook.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/arg_groups/parallel_hook.py) | 解析 `enable_prefill_cp`、`cp_strategy`、degree 与兼容性 |
-| [ContextParallelStrategy](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/cp/base.py) | 将 layout 策略与模型/attention 解耦 |
-| [zigzag.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/cp/zigzag.py) / [interleave.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/cp/interleave.py) | split、metadata、恢复与模型/backend 连接 |
-| `ForwardBatch.attn_cp_metadata` | 保存本轮 query/KV 长度、布局等信息 |
-| attention backend | 消费局部 query 与必要 KV，执行正确的 causal attention |
-| layer boundary | 将 CP-local 行转成下游 TP/EP 所需布局 |
+### 4.1 先区分源码版本与执行路径
 
-本地快照的旧入口见 [server_args.py](../../../../python/sglang/srt/server_args.py)、[communicator_dsa_cp.py](../../../../python/sglang/srt/layers/communicator_dsa_cp.py)。其中 `in-seq-split`、`round-robin-split` 是旧命名；不要只做字符串替换就认为完成版本迁移。
+本仓库运行时仍保留旧 CP utilities；新版上游固定到 [f2b73d4](https://github.com/sgl-project/sglang/tree/f2b73d4f9b4e64415b8d775b0f811c7801f1728b)。新版有统一 strategy，但 **zigzag + FlashAttention、interleave + DSA、本地旧 NPU CP 并不是同一条调用链**。
+
+| 本文追踪的路径 | 谁分 token | 谁执行 attention |
+|---|---|---|
+| 上游 zigzag + dense FA | runner + `ZigzagCPStrategy` | strategy 调用 FA backend callback |
+| 上游 interleave + DSA | runner + `InterleaveCPStrategy` | DSA backend 组织 indexer 与 sparse attention |
+| 本地旧 NPU DSA CP | 模型内旧 `cp_utils` 分片 | NPU indexer + Ascend backend |
+
+参数名称差异见 [00](./00-parallelism-map-and-version-boundaries.md)，不要拿上游 CUDA recipe 直接推断本地 NPU 的支持范围。
+
+### 4.2 上游 eager 路径：先规划，再分片，再执行
+
+```mermaid
+flowchart TB
+    ARG["启动参数解析<br/>创建 strategy 与 Attention CP/TP groups"] --> F["本轮 ForwardBatch：完整新 token、prefix、positions"]
+    F --> M["EagerRunner：检查 can_apply<br/>prepare_cp_forward 构造 metadata"]
+    M --> B["attention backend 准备长度与 page table"]
+    B --> S["cp_shard_model_inputs<br/>同步切 hidden、positions、input IDs"]
+    S --> L["每层本地 Q/K/V 投影"]
+    L --> KV["按 backend 汇集并重排必要的新 KV / indexer key"]
+    KV --> ATT["local Q 读取正确历史<br/>执行对应 attention kernel"]
+    ATT --> FFN["层边界适配 FFN/MoE 布局"]
+    FFN --> END["最后阶段 gather hidden + 恢复原顺序 → logits"]
+```
+
+主要入口是上游 `EagerRunner._execute_extend()`、`_execute_extend_cp()` 与 `cp/utils.py`。注意：
+
+- `prepare_cp_forward()` 在 backend 本轮 metadata 规划前运行。
+- `strategy` 决定布局规则；`ForwardBatch.attn_cp_metadata` 存本批的具体拆分、长度和恢复映射。
+- 每个 batch 都要检查 `can_apply()`，不是开关为真就必定分片。
+- 部分 group-sharing 模型自己在 `forward()` 管理布局，不能假设所有模型都走同一个 runner 分支。
+
+### 4.3 Zigzag 的真实数据流：分片 → KV 重排 → 两组 attention
+
+沿用一个更适合看实现的例子：prefix 为 2，新 token 为 8，CP 为 2。四个新 token 块 B0/B1/B2/B3 各两行。
+
+| rank | 本地 query 新编号 | 保留的原请求 positions | early / late 的 KV 长度 |
+|---|---|---|---|
+| 0 | 0、1、6、7 | 2、3、8、9 | 4 / 10 |
+| 1 | 2、3、4、5 | 4、5、6、7 | 6 / 8 |
+
+第一步，`shard_hidden_states()` 和 `shard_position_ids()` 按相同 block 索引切分，保留 positions 原值。
+
+第二步，本地 K/V 投影后，FA backend 调用 `strategy.materialize_full_kv()`。它打包 K/V、执行 CP AllGather，再重排：
+
+```text
+rank 0: B0 B3     rank 1: B1 B2
+gather: B0 B3 B1 B2
+inverse block indices [0, 2, 3, 1]
+restored: B0 B1 B2 B3
+```
+
+恢复顺序后才按 `out_cache_loc` 对应的 slots 写入 KV pool。旧 prefix 的 cache 继续复用；这里交换的是本轮新 KV。
+
+第三步，FA backend 构造 `_fa_cp_attn` callback，交给 `ZigzagCPStrategy.run_attention()`，分别执行 early 与 late query。以 rank 0 为例：
+
+```python
+# Example arguments passed through the FA backend callback:
+early_queries = [0, 1]
+early_kv_length = 4
+late_queries = [6, 7]
+late_kv_length = 10
+# Each block keeps its own causal alignment and prefix extent.
+```
+
+这样 early 两行只能看原位置 2、3 之前的合法历史，late 两行则对齐原位置 8、9。两个结果拼接，是拼接**不同 query 的完整输出**，不需要把它们作为同一个 query 的 partial 再做 LSE 归并。
+
+这条 FA 路径采用 KV AllGather：先汇集必要 KV，再执行局部 Q。它没有逐轮环传 KV 块的 Ring 调度。TRTLLM backend 还会使用 combined metadata/page table，将前后块组织成另一种调用方式。
+
+### 4.4 Interleave DSA：继续追 metadata、indexer key 与 MLA KV
+
+interleave 把 flattened 新 token 按 rank 交错切分，但实现不止这一行索引：
+
+1. DSA backend 的 `init_forward_metadata()` 切分各 query 的合法历史长度，并用 `shard_per_request()` 维护请求边界、query 数与 page table。
+2. indexer 的 query 留在本地，indexer key 经 `materialize_full_indexer_k_cache()` gather/reorder；本地 query 才能从正确历史里选 top-k。
+3. 主 attention 读取的是 MLA latent KV，另有 `materialize_full_mla_kv()` 等路径准备；它与 indexer key 不是同一份 cache。
+4. **interleave 的 `run_attention()` 在这个版本返回 `None`；真正的 sparse attention 由 DSA backend 调用。**
+
+例如两个请求的新长度为 5、3，prefix 为 2、1：rank 0 的每请求 query 数为 3、1，rank 1 为 2、2；合法历史长度也必须按各自 query 交错选择。只切 Q 而保留原 metadata，会读错请求或因果范围。
+
+Attention 后可能按 dense TP 或 EP 布局继续计算；最终模型边界的 `gather_hidden_states()` 才负责恢复 logits 所需的逻辑顺序。**新 KV gather、层内 hidden gather、最终 hidden gather 是不同动作。**
+
+### 4.5 本地 NPU：原来 GLM-5.2 的简述对应什么
+
+本地旧版的调用链从 `DeepseekV2ForCausalLM.forward()` 的 metadata 准备开始，随后 `cp_split_and_rebuild_data/position()` 切模型输入。NPU MLA adapter 准备/gather latent KV，`Indexer.forward_npu()` 再准备 indexer key 与前后两组 top-k；`AscendAttnBackend.do_cp_balance_attn()` 执行对应的两次 `npu_sparse_flash_attention`，最后模型 gather/reorder hidden。
+
+它有旧版前后块长度、prefix 累加和 tuple metadata 约定，不能直接套用上游 interleave 的代码。具体源码、每步输入输出及 prefix 在何处相加，见 [源码篇第 12 节](../../sglang-source-reading/05-layer-communication/04-prefill-context-parallel-code-walkthrough.md)。
+
+建议按 **源码篇 2–3 节（启动与 runner）→ 4–8 节（zigzag、KV、kernel、padding）→ 9–11 节（DSA 与层边界）→ 12 节（旧 NPU）** 阅读。配套 CPU trace 会打印实际示例字段与排列，但不会冒充真实多卡运行。
 
 ## 5. 缓存容量、混合模型与 NPU 的边界
 

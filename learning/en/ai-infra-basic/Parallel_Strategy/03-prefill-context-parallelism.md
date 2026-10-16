@@ -363,20 +363,101 @@ For request lengths 5 and 3 with CP=2:
 
 Request B's first row belongs to rank 1 but sees only valid B history, never A. Metadata must retain request boundaries, original positions, prefix lengths, and output restoration maps.
 
-## 4. SGLang: From Layout to Backend
+## 4. SGLang implementation: how one prefill actually executes
 
-See [00](./00-parallelism-map-and-version-boundaries.md) for versions. The upstream [prefill CP guide](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/docs/docs/advanced_features/prefill_cp.mdx) maps to:
+Read the [complete PCP source walkthrough](../../sglang-source-reading/05-layer-communication/04-prefill-context-parallel-code-walkthrough.md) for individual functions. This section connects the execution path rather than only listing files.
 
-| File / Object | Responsibility |
-|---|---|
-| [parallel_hook.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/arg_groups/parallel_hook.py) | resolve `enable_prefill_cp`, `cp_strategy`, degrees, and compatibility |
-| [ContextParallelStrategy](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/cp/base.py) | decouple layout policy from models/attention |
-| [zigzag.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/cp/zigzag.py) / [interleave.py](https://github.com/sgl-project/sglang/blob/f2b73d4f9b4e64415b8d775b0f811c7801f1728b/python/sglang/srt/layers/cp/interleave.py) | split, metadata, restoration, and model/backend integration |
-| `ForwardBatch.attn_cp_metadata` | per-forward query/KV lengths and layout |
-| attention backend | consume local queries and required KV with correct causality |
-| layer boundary | convert CP-local rows to downstream TP/EP layouts |
+### 4.1 Separate source revisions and execution paths
 
-Local older entries are [server_args.py](../../../../python/sglang/srt/server_args.py) and [communicator_dsa_cp.py](../../../../python/sglang/srt/layers/communicator_dsa_cp.py). `in-seq-split` and `round-robin-split` are older names; renaming strings alone is not a complete version migration.
+This repository retains older CP utilities; newer upstream is pinned to [f2b73d4](https://github.com/sgl-project/sglang/tree/f2b73d4f9b4e64415b8d775b0f811c7801f1728b). Upstream has a unified strategy interface, but **zigzag + FlashAttention, interleave + DSA, and local older NPU CP are distinct call chains**.
+
+| Traced path | Who shards tokens | Who executes attention |
+|---|---|---|
+| Upstream zigzag + dense FA | Runner + `ZigzagCPStrategy` | Strategy invokes an FA backend callback |
+| Upstream interleave + DSA | Runner + `InterleaveCPStrategy` | DSA backend organizes indexer and sparse attention |
+| Local older NPU DSA CP | Model-owned old `cp_utils` | NPU indexer + Ascend backend |
+
+See [00](./00-parallelism-map-and-version-boundaries.md) for argument differences; an upstream CUDA recipe does not establish local NPU support.
+
+### 4.2 Upstream eager execution: plan, shard, execute
+
+```mermaid
+flowchart TB
+    ARG["Resolve launch arguments<br/>strategy and Attention CP/TP groups"] --> F["ForwardBatch: complete new tokens, prefix, positions"]
+    F --> M["EagerRunner: check can_apply<br/>prepare_cp_forward builds metadata"]
+    M --> B["Attention backend plans lengths and page tables"]
+    B --> S["cp_shard_model_inputs<br/>align hidden, positions, and input IDs"]
+    S --> L["Local Q/K/V projections each layer"]
+    L --> KV["Gather/reorder required new KV or indexer keys"]
+    KV --> ATT["Local Q reads correct history<br/>execute the corresponding attention kernel"]
+    ATT --> FFN["Layer boundary adapts FFN/MoE layout"]
+    FFN --> END["Final gather/order restoration → logits"]
+```
+
+Main entries are upstream `EagerRunner._execute_extend()`, `_execute_extend_cp()`, and `cp/utils.py`. Note:
+
+- `prepare_cp_forward()` runs before this forward's backend metadata planning.
+- The `strategy` defines layouts; `ForwardBatch.attn_cp_metadata` stores this batch's splits, lengths, and inverse mappings.
+- Each batch must pass `can_apply()`; an enabled flag is insufficient.
+- Some group-sharing models own layouts in `forward()`, so the runner branch is not universal.
+
+### 4.3 Actual zigzag data flow: shard, reorder KV, run two query groups
+
+Use an implementation-oriented example: prefix 2, eight new tokens, CP=2. New-token blocks B0/B1/B2/B3 contain two rows each.
+
+| Rank | Local new-query indices | Preserved original positions | Early / late KV lengths |
+|---|---|---|---|
+| 0 | 0, 1, 6, 7 | 2, 3, 8, 9 | 4 / 10 |
+| 1 | 2, 3, 4, 5 | 4, 5, 6, 7 | 6 / 8 |
+
+First, `shard_hidden_states()` and `shard_position_ids()` use matching block indices and preserve position values.
+
+Second, after local K/V projection, the FA backend calls `strategy.materialize_full_kv()`. It packs K/V, performs CP AllGather, then reorders:
+
+```text
+rank 0: B0 B3     rank 1: B1 B2
+gather: B0 B3 B1 B2
+inverse block indices [0, 2, 3, 1]
+restored: B0 B1 B2 B3
+```
+
+Only after reordering does it write KV pool slots corresponding to `out_cache_loc`. Cached prefix remains reusable; communication gathers this round's new KV.
+
+Third, the FA backend constructs `_fa_cp_attn` and passes it to `ZigzagCPStrategy.run_attention()` for early and late query groups. For rank 0:
+
+```python
+# Example arguments passed through the FA backend callback:
+early_queries = [0, 1]
+early_kv_length = 4
+late_queries = [6, 7]
+late_kv_length = 10
+# Each block keeps its own causal alignment and prefix extent.
+```
+
+The early rows align with original positions 2/3, and late rows with 8/9. Concatenation joins **complete outputs for different queries**, not partial outputs for one query requiring an LSE merge.
+
+This FA path uses KV AllGather: it gathers required KV before executing local Q. It does not schedule successive KV blocks around a ring. TRTLLM uses combined metadata/page tables to organize early/late blocks differently.
+
+### 4.4 Interleave DSA: follow metadata, indexer keys, and MLA KV
+
+Interleave selects flattened new tokens by rank, but the implementation involves more than an index slice:
+
+1. DSA backend `init_forward_metadata()` shards legal history lengths and uses `shard_per_request()` to maintain requests, query counts, and page-table mappings.
+2. Indexer queries stay local; `materialize_full_indexer_k_cache()` gathers/reorders indexer keys so local queries select top-k from the correct history.
+3. Main attention reads MLA latent KV, prepared through paths such as `materialize_full_mla_kv()`. This is a different cache from indexer keys.
+4. **Interleave `run_attention()` returns `None` at this revision; the DSA backend invokes sparse attention itself.**
+
+For new lengths 5/3 and prefixes 2/1, rank 0's per-request query counts are 3/1 and rank 1's 2/2. Legal history lengths must follow the same interleaved query selection. Sharding Q without its metadata can read the wrong request or causal extent.
+
+After attention, dense TP or EP can consume another layout; final model-boundary `gather_hidden_states()` restores logical order for logits. **New-KV gathers, internal hidden gathers, and final hidden gathers are separate operations.**
+
+### 4.5 Local NPU: what did the short GLM-5.2 description refer to?
+
+The older local path prepares metadata inside `DeepseekV2ForCausalLM.forward()`, then shards model inputs with `cp_split_and_rebuild_data/position()`. The NPU MLA adapter prepares/gathers latent KV; `Indexer.forward_npu()` prepares indexer keys and early/late top-k; `AscendAttnBackend.do_cp_balance_attn()` executes two corresponding `npu_sparse_flash_attention` calls; the model finally gathers/reorders hidden states.
+
+It uses older block-length, prefix-addition, and tuple-metadata conventions. Do not substitute the upstream interleave implementation. See [source chapter section 12](../../sglang-source-reading/05-layer-communication/04-prefill-context-parallel-code-walkthrough.md) for functions, inputs/outputs, and prefix accounting.
+
+Follow **source sections 2–3 (startup/runner) → 4–8 (zigzag/KV/kernel/padding) → 9–11 (DSA/boundaries) → 12 (older NPU)**. The CPU trace prints concrete metadata and permutations without claiming to execute a real multi-device runtime.
 
 ## 5. Cache Capacity, Hybrid Models, and NPU Boundaries
 

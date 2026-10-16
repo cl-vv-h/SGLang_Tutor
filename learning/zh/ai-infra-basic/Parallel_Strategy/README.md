@@ -12,7 +12,7 @@
 | [基础讲义：DP / TP / PP / EP](./tutorial.md) | 请求、矩阵、层和专家怎样切？ | Column/Row TP、流水线、token dispatch |
 | [01：DP Attention](./01-dp-attention-principles.md) | Attention 请求子组如何与全局 FFN/MoE 配合？ | partial/replica、gather/scatter、padding/IDLE |
 | [02：SP 与 CP 的区别](./02-sp-versus-context-parallelism.md) | 为什么逐行 Norm 可以分，而 attention 需要历史？ | 四 token 手算、TP 完整链路、RS → Norm → AG、CP 数值对照 |
-| [03：PCP](./03-prefill-context-parallelism.md) | 怎样分长 prompt 的 query 工作并保留因果关系？ | prefix 与 query 编号手算、逐行 softmax、输出恢复、zigzag/interleave |
+| [03：PCP](./03-prefill-context-parallelism.md) | 怎样分长 prompt 的 query 工作并保留因果关系？ | prefix/query 手算、逐行 softmax、zigzag/interleave 实现概览与完整源码走读 |
 | [04：DCP](./04-decode-context-parallelism.md) | 怎样分历史 KV，又精确重构 softmax？ | 两种推导、LSE 数值例子、虚拟/物理 slot |
 | [05：DWDP](./05-dwdp-weight-parallelism.md) | 何时让权重来找 token？ | EP 对比、字节交点、VMM 与双缓冲时序 |
 | [06：组合拓扑与 PD](./06-parallel-topology-and-pd-composition.md) | 一个 rank 有几种身份？P/D 不同并行度如何交接？ | 八卡网格、DCP 子组、KV head 重映射 |
@@ -62,3 +62,5 @@ python3 learning/zh/ai-infra-basic/Parallel_Strategy/dp_attention_layout_demo.py
 本地源码和固定上游的差别统一见 [00](./00-parallelism-map-and-version-boundaries.md)。每章把上游实现链接到 commit，而不是会移动的 main；不存在的本地功能不伪造入口。
 
 读完 01，接 [DP Attention 源码走读](../../sglang-source-reading/05-layer-communication/03-dp-attention-code-walkthrough.md)；组合 rank 与 Ascend 路径接 [TP/DP/EP 源码篇](../../sglang-source-reading/05-layer-communication/02-tp-dp-ep-sharding-and-ascend-npu.md)。通信原语和 Gloo/NCCL/HCCL、DeepEP/ZBAL、Mooncake 的分工见 [通信课程](../Communication/README.md)。
+
+PCP 的逐函数实现见 [PCP 源码走读](../../sglang-source-reading/05-layer-communication/04-prefill-context-parallel-code-walkthrough.md)，包括 runner、KV 重排、kernel、padding、DSA 与旧 NPU 分支。[CPU layout trace](../../sglang-source-reading/05-layer-communication/pcp_layout_trace_demo.py) 打印真实示例字段与排列，不执行设备通信。
