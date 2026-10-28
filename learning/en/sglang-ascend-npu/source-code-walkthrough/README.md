@@ -31,7 +31,7 @@ This topic provides a component-by-component walkthrough of how SGLang integrate
 |---|---|
 | [00-glm-4.7-flash-end-to-end.md](./examples/00-glm-4.7-flash-end-to-end.md) | End-to-end model execution: GLM-4.7-Flash on Ascend NPU |
 | [02-glm-5.2-end-to-end.md](./examples/02-glm-5.2-end-to-end.md) | GLM-5.2 DSA + MLA + IndexShare + Sparse MoE, with exact TP=16 tensor shapes and Ascend operator flow |
-| [03-glm-5.3-flash-end-to-end.md](./examples/03-glm-5.3-flash-end-to-end.md) | Pinned-upstream GLM-5.3-Flash: 34 KDA / 11 NoPE DSA-MLA layers, four-stream mHC, causal KPool, MoE, vision, hybrid caches, and MTP rollback; TP=8 shapes and CPU checks, with explicit Ascend validation limits |
+| [03-glm-5.3-flash-end-to-end.md](./examples/03-glm-5.3-flash-end-to-end.md) | Pinned-upstream GLM-5.3-Flash: 34 KDA / 11 NoPE DSA-MLA layers, four-stream mHC, causal KPool, MoE, vision, hybrid caches, and MTP rollback; TP=8 shapes, CPU checks, and [six architecture views](./assets/glm-5.3-flash/architecture/README.md), with explicit Ascend validation limits |
 
 ## Reading Order
 

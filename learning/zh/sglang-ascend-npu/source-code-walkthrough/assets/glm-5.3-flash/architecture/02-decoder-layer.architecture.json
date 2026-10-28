@@ -1,0 +1,380 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — Decoder层内结构",
+    "locale": "zh-CN",
+    "output": "learning/zh/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/02-decoder-layer.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "计算模块"
+        },
+        "database": {
+          "label": "内存缓存 / 状态"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "residual",
+      "type": "backend",
+      "label": "输入四路 residual",
+      "sublabel": "R：[N,4,4096]",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 2087,
+          "end_line": 2105
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attnread",
+      "type": "backend",
+      "label": "Attention mHC pre",
+      "sublabel": "生成pre/post/C；读出+RMSNorm",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 858,
+          "end_line": 885
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1923,
+          "end_line": 1961
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attention",
+      "type": "backend",
+      "label": "按layer ID择一",
+      "sublabel": "KDA 或 DSA + NoPE MLA",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 707,
+          "end_line": 739
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 966,
+          "end_line": 984
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attnsaved",
+      "type": "backend",
+      "label": "保留旧流与系数",
+      "sublabel": "R、C_attn、post_attn",
+      "pos": [
+        40,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 28,
+          "end_line": 61
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1964,
+          "end_line": 1975
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attnwrite",
+      "type": "backend",
+      "label": "Attention mHC post",
+      "sublabel": "混合旧流 + 按post写回输出",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 59,
+          "end_line": 97
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1964,
+          "end_line": 1975
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffnread",
+      "type": "backend",
+      "label": "FFN mHC pre",
+      "sublabel": "重新生成系数；读出+RMSNorm",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 886,
+          "end_line": 894
+        },
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 70,
+          "end_line": 95
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffn",
+      "type": "backend",
+      "label": "按layer ID择一",
+      "sublabel": "L0–2：dense；L3–44：MoE",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 746,
+          "end_line": 772
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 984,
+          "end_line": 1008
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffnsaved",
+      "type": "backend",
+      "label": "保留新流与系数",
+      "sublabel": "R_attn、C_ffn、post_ffn",
+      "pos": [
+        840,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 70,
+          "end_line": 97
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1964,
+          "end_line": 1975
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffnwrite",
+      "type": "backend",
+      "label": "FFN mHC post",
+      "sublabel": "混合旧流 + 按post写回输出",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 95,
+          "end_line": 101
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1002,
+          "end_line": 1008
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "输出四路 residual",
+      "sublabel": "传给下一层；不重新复制入口",
+      "pos": [
+        440,
+        1230
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1008,
+          "end_line": 1010
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1197,
+          "end_line": 1208
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "residual-to-attnread",
+      "from": "residual",
+      "to": "attnread",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attnread-to-attention",
+      "from": "attnread",
+      "to": "attention",
+      "label": "[N,4096]",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attnread-to-attnsaved",
+      "from": "attnread",
+      "to": "attnsaved",
+      "label": "保留"
+    },
+    {
+      "id": "attention-to-attnwrite",
+      "from": "attention",
+      "to": "attnwrite",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attnsaved-to-attnwrite",
+      "from": "attnsaved",
+      "to": "attnwrite",
+      "label": "旧流+系数"
+    },
+    {
+      "id": "attnwrite-to-ffnread",
+      "from": "attnwrite",
+      "to": "ffnread",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ffnread-to-ffn",
+      "from": "ffnread",
+      "to": "ffn",
+      "label": "[N,4096]",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ffnread-to-ffnsaved",
+      "from": "ffnread",
+      "to": "ffnsaved",
+      "label": "保留"
+    },
+    {
+      "id": "ffn-to-ffnwrite",
+      "from": "ffn",
+      "to": "ffnwrite",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ffnsaved-to-ffnwrite",
+      "from": "ffnsaved",
+      "to": "ffnwrite",
+      "label": "旧流+系数"
+    },
+    {
+      "id": "ffnwrite-to-output",
+      "from": "ffnwrite",
+      "to": "output",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "两次独立读写",
+      "dot": "cyan",
+      "items": [
+        "一个Decoder层有Attention和FFN两次mHC边界，各有独立的hc_*_fn、hc_*_base、hc_*_scale。",
+        "hc_pre将四路残差读成一份4096维输入。子层只执行一次；hc_post再把同一输出按不同post系数写回四路。",
+        "旧流更新采用C转置乘R。初始四路相同，后续不同post系数可产生差异；四路不保证始终不同。"
+      ]
+    },
+    {
+      "title": "逻辑与融合",
+      "dot": "amber",
+      "items": [
+        "此图拆开post/pre以解释数据依赖。固定实现允许把Attention post与FFN pre融合，数学上仍是两步。",
+        "所有shape表示完整逻辑宽度；多卡partial输出需要相应阶段边界合并后再遵守写回契约。"
+      ]
+    }
+  ]
+}

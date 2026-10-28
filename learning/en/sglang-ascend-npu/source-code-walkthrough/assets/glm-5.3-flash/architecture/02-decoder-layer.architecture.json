@@ -1,0 +1,380 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — Inside a Decoder Layer",
+    "locale": "en",
+    "output": "learning/en/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/02-decoder-layer.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Compute Module"
+        },
+        "database": {
+          "label": "Memory Cache / State"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "residual",
+      "type": "backend",
+      "label": "Four Input Streams",
+      "sublabel": "R: [N,4,4096]",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 2087,
+          "end_line": 2105
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attnread",
+      "type": "backend",
+      "label": "Attention mHC Pre",
+      "sublabel": "pre/post/C; readout + RMSNorm",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 858,
+          "end_line": 885
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1923,
+          "end_line": 1961
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attention",
+      "type": "backend",
+      "label": "Attention: One Choice",
+      "sublabel": "KDA or DSA + NoPE MLA",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 707,
+          "end_line": 739
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 966,
+          "end_line": 984
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attnsaved",
+      "type": "backend",
+      "label": "Keep Streams / Mixes",
+      "sublabel": "R, C_attn, post_attn",
+      "pos": [
+        40,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 28,
+          "end_line": 61
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1964,
+          "end_line": 1975
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attnwrite",
+      "type": "backend",
+      "label": "Attention mHC Post",
+      "sublabel": "Mix old streams + post write",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 59,
+          "end_line": 97
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1964,
+          "end_line": 1975
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffnread",
+      "type": "backend",
+      "label": "FFN mHC Pre",
+      "sublabel": "Fresh mixes; readout + RMSNorm",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 886,
+          "end_line": 894
+        },
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 70,
+          "end_line": 95
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffn",
+      "type": "backend",
+      "label": "FFN: One Choice",
+      "sublabel": "L0–2: dense; L3–44: MoE",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 746,
+          "end_line": 772
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 984,
+          "end_line": 1008
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffnsaved",
+      "type": "backend",
+      "label": "Keep Updated Streams",
+      "sublabel": "R_attn, C_ffn, post_ffn",
+      "pos": [
+        840,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 70,
+          "end_line": 97
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1964,
+          "end_line": 1975
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ffnwrite",
+      "type": "backend",
+      "label": "FFN mHC Post",
+      "sublabel": "Mix old streams + post write",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 95,
+          "end_line": 101
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1002,
+          "end_line": 1008
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "Four Output Streams",
+      "sublabel": "Next layer; no entry recopy",
+      "pos": [
+        440,
+        1230
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1008,
+          "end_line": 1010
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1197,
+          "end_line": 1208
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "residual-to-attnread",
+      "from": "residual",
+      "to": "attnread",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attnread-to-attention",
+      "from": "attnread",
+      "to": "attention",
+      "label": "[N,4096]",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attnread-to-attnsaved",
+      "from": "attnread",
+      "to": "attnsaved",
+      "label": "Keep"
+    },
+    {
+      "id": "attention-to-attnwrite",
+      "from": "attention",
+      "to": "attnwrite",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attnsaved-to-attnwrite",
+      "from": "attnsaved",
+      "to": "attnwrite",
+      "label": "Streams + mixes"
+    },
+    {
+      "id": "attnwrite-to-ffnread",
+      "from": "attnwrite",
+      "to": "ffnread",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ffnread-to-ffn",
+      "from": "ffnread",
+      "to": "ffn",
+      "label": "[N,4096]",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ffnread-to-ffnsaved",
+      "from": "ffnread",
+      "to": "ffnsaved",
+      "label": "Keep"
+    },
+    {
+      "id": "ffn-to-ffnwrite",
+      "from": "ffn",
+      "to": "ffnwrite",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ffnsaved-to-ffnwrite",
+      "from": "ffnsaved",
+      "to": "ffnwrite",
+      "label": "Streams + mixes"
+    },
+    {
+      "id": "ffnwrite-to-output",
+      "from": "ffnwrite",
+      "to": "output",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Two Independent Read/Writes",
+      "dot": "cyan",
+      "items": [
+        "One Decoder layer has an Attention and an FFN mHC boundary, each with separate hc_*_fn, hc_*_base, hc_*_scale.",
+        "hc_pre reads four streams into one width-4096 input. The sublayer executes once, and hc_post writes its output into streams with distinct post coefficients.",
+        "The old-stream update uses transpose(C) times R. Entry copies are equal; different post coefficients can make them differ, but need not always do so."
+      ]
+    },
+    {
+      "title": "Logic and Fusion",
+      "dot": "amber",
+      "items": [
+        "Post/pre are separated to show dependencies. The implementation may fuse Attention post with FFN pre while preserving both operations.",
+        "Shapes denote complete logical widths; distributed partial outputs must satisfy the corresponding stage-boundary contract."
+      ]
+    }
+  ]
+}

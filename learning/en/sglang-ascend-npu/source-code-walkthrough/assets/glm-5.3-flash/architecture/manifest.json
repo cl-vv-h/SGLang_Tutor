@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "generator": {
+    "name": "Archify",
+    "version": "3.2.0",
+    "revision": "d6059331abbddb49bca380ff46dca8ce33158b04"
+  },
+  "sglang_revision": "92580581da6fc8542a997a00c1a8b71b03497680",
+  "model_config_revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+  "artifacts": [
+    {
+      "diagram": "01-model-overview",
+      "gates": {
+        "validate": "pass",
+        "deliver": "pass",
+        "check": "pass",
+        "browser-check": "pass"
+      },
+      "files": [
+        {
+          "name": "01-model-overview.architecture.json",
+          "sha256": "f00a71cf02ac5adecd67246e03dcf0b10e26613ca2d5dd63101fdaaed24d2a94"
+        },
+        {
+          "name": "01-model-overview.html",
+          "sha256": "e831f13f537af9d6fe2738d6d472e0d67c456603fa874f26ba92088e8fad6512"
+        },
+        {
+          "name": "01-model-overview.svg",
+          "sha256": "d9ce4b3b8f4c2a9953e2cbb25994784807e93da236f63f5e3c1266b4435bc566"
+        },
+        {
+          "name": "01-model-overview.png",
+          "sha256": "fd7501d7c6740d7683c4af98a6ae17d9c3da6fc5e54126db9bc9c5487f51a273"
+        }
+      ]
+    },
+    {
+      "diagram": "02-decoder-layer",
+      "gates": {
+        "validate": "pass",
+        "deliver": "pass",
+        "check": "pass",
+        "browser-check": "pass"
+      },
+      "files": [
+        {
+          "name": "02-decoder-layer.architecture.json",
+          "sha256": "ec69ebde940815c9466cfd88e25f0e31ba0d21e472f91141adf2beb8e27f4e5d"
+        },
+        {
+          "name": "02-decoder-layer.html",
+          "sha256": "44d21ed1db502c2e499ed7ade4fff7c3d3524f1be78858d1d2c40cd69754f88a"
+        },
+        {
+          "name": "02-decoder-layer.svg",
+          "sha256": "6b1d3bf62a8cc580057a3b23e9b7ace0ab91aef58b0a768c4fe29bec7aa7c492"
+        },
+        {
+          "name": "02-decoder-layer.png",
+          "sha256": "769df8843761f56b03a7eab63b40bc8c7edefd2b3d3a2b7f06d6381dad4044b8"
+        }
+      ]
+    },
+    {
+      "diagram": "03-kda-internals",
+      "gates": {
+        "validate": "pass",
+        "deliver": "pass",
+        "check": "pass",
+        "browser-check": "pass"
+      },
+      "files": [
+        {
+          "name": "03-kda-internals.architecture.json",
+          "sha256": "b5204fdef92c2eff3ada1f33e0f647ea9271370ec6fed5a1fa406a2c3b4fe4e0"
+        },
+        {
+          "name": "03-kda-internals.html",
+          "sha256": "4488f721464f5987b33bea9e8a557f14e5104248040f0b766227c1c23ece11cf"
+        },
+        {
+          "name": "03-kda-internals.svg",
+          "sha256": "f14db3377e8ea3f46229fdc07b0395e59bf2867a2f781b9bcab60717d0834d86"
+        },
+        {
+          "name": "03-kda-internals.png",
+          "sha256": "8c26e07d0284c27632f789a4bca94d540d09bc3348c679605cd52fb69b0b8833"
+        }
+      ]
+    },
+    {
+      "diagram": "04-dsa-mla-internals",
+      "gates": {
+        "validate": "pass",
+        "deliver": "pass",
+        "check": "pass",
+        "browser-check": "pass"
+      },
+      "files": [
+        {
+          "name": "04-dsa-mla-internals.architecture.json",
+          "sha256": "3308dfb83c6a4510d23cd3b15186b80ce99940b263750a1f5ee3f736461384e3"
+        },
+        {
+          "name": "04-dsa-mla-internals.html",
+          "sha256": "15667855282a1d59d76d8aa01588f2017a4b391ebe7713502c195781645c0646"
+        },
+        {
+          "name": "04-dsa-mla-internals.svg",
+          "sha256": "a5186c831120122eb5ce967d44482379e9d0646a1be1dd084ed2ce12151da61f"
+        },
+        {
+          "name": "04-dsa-mla-internals.png",
+          "sha256": "1e220e71f2c8aa89a586fab8bcb21fcf8ced13f62e7cab13ca78ca07b332d320"
+        }
+      ]
+    },
+    {
+      "diagram": "05-ffn-moe-internals",
+      "gates": {
+        "validate": "pass",
+        "deliver": "pass",
+        "check": "pass",
+        "browser-check": "pass"
+      },
+      "files": [
+        {
+          "name": "05-ffn-moe-internals.architecture.json",
+          "sha256": "e5f502349614ae1d2a92f8efae9a3c306f5d5c66494f0614ee8daa261e94ecf1"
+        },
+        {
+          "name": "05-ffn-moe-internals.html",
+          "sha256": "1ad093033c7d1f3f34eb9dfcb55010c728134ff3022c9f1611606e6126a7816c"
+        },
+        {
+          "name": "05-ffn-moe-internals.svg",
+          "sha256": "f5e3aadca588ceede37deccd5d92ceee9296125b85e53fbaecee46504fdbb8f9"
+        },
+        {
+          "name": "05-ffn-moe-internals.png",
+          "sha256": "6c3058966f1749b498120f85dcee57357551328ce6db0e0910cd9af944226beb"
+        }
+      ]
+    },
+    {
+      "diagram": "06-vision-internals",
+      "gates": {
+        "validate": "pass",
+        "deliver": "pass",
+        "check": "pass",
+        "browser-check": "pass"
+      },
+      "files": [
+        {
+          "name": "06-vision-internals.architecture.json",
+          "sha256": "3a3658b369b7a55362db25672b73d83bd06ed301ab24fb7fb506e4fd1edf4db9"
+        },
+        {
+          "name": "06-vision-internals.html",
+          "sha256": "b983266e400855bf14f4ff6b474d671bb69b7eb2de12181c49b9fa556533c029"
+        },
+        {
+          "name": "06-vision-internals.svg",
+          "sha256": "d10953d581b98a13b2060e9306b0624e6c3f266d85ff86ac2d66d45bc5707071"
+        },
+        {
+          "name": "06-vision-internals.png",
+          "sha256": "d217f970068b8eb2c9b737a8af6c25b17405dbf3214fef62307f1a64eaed2907"
+        }
+      ]
+    }
+  ],
+  "exports": {
+    "formats": [
+      "png",
+      "svg"
+    ],
+    "method": "Archify native full-diagram viewer export"
+  }
+}

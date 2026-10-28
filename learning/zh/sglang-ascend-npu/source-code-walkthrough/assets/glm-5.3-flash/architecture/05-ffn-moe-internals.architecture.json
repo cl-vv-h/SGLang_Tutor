@@ -1,0 +1,406 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — Dense FFN与MoE内部结构",
+    "locale": "zh-CN",
+    "output": "learning/zh/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/05-ffn-moe-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "计算模块"
+        },
+        "database": {
+          "label": "内存缓存 / 状态"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "input",
+      "type": "backend",
+      "label": "FFN 输入 U",
+      "sublabel": "[N,4096]；FFN mHC pre后",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 984,
+          "end_line": 1008
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "choice",
+      "type": "backend",
+      "label": "按layer ID选FFN",
+      "sublabel": "前三层dense；后42层MoE",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 746,
+          "end_line": 772
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 943,
+          "end_line": 952
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "denseproj",
+      "type": "backend",
+      "label": "Dense gate / up",
+      "sublabel": "4096 → 两份12288维",
+      "pos": [
+        40,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 277,
+          "end_line": 315
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 84,
+          "end_line": 88
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "denseact",
+      "type": "backend",
+      "label": "Clamped SwiGLU",
+      "sublabel": "clip gate/up → SiLU × up",
+      "pos": [
+        40,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 150,
+          "end_line": 155
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 277,
+          "end_line": 315
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "densedown",
+      "type": "backend",
+      "label": "Dense down",
+      "sublabel": "12288 → 4096",
+      "pos": [
+        40,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 307,
+          "end_line": 315
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "Router / Top-k / 路由",
+      "sublabel": "sigmoid打分；288个专家选8",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 701,
+          "end_line": 708
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 752,
+          "end_line": 794
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1302,
+          "end_line": 1381
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "experts",
+      "type": "backend",
+      "label": "8个选中的 routed专家",
+      "sublabel": "每个：4096 → 2048 → 4096",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 724,
+          "end_line": 738
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 105,
+          "end_line": 113
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "weighted",
+      "type": "backend",
+      "label": "按权重合并 routed",
+      "sublabel": "原sigmoid分数归一化；缩放2.5",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 752,
+          "end_line": 765
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1377,
+          "end_line": 1418
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "shared",
+      "type": "backend",
+      "label": "1个 shared专家",
+      "sublabel": "4096 → 2048 → 4096",
+      "pos": [
+        840,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 802,
+          "end_line": 830
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1392,
+          "end_line": 1418
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 105,
+          "end_line": 113
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "sum",
+      "type": "backend",
+      "label": "Routed + Shared",
+      "sublabel": "相加得到MoE子层输出",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1404,
+          "end_line": 1428
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "所选 FFN 输出",
+      "sublabel": "[N,4096] → FFN mHC post",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1002,
+          "end_line": 1010
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "input-to-choice",
+      "from": "input",
+      "to": "choice",
+      "variant": "emphasis"
+    },
+    {
+      "id": "choice-to-denseproj",
+      "from": "choice",
+      "to": "denseproj",
+      "label": "L0–2"
+    },
+    {
+      "id": "denseproj-to-denseact",
+      "from": "denseproj",
+      "to": "denseact"
+    },
+    {
+      "id": "denseact-to-densedown",
+      "from": "denseact",
+      "to": "densedown"
+    },
+    {
+      "id": "densedown-to-output",
+      "from": "densedown",
+      "to": "output",
+      "label": "dense"
+    },
+    {
+      "id": "choice-to-router",
+      "from": "choice",
+      "to": "router",
+      "label": "L3–44",
+      "variant": "emphasis"
+    },
+    {
+      "id": "router-to-experts",
+      "from": "router",
+      "to": "experts",
+      "label": "hidden + ids/weights",
+      "variant": "emphasis"
+    },
+    {
+      "id": "experts-to-weighted",
+      "from": "experts",
+      "to": "weighted",
+      "variant": "emphasis"
+    },
+    {
+      "id": "weighted-to-sum",
+      "from": "weighted",
+      "to": "sum",
+      "variant": "emphasis"
+    },
+    {
+      "id": "choice-to-shared",
+      "from": "choice",
+      "to": "shared",
+      "label": "MoE时：hidden"
+    },
+    {
+      "id": "shared-to-sum",
+      "from": "shared",
+      "to": "sum",
+      "label": "始终计算"
+    },
+    {
+      "id": "sum-to-output",
+      "from": "sum",
+      "to": "output",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "两条类型轴",
+      "dot": "cyan",
+      "items": [
+        "KDA/DSA是Attention类型；dense/MoE是FFN类型。一个KDA层也可以使用MoE，不能把KDA等同于dense。",
+        "Router的correction bias用于选择专家；最终合并权重由原始sigmoid分数归一化得到。",
+        "Shared专家不参与288选8的竞争。实际kernel可以融合shared计算，图仍保留数学上的两部分。"
+      ]
+    },
+    {
+      "title": "激活函数与宽度",
+      "dot": "amber",
+      "items": [
+        "Dense、routed与shared均采用相应clamped SwiGLU：gate仅裁上界10，up裁到[−10,10]，再做SiLU(gate)乘up。",
+        "画的是完整逻辑宽度。TP分片与EP dispatch不是额外网络层。"
+      ]
+    }
+  ]
+}

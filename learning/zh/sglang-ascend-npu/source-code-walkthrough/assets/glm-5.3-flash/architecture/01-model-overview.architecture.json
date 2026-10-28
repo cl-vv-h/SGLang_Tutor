@@ -1,0 +1,616 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — 完整模型架构",
+    "locale": "zh-CN",
+    "output": "learning/zh/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/01-model-overview.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "计算模块"
+        },
+        "database": {
+          "label": "内存缓存 / 状态"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "embedding",
+      "type": "backend",
+      "label": "Token embedding",
+      "sublabel": "词表154880；每token 4096维",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1023,
+          "end_line": 1040
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 82,
+          "end_line": 90
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "patch",
+      "type": "backend",
+      "label": "图像/视频 Patch",
+      "sublabel": "14×14×2 → 1024维",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 270,
+          "end_line": 283
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "vit",
+      "type": "backend",
+      "label": "24 × Vision block",
+      "sublabel": "视觉Attention + 残差 + MLP",
+      "pos": [
+        40,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 216,
+          "end_line": 258
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 294,
+          "end_line": 308
+        },
+        {
+          "path": "docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx",
+          "line": 54,
+          "end_line": 56
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "adapter",
+      "type": "backend",
+      "label": "视觉合并与适配",
+      "sublabel": "Norm、空间2×2合并、MLP",
+      "pos": [
+        40,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 186,
+          "end_line": 213
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 310,
+          "end_line": 338
+        },
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 269,
+          "end_line": 278
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "merge",
+      "type": "backend",
+      "label": "拼接语言输入",
+      "sublabel": "视觉特征填入占位token行",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1621,
+          "end_line": 1637
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1651,
+          "end_line": 1670
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "expand",
+      "type": "backend",
+      "label": "mHC 入口复制",
+      "sublabel": "一份4096 → 四份4096",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 150,
+          "end_line": 159
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1887,
+          "end_line": 1888
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "first",
+      "type": "backend",
+      "label": "Layer 0、1、2",
+      "sublabel": "3 × (KDA + dense FFN)",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 707,
+          "end_line": 739
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 746,
+          "end_line": 772
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "firstdsa",
+      "type": "backend",
+      "label": "Layer 3",
+      "sublabel": "DSA / NoPE MLA + MoE",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 707,
+          "end_line": 772
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "repeat",
+      "type": "backend",
+      "label": "Layer 4 → 43",
+      "sublabel": "10 × [KDA,KDA,KDA,DSA]；均MoE",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 943,
+          "end_line": 952
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "last",
+      "type": "backend",
+      "label": "Layer 44",
+      "sublabel": "KDA + MoE；target共45层",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 82,
+          "end_line": 90
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1177,
+          "end_line": 1208
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "contract",
+      "type": "backend",
+      "label": "流均值 + final Norm",
+      "sublabel": "四路4096 → 单路4096",
+      "pos": [
+        440,
+        1230
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 230,
+          "end_line": 244
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1918,
+          "end_line": 1920
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1220,
+          "end_line": 1229
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "head",
+      "type": "backend",
+      "label": "LM head → logits",
+      "sublabel": "4096 → 154880；随后采样",
+      "pos": [
+        440,
+        1400
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1284,
+          "end_line": 1297
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1672,
+          "end_line": 1679
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "draftstate",
+      "type": "backend",
+      "label": "Spec 运行时输入",
+      "sublabel": "对齐的上一轮 hidden",
+      "pos": [
+        840,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 192,
+          "end_line": 217
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "draftmerge",
+      "type": "backend",
+      "label": "MTP 输入融合",
+      "sublabel": "enorm + hnorm；拼接后eh_proj",
+      "pos": [
+        840,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 89,
+          "end_line": 103
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 192,
+          "end_line": 221
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "draft",
+      "type": "backend",
+      "label": "1 × NextN block",
+      "sublabel": "checkpoint额外层；不计入45层",
+      "pos": [
+        840,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next_nextn.py",
+          "line": 34,
+          "end_line": 49
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 124,
+          "end_line": 138
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 223,
+          "end_line": 237
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "drafthead",
+      "type": "backend",
+      "label": "MTP head → 候选",
+      "sublabel": "target验证后决定接受边界",
+      "pos": [
+        840,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 223,
+          "end_line": 239
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 303,
+          "end_line": 313
+        },
+        {
+          "path": "docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx",
+          "line": 97,
+          "end_line": 109
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "embedding-to-merge",
+      "from": "embedding",
+      "to": "merge",
+      "variant": "emphasis"
+    },
+    {
+      "id": "patch-to-vit",
+      "from": "patch",
+      "to": "vit"
+    },
+    {
+      "id": "vit-to-adapter",
+      "from": "vit",
+      "to": "adapter"
+    },
+    {
+      "id": "adapter-to-merge",
+      "from": "adapter",
+      "to": "merge",
+      "label": "视觉4096维"
+    },
+    {
+      "id": "merge-to-expand",
+      "from": "merge",
+      "to": "expand",
+      "variant": "emphasis"
+    },
+    {
+      "id": "expand-to-first",
+      "from": "expand",
+      "to": "first",
+      "variant": "emphasis"
+    },
+    {
+      "id": "first-to-firstdsa",
+      "from": "first",
+      "to": "firstdsa",
+      "variant": "emphasis"
+    },
+    {
+      "id": "firstdsa-to-repeat",
+      "from": "firstdsa",
+      "to": "repeat",
+      "variant": "emphasis"
+    },
+    {
+      "id": "repeat-to-last",
+      "from": "repeat",
+      "to": "last",
+      "variant": "emphasis"
+    },
+    {
+      "id": "last-to-contract",
+      "from": "last",
+      "to": "contract",
+      "variant": "emphasis"
+    },
+    {
+      "id": "contract-to-head",
+      "from": "contract",
+      "to": "head",
+      "variant": "emphasis"
+    },
+    {
+      "id": "embedding-to-draftmerge",
+      "from": "embedding",
+      "to": "draftmerge",
+      "label": "MTP时：下一token"
+    },
+    {
+      "id": "draftstate-to-draftmerge",
+      "from": "draftstate",
+      "to": "draftmerge",
+      "label": "MTP时：hidden"
+    },
+    {
+      "id": "draftmerge-to-draft",
+      "from": "draftmerge",
+      "to": "draft",
+      "variant": "emphasis"
+    },
+    {
+      "id": "draft-to-drafthead",
+      "from": "draft",
+      "to": "drafthead",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "阅读顺序",
+      "dot": "cyan",
+      "items": [
+        "主线是文本embedding或视觉融合输入 → 一次mHC复制 → 45层顺序执行 → 流均值和final RMSNorm → LM head。",
+        "图中Layer 4–43代表40层：十组KDA、KDA、KDA、DSA。加上0–3和44，共34个KDA、11个DSA。",
+        "Attention类型与FFN类型独立：前三层dense，其余42层MoE。DSA不是跟在KDA之后的额外子层。"
+      ]
+    },
+    {
+      "title": "图示范围",
+      "dot": "amber",
+      "items": [
+        "这是固定checkpoint的逻辑架构；不画TP/EP切分，不把投影融合等同于一个固定kernel。",
+        "MTP的输入是运行时对齐的hidden和下一token embedding；它在独立draft路径执行，不是target必经的第46层。",
+        "配置固定为HF 46a050bec13002ad29ee795c16e61cf4fa3c4a9c；源码固定为SGLang 92580581da6fc8542a997a00c1a8b71b03497680。"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "45个 target Decoder层",
+      "wraps": [
+        "first",
+        "firstdsa",
+        "repeat",
+        "last"
+      ],
+      "pad": 22
+    },
+    {
+      "kind": "region",
+      "label": "可选 MTP；不计入target层数",
+      "wraps": [
+        "draftmerge",
+        "draft",
+        "drafthead"
+      ],
+      "pad": 22
+    }
+  ]
+}

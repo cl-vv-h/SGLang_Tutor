@@ -1,0 +1,458 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — Vision Encoder and Block",
+    "locale": "en",
+    "output": "learning/en/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/06-vision-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Compute Module"
+        },
+        "database": {
+          "label": "Memory Cache / State"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "patch",
+      "type": "backend",
+      "label": "Patch Embedding",
+      "sublabel": "14×14×2 patches to width 1024",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 270,
+          "end_line": 283
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "input",
+      "type": "backend",
+      "label": "Vision Block Input",
+      "sublabel": "Width 1024; repeat 24 times",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 294,
+          "end_line": 308
+        },
+        {
+          "path": "docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx",
+          "line": 54,
+          "end_line": 56
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "norm1",
+      "type": "backend",
+      "label": "RMSNorm 1",
+      "sublabel": "Pre-norm; single-stream residual",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 230,
+          "end_line": 249
+        },
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 123,
+          "end_line": 126
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attention",
+      "type": "backend",
+      "label": "Vision Attention",
+      "sublabel": "16 heads × 64; vision RoPE",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 233,
+          "end_line": 249
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 285,
+          "end_line": 292
+        },
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 128,
+          "end_line": 137
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "add1",
+      "type": "backend",
+      "label": "First Residual Add",
+      "sublabel": "Input + attention output",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 139,
+          "end_line": 143
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "skip1",
+      "type": "backend",
+      "label": "Keep Block Input",
+      "sublabel": "Ordinary residual; not mHC",
+      "pos": [
+        40,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 123,
+          "end_line": 147
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "norm2",
+      "type": "backend",
+      "label": "RMSNorm 2",
+      "sublabel": "Normalize first residual result",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 139,
+          "end_line": 146
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "mlp",
+      "type": "backend",
+      "label": "Vision Clamped MLP",
+      "sublabel": "1024 to 4096 to 1024",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 158,
+          "end_line": 183
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 250,
+          "end_line": 258
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "skip2",
+      "type": "backend",
+      "label": "Keep First Add Result",
+      "sublabel": "For second residual add",
+      "pos": [
+        840,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 139,
+          "end_line": 147
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "add2",
+      "type": "backend",
+      "label": "Second Residual Add",
+      "sublabel": "Feed the next vision block",
+      "pos": [
+        440,
+        1230
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 145,
+          "end_line": 148
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "downsample",
+      "type": "backend",
+      "label": "Final Norm / Merge",
+      "sublabel": "Spatial 2×2 merge to 4096",
+      "pos": [
+        440,
+        1400
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 327,
+          "end_line": 338
+        },
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 269,
+          "end_line": 277
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "adapter",
+      "type": "backend",
+      "label": "Merger / Adapter",
+      "sublabel": "Projection, norm, gated MLP",
+      "pos": [
+        440,
+        1570
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 186,
+          "end_line": 213
+        },
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 273,
+          "end_line": 278
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "Visual LM Embeddings",
+      "sublabel": "Width 4096; inject LM rows",
+      "pos": [
+        440,
+        1740
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1565,
+          "end_line": 1578
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1621,
+          "end_line": 1637
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "patch-to-input",
+      "from": "patch",
+      "to": "input",
+      "variant": "emphasis"
+    },
+    {
+      "id": "input-to-norm1",
+      "from": "input",
+      "to": "norm1",
+      "variant": "emphasis"
+    },
+    {
+      "id": "input-to-skip1",
+      "from": "input",
+      "to": "skip1",
+      "label": "Keep"
+    },
+    {
+      "id": "norm1-to-attention",
+      "from": "norm1",
+      "to": "attention",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attention-to-add1",
+      "from": "attention",
+      "to": "add1",
+      "variant": "emphasis"
+    },
+    {
+      "id": "skip1-to-add1",
+      "from": "skip1",
+      "to": "add1",
+      "label": "Old input"
+    },
+    {
+      "id": "add1-to-norm2",
+      "from": "add1",
+      "to": "norm2",
+      "variant": "emphasis"
+    },
+    {
+      "id": "add1-to-skip2",
+      "from": "add1",
+      "to": "skip2",
+      "label": "Keep"
+    },
+    {
+      "id": "norm2-to-mlp",
+      "from": "norm2",
+      "to": "mlp",
+      "variant": "emphasis"
+    },
+    {
+      "id": "mlp-to-add2",
+      "from": "mlp",
+      "to": "add2",
+      "variant": "emphasis"
+    },
+    {
+      "id": "skip2-to-add2",
+      "from": "skip2",
+      "to": "add2",
+      "label": "Old hidden"
+    },
+    {
+      "id": "add2-to-downsample",
+      "from": "add2",
+      "to": "downsample",
+      "label": "After 24 blocks",
+      "variant": "emphasis"
+    },
+    {
+      "id": "downsample-to-adapter",
+      "from": "downsample",
+      "to": "adapter",
+      "variant": "emphasis"
+    },
+    {
+      "id": "adapter-to-output",
+      "from": "adapter",
+      "to": "output",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Keep Vision and Text Separate",
+      "dot": "cyan",
+      "items": [
+        "The expanded structure is one of 24 Vision blocks. Intermediate add2 outputs enter the next block; only the final block proceeds to post norm and spatial merge.",
+        "Vision uses RoPE and ordinary residuals; text MLA uses NoPE and text Decoder sublayers use four-stream mHC.",
+        "Spatial merge and the adapter do not force every image to 256 tokens. The processed grid determines visual row counts."
+      ]
+    },
+    {
+      "title": "Data Granularity",
+      "dot": "amber",
+      "items": [
+        "Logical structure only; DP vision sharding, dummy heads, and platform kernel choices are omitted.",
+        "Visual embeddings are injected before the language backbone; there is no extra cross-attention in each text Decoder layer."
+      ]
+    }
+  ]
+}

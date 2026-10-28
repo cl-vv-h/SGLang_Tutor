@@ -1,0 +1,542 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — DSA, KPool and NoPE MLA",
+    "locale": "en",
+    "output": "learning/en/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/04-dsa-mla-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Compute Module"
+        },
+        "database": {
+          "label": "Memory Cache / State"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "input",
+      "type": "backend",
+      "label": "Input U",
+      "sublabel": "[N,4096]; after mHC readout",
+      "pos": [
+        340,
+        40
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 966,
+          "end_line": 977
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "latents",
+      "type": "backend",
+      "label": "Q / KV Latents",
+      "sublabel": "Q latent 1536; KV latent 512",
+      "pos": [
+        340,
+        210
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 340,
+          "end_line": 370
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 117,
+          "end_line": 121
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "qexpand",
+      "type": "backend",
+      "label": "Expand Q",
+      "sublabel": "64 heads × 256; NoPE",
+      "pos": [
+        340,
+        380
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 720,
+          "end_line": 739
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 367,
+          "end_line": 410
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "qabsorb",
+      "type": "backend",
+      "label": "Absorb K Projection",
+      "sublabel": "Per head: 256 to 512",
+      "pos": [
+        340,
+        550
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 548,
+          "end_line": 585
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "mlacache",
+      "type": "database",
+      "label": "Original MLA Cache",
+      "sublabel": "512-wide latent per token",
+      "pos": [
+        40,
+        550
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa_backend.py",
+          "line": 2164,
+          "end_line": 2177
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 117,
+          "end_line": 121
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "iq",
+      "type": "backend",
+      "label": "Indexer Q / Weights",
+      "sublabel": "32 heads × 128; Q latent",
+      "pos": [
+        600,
+        380
+      ],
+      "size": [
+        150,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 199,
+          "end_line": 242
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 1762,
+          "end_line": 1810
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ik",
+      "type": "backend",
+      "label": "Index Key / Gate",
+      "sublabel": "128 per token; not MLA KV",
+      "pos": [
+        940,
+        210
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 185,
+          "end_line": 223
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "pool",
+      "type": "backend",
+      "label": "4-token KPool",
+      "sublabel": "Feature pooling; Hadamard/FP8",
+      "pos": [
+        780,
+        380
+      ],
+      "size": [
+        170,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 699,
+          "end_line": 754
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 1778,
+          "end_line": 1789
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "indexcache",
+      "type": "database",
+      "label": "Pooled Index Cache",
+      "sublabel": "128-wide key per full group",
+      "pos": [
+        940,
+        550
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 283,
+          "end_line": 338
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "score",
+      "type": "backend",
+      "label": "Causal Score / Top-k",
+      "sublabel": "Up to 512 groups; 2048 tokens",
+      "pos": [
+        640,
+        720
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 756,
+          "end_line": 794
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 589,
+          "end_line": 696
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "tail",
+      "type": "database",
+      "label": "Keep Visible Tail",
+      "sublabel": "0–3 not-yet-grouped tokens",
+      "pos": [
+        1040,
+        380
+      ],
+      "size": [
+        160,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 496,
+          "end_line": 589
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "expand",
+      "type": "backend",
+      "label": "Expand IDs / Add Tail",
+      "sublabel": "4 original tokens per group",
+      "pos": [
+        640,
+        890
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 411,
+          "end_line": 455
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 457,
+          "end_line": 524
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "mapping",
+      "type": "backend",
+      "label": "Positions to Cache",
+      "sublabel": "Request-specific page table",
+      "pos": [
+        640,
+        1060
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 869,
+          "end_line": 889
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 589,
+          "end_line": 696
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attention",
+      "type": "backend",
+      "label": "Sparse Latent Attention",
+      "sublabel": "Selected KV; softmax; reduce",
+      "pos": [
+        340,
+        1230
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 693,
+          "end_line": 770
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa_backend.py",
+          "line": 2741,
+          "end_line": 2806
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "V / O Projections",
+      "sublabel": "64×256 to 4096; mHC post",
+      "pos": [
+        340,
+        1400
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 895,
+          "end_line": 944
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 117,
+          "end_line": 121
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "input-to-latents",
+      "from": "input",
+      "to": "latents",
+      "variant": "emphasis"
+    },
+    {
+      "id": "latents-to-qexpand",
+      "from": "latents",
+      "to": "qexpand",
+      "variant": "emphasis"
+    },
+    {
+      "id": "qexpand-to-qabsorb",
+      "from": "qexpand",
+      "to": "qabsorb",
+      "variant": "emphasis"
+    },
+    {
+      "id": "latents-to-mlacache",
+      "from": "latents",
+      "to": "mlacache",
+      "label": "Write new KV"
+    },
+    {
+      "id": "latents-to-iq",
+      "from": "latents",
+      "to": "iq",
+      "label": "Q latent"
+    },
+    {
+      "id": "input-to-ik",
+      "from": "input",
+      "to": "ik",
+      "label": "hidden"
+    },
+    {
+      "id": "ik-to-pool",
+      "from": "ik",
+      "to": "pool",
+      "label": "key/gate"
+    },
+    {
+      "id": "pool-to-indexcache",
+      "from": "pool",
+      "to": "indexcache",
+      "label": "Full groups"
+    },
+    {
+      "id": "iq-to-score",
+      "from": "iq",
+      "to": "score",
+      "label": "Q + weights"
+    },
+    {
+      "id": "indexcache-to-score",
+      "from": "indexcache",
+      "to": "score",
+      "label": "pooled keys"
+    },
+    {
+      "id": "pool-to-tail",
+      "from": "pool",
+      "to": "tail",
+      "label": "Incomplete tail"
+    },
+    {
+      "id": "score-to-expand",
+      "from": "score",
+      "to": "expand",
+      "label": "Group IDs"
+    },
+    {
+      "id": "tail-to-expand",
+      "from": "tail",
+      "to": "expand",
+      "label": "Tail"
+    },
+    {
+      "id": "expand-to-mapping",
+      "from": "expand",
+      "to": "mapping",
+      "variant": "emphasis"
+    },
+    {
+      "id": "mapping-to-attention",
+      "from": "mapping",
+      "to": "attention",
+      "label": "Selected slots"
+    },
+    {
+      "id": "mlacache-to-attention",
+      "from": "mlacache",
+      "to": "attention",
+      "label": "Read original KV"
+    },
+    {
+      "id": "qabsorb-to-attention",
+      "from": "qabsorb",
+      "to": "attention",
+      "label": "Q_latent",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attention-to-output",
+      "from": "attention",
+      "to": "output",
+      "variant": "emphasis"
+    },
+    {
+      "id": "hidden-to-index-head-weights",
+      "from": "input",
+      "to": "iq",
+      "label": "head weights"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Two Different Caches",
+      "dot": "cyan",
+      "items": [
+        "MLA stores a 512-wide latent per original token. KPool compresses only 128-wide retrieval keys; main attention does not read pooled V.",
+        "The indexer derives queries from Q latent and keys/compression gates/head weights from hidden. It uses 32 retrieval heads versus 64 main attention heads.",
+        "2048 is the main historical token budget: select at most 512 full groups, expand each to 4 original tokens, then include 0–3 visible tail tokens."
+      ]
+    },
+    {
+      "title": "Dependencies, Not a Fixed Schedule",
+      "dot": "amber",
+      "items": [
+        "This depicts a layer that runs its indexer. Short-sequence shortcuts, top-k reuse, FP8 packing, and projection fusion may change physical execution.",
+        "NoPE removes text MLA RoPE; causal positions, request boundaries, and page tables remain necessary."
+      ]
+    }
+  ]
+}

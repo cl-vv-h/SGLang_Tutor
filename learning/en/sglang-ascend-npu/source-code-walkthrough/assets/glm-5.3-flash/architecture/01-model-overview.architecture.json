@@ -1,0 +1,616 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — Model Overview",
+    "locale": "en",
+    "output": "learning/en/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/01-model-overview.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Compute Module"
+        },
+        "database": {
+          "label": "Memory Cache / State"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "embedding",
+      "type": "backend",
+      "label": "Token Embedding",
+      "sublabel": "Vocabulary 154880; width 4096",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1023,
+          "end_line": 1040
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 82,
+          "end_line": 90
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "patch",
+      "type": "backend",
+      "label": "Image / Video Patches",
+      "sublabel": "14×14×2 to width 1024",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 270,
+          "end_line": 283
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "vit",
+      "type": "backend",
+      "label": "24 × Vision Block",
+      "sublabel": "Vision attention, residual, MLP",
+      "pos": [
+        40,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 216,
+          "end_line": 258
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 294,
+          "end_line": 308
+        },
+        {
+          "path": "docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx",
+          "line": 54,
+          "end_line": 56
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "adapter",
+      "type": "backend",
+      "label": "Vision Merge / Adapter",
+      "sublabel": "Norm, spatial 2×2 merge, MLP",
+      "pos": [
+        40,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 186,
+          "end_line": 213
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 310,
+          "end_line": 338
+        },
+        {
+          "path": "python/sglang/srt/models/glm_ocr.py",
+          "line": 269,
+          "end_line": 278
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "merge",
+      "type": "backend",
+      "label": "Assemble LM Inputs",
+      "sublabel": "Inject visual placeholder rows",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1621,
+          "end_line": 1637
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1651,
+          "end_line": 1670
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "expand",
+      "type": "backend",
+      "label": "mHC Entry Copies",
+      "sublabel": "4096 to four copies of 4096",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 150,
+          "end_line": 159
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1887,
+          "end_line": 1888
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "first",
+      "type": "backend",
+      "label": "Layers 0, 1, 2",
+      "sublabel": "3 × (KDA + dense FFN)",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 707,
+          "end_line": 739
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 746,
+          "end_line": 772
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "firstdsa",
+      "type": "backend",
+      "label": "Layer 3",
+      "sublabel": "DSA / NoPE MLA + MoE",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 707,
+          "end_line": 772
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "repeat",
+      "type": "backend",
+      "label": "Layers 4 to 43",
+      "sublabel": "10 × [KDA,KDA,KDA,DSA]; MoE",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 943,
+          "end_line": 952
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "last",
+      "type": "backend",
+      "label": "Layer 44",
+      "sublabel": "KDA + MoE; 45 target layers",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 82,
+          "end_line": 90
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 198,
+          "end_line": 224
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1177,
+          "end_line": 1208
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "contract",
+      "type": "backend",
+      "label": "Mean Streams / Norm",
+      "sublabel": "Four streams to width 4096",
+      "pos": [
+        440,
+        1230
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/layer_boundary/residual/mhc.py",
+          "line": 230,
+          "end_line": 244
+        },
+        {
+          "path": "python/sglang/kernels/ops/layernorm/mhc.py",
+          "line": 1918,
+          "end_line": 1920
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1220,
+          "end_line": 1229
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "head",
+      "type": "backend",
+      "label": "LM Head / Logits",
+      "sublabel": "4096 to 154880; then sampling",
+      "pos": [
+        440,
+        1400
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1284,
+          "end_line": 1297
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1672,
+          "end_line": 1679
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "draftstate",
+      "type": "backend",
+      "label": "Spec Runtime Input",
+      "sublabel": "Aligned previous hidden states",
+      "pos": [
+        840,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 192,
+          "end_line": 217
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "draftmerge",
+      "type": "backend",
+      "label": "MTP Input Fusion",
+      "sublabel": "enorm + hnorm; concat, eh_proj",
+      "pos": [
+        840,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 89,
+          "end_line": 103
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 192,
+          "end_line": 221
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "draft",
+      "type": "backend",
+      "label": "1 × NextN Block",
+      "sublabel": "Extra block outside 45 layers",
+      "pos": [
+        840,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next_nextn.py",
+          "line": 34,
+          "end_line": 49
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 124,
+          "end_line": 138
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 223,
+          "end_line": 237
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "drafthead",
+      "type": "backend",
+      "label": "MTP Head / Candidates",
+      "sublabel": "Target verifies acceptance",
+      "pos": [
+        840,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 223,
+          "end_line": 239
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_nextn.py",
+          "line": 303,
+          "end_line": 313
+        },
+        {
+          "path": "docs/cookbook/autoregressive/GLM/GLM-5.3-Flash.mdx",
+          "line": 97,
+          "end_line": 109
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "embedding-to-merge",
+      "from": "embedding",
+      "to": "merge",
+      "variant": "emphasis"
+    },
+    {
+      "id": "patch-to-vit",
+      "from": "patch",
+      "to": "vit"
+    },
+    {
+      "id": "vit-to-adapter",
+      "from": "vit",
+      "to": "adapter"
+    },
+    {
+      "id": "adapter-to-merge",
+      "from": "adapter",
+      "to": "merge",
+      "label": "Visual 4096"
+    },
+    {
+      "id": "merge-to-expand",
+      "from": "merge",
+      "to": "expand",
+      "variant": "emphasis"
+    },
+    {
+      "id": "expand-to-first",
+      "from": "expand",
+      "to": "first",
+      "variant": "emphasis"
+    },
+    {
+      "id": "first-to-firstdsa",
+      "from": "first",
+      "to": "firstdsa",
+      "variant": "emphasis"
+    },
+    {
+      "id": "firstdsa-to-repeat",
+      "from": "firstdsa",
+      "to": "repeat",
+      "variant": "emphasis"
+    },
+    {
+      "id": "repeat-to-last",
+      "from": "repeat",
+      "to": "last",
+      "variant": "emphasis"
+    },
+    {
+      "id": "last-to-contract",
+      "from": "last",
+      "to": "contract",
+      "variant": "emphasis"
+    },
+    {
+      "id": "contract-to-head",
+      "from": "contract",
+      "to": "head",
+      "variant": "emphasis"
+    },
+    {
+      "id": "embedding-to-draftmerge",
+      "from": "embedding",
+      "to": "draftmerge",
+      "label": "MTP: next token"
+    },
+    {
+      "id": "draftstate-to-draftmerge",
+      "from": "draftstate",
+      "to": "draftmerge",
+      "label": "MTP: hidden"
+    },
+    {
+      "id": "draftmerge-to-draft",
+      "from": "draftmerge",
+      "to": "draft",
+      "variant": "emphasis"
+    },
+    {
+      "id": "draft-to-drafthead",
+      "from": "draft",
+      "to": "drafthead",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Reading Order",
+      "dot": "cyan",
+      "items": [
+        "Main path: embeddings with optional vision → one mHC expansion → 45 sequential layers → stream mean and final RMSNorm → LM head.",
+        "Layers 4–43 are 40 layers: ten KDA/KDA/KDA/DSA groups. Including 0–3 and 44 gives 34 KDA and 11 DSA layers.",
+        "Attention and FFN types are independent: three dense FFNs and 42 MoEs. DSA is not an extra sublayer after KDA."
+      ]
+    },
+    {
+      "title": "Scope",
+      "dot": "amber",
+      "items": [
+        "Logical architecture of the pinned checkpoint. TP/EP partitions and kernel fusion are not depicted.",
+        "MTP consumes runtime-aligned hidden states and next-token embeddings in a separate draft path, not a mandatory 46th target layer.",
+        "Configuration: HF 46a050bec13002ad29ee795c16e61cf4fa3c4a9c. Source: SGLang 92580581da6fc8542a997a00c1a8b71b03497680."
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "45 Target Decoder Layers",
+      "wraps": [
+        "first",
+        "firstdsa",
+        "repeat",
+        "last"
+      ],
+      "pad": 22
+    },
+    {
+      "kind": "region",
+      "label": "Optional MTP; Outside Target Count",
+      "wraps": [
+        "draftmerge",
+        "draft",
+        "drafthead"
+      ],
+      "pad": 22
+    }
+  ]
+}

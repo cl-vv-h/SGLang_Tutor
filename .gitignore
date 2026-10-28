@@ -12,6 +12,7 @@ __pycache__/
 venv/
 
 # Local artifacts
+.archify/
 *.zip
 .codegraph/
 codegraph_out/

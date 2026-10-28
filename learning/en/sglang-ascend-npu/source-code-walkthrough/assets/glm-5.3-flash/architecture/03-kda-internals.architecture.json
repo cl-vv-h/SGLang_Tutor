@@ -1,0 +1,444 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — Inside KDA",
+    "locale": "en",
+    "output": "learning/en/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/03-kda-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Compute Module"
+        },
+        "database": {
+          "label": "Memory Cache / State"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "input",
+      "type": "backend",
+      "label": "Normalized Input U",
+      "sublabel": "[N,4096]; from mHC pre",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 966,
+          "end_line": 977
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "projection",
+      "type": "backend",
+      "label": "QKV / Gate Projections",
+      "sublabel": "64 global heads; width 128",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 459,
+          "end_line": 529
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 600,
+          "end_line": 637
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "conv",
+      "type": "backend",
+      "label": "Causal Conv / SiLU",
+      "sublabel": "Separate Q/K/V; window 4",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 544,
+          "end_line": 554
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 935,
+          "end_line": 943
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 1003,
+          "end_line": 1021
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "normalize",
+      "type": "backend",
+      "label": "L2 Normalize Q/K",
+      "sublabel": "V retains its conv/SiLU value",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 49,
+          "end_line": 54
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 109,
+          "end_line": 120
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 141,
+          "end_line": 156
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "gates",
+      "type": "backend",
+      "label": "Beta / Channel Alpha",
+      "sublabel": "Sigmoid beta; safe floor −5",
+      "pos": [
+        840,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 506,
+          "end_line": 512
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 598,
+          "end_line": 618
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 109,
+          "end_line": 120
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "zgate",
+      "type": "backend",
+      "label": "Output Gate z",
+      "sublabel": "Low-rank projection; sigmoid",
+      "pos": [
+        40,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 515,
+          "end_line": 529
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 610,
+          "end_line": 618
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 676,
+          "end_line": 678
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "recurrence",
+      "type": "backend",
+      "label": "Delta Rule / Readout",
+      "sublabel": "Predict V; write error; read Q",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 109,
+          "end_line": 120
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 141,
+          "end_line": 156
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 1086,
+          "end_line": 1155
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "Per-Request KDA State",
+      "sublabel": "Per layer: [64,128,128]",
+      "pos": [
+        840,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 1056,
+          "end_line": 1058
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 82,
+          "end_line": 98
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "normgate",
+      "type": "backend",
+      "label": "Output RMSNorm / Gate",
+      "sublabel": "Per-head norm × sigmoid(z)",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 568,
+          "end_line": 579
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 676,
+          "end_line": 678
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "outproj",
+      "type": "backend",
+      "label": "O Projection",
+      "sublabel": "64×128 to 4096",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 571,
+          "end_line": 579
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 676,
+          "end_line": 682
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "KDA Sublayer Output",
+      "sublabel": "[N,4096] to mHC post",
+      "pos": [
+        440,
+        1230
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 669,
+          "end_line": 682
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 970,
+          "end_line": 985
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "input-to-projection",
+      "from": "input",
+      "to": "projection",
+      "variant": "emphasis"
+    },
+    {
+      "id": "projection-to-conv",
+      "from": "projection",
+      "to": "conv",
+      "label": "Q/K/V",
+      "variant": "emphasis"
+    },
+    {
+      "id": "conv-to-normalize",
+      "from": "conv",
+      "to": "normalize",
+      "variant": "emphasis"
+    },
+    {
+      "id": "normalize-to-recurrence",
+      "from": "normalize",
+      "to": "recurrence",
+      "label": "Q, K, V",
+      "variant": "emphasis"
+    },
+    {
+      "id": "projection-to-gates",
+      "from": "projection",
+      "to": "gates",
+      "label": "beta/f raw"
+    },
+    {
+      "id": "projection-to-zgate",
+      "from": "projection",
+      "to": "zgate",
+      "label": "z raw"
+    },
+    {
+      "id": "gates-to-recurrence",
+      "from": "gates",
+      "to": "recurrence",
+      "label": "beta, alpha"
+    },
+    {
+      "id": "state-to-recurrence",
+      "from": "state",
+      "to": "recurrence",
+      "label": "Read M_prev"
+    },
+    {
+      "id": "recurrence-to-state",
+      "from": "recurrence",
+      "to": "state",
+      "label": "Write M_new"
+    },
+    {
+      "id": "recurrence-to-normgate",
+      "from": "recurrence",
+      "to": "normgate",
+      "variant": "emphasis"
+    },
+    {
+      "id": "zgate-to-normgate",
+      "from": "zgate",
+      "to": "normgate",
+      "label": "z"
+    },
+    {
+      "id": "normgate-to-outproj",
+      "from": "normgate",
+      "to": "outproj",
+      "variant": "emphasis"
+    },
+    {
+      "id": "outproj-to-output",
+      "from": "outproj",
+      "to": "output",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Convolution and State",
+      "dot": "cyan",
+      "items": [
+        "The Q/K/V convolution has a per-request window cache retaining the last three projected inputs. Requests must not share convolution history.",
+        "Interpret the recurrent state with value rows and key columns: decay key channels, predict the current V, write only the error, then read with Q.",
+        "Prefill can use a chunk algorithm and decode an incremental recurrence. Edges show mathematical dependencies, not kernel launches."
+      ]
+    },
+    {
+      "title": "Three Distinct Gates",
+      "dot": "amber",
+      "items": [
+        "Beta controls write strength; alpha is retention per key channel; z gates the normalized output with sigmoid.",
+        "The state here has all 64 heads. At TP=8 the tutorial has 8 heads per rank and state [8,128,128]."
+      ]
+    }
+  ]
+}

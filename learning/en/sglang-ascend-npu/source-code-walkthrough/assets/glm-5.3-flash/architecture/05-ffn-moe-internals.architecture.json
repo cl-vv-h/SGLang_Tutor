@@ -1,0 +1,406 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — Inside Dense FFN and MoE",
+    "locale": "en",
+    "output": "learning/en/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/05-ffn-moe-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Compute Module"
+        },
+        "database": {
+          "label": "Memory Cache / State"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "input",
+      "type": "backend",
+      "label": "FFN Input U",
+      "sublabel": "[N,4096]; after FFN mHC pre",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 984,
+          "end_line": 1008
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "choice",
+      "type": "backend",
+      "label": "Select FFN by Layer",
+      "sublabel": "First 3 dense; next 42 MoE",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 746,
+          "end_line": 772
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 943,
+          "end_line": 952
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "denseproj",
+      "type": "backend",
+      "label": "Dense Gate / Up",
+      "sublabel": "4096 to two width-12288 paths",
+      "pos": [
+        40,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 277,
+          "end_line": 315
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 84,
+          "end_line": 88
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "denseact",
+      "type": "backend",
+      "label": "Clamped SwiGLU",
+      "sublabel": "Clip gate/up; SiLU × up",
+      "pos": [
+        40,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 150,
+          "end_line": 155
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 277,
+          "end_line": 315
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "densedown",
+      "type": "backend",
+      "label": "Dense Down",
+      "sublabel": "12288 to 4096",
+      "pos": [
+        40,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 307,
+          "end_line": 315
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "Router / Top-k / Route",
+      "sublabel": "Sigmoid scores; 8 of 288",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 701,
+          "end_line": 708
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 752,
+          "end_line": 794
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1302,
+          "end_line": 1381
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "experts",
+      "type": "backend",
+      "label": "8 Selected Experts",
+      "sublabel": "Each: 4096 to 2048 to 4096",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 724,
+          "end_line": 738
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 105,
+          "end_line": 113
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "weighted",
+      "type": "backend",
+      "label": "Combine Routed Outputs",
+      "sublabel": "Normalize scores; scale 2.5",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 752,
+          "end_line": 765
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1377,
+          "end_line": 1418
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "shared",
+      "type": "backend",
+      "label": "1 Shared Expert",
+      "sublabel": "4096 to 2048 to 4096",
+      "pos": [
+        840,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 802,
+          "end_line": 830
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1392,
+          "end_line": 1418
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 105,
+          "end_line": 113
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "sum",
+      "type": "backend",
+      "label": "Routed + Shared",
+      "sublabel": "Sum the MoE branch outputs",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_v2.py",
+          "line": 1404,
+          "end_line": 1428
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "Selected FFN Output",
+      "sublabel": "[N,4096] to FFN mHC post",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 1002,
+          "end_line": 1010
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "input-to-choice",
+      "from": "input",
+      "to": "choice",
+      "variant": "emphasis"
+    },
+    {
+      "id": "choice-to-denseproj",
+      "from": "choice",
+      "to": "denseproj",
+      "label": "L0–2"
+    },
+    {
+      "id": "denseproj-to-denseact",
+      "from": "denseproj",
+      "to": "denseact"
+    },
+    {
+      "id": "denseact-to-densedown",
+      "from": "denseact",
+      "to": "densedown"
+    },
+    {
+      "id": "densedown-to-output",
+      "from": "densedown",
+      "to": "output",
+      "label": "Dense"
+    },
+    {
+      "id": "choice-to-router",
+      "from": "choice",
+      "to": "router",
+      "label": "L3–44",
+      "variant": "emphasis"
+    },
+    {
+      "id": "router-to-experts",
+      "from": "router",
+      "to": "experts",
+      "label": "hidden + ids/weights",
+      "variant": "emphasis"
+    },
+    {
+      "id": "experts-to-weighted",
+      "from": "experts",
+      "to": "weighted",
+      "variant": "emphasis"
+    },
+    {
+      "id": "weighted-to-sum",
+      "from": "weighted",
+      "to": "sum",
+      "variant": "emphasis"
+    },
+    {
+      "id": "choice-to-shared",
+      "from": "choice",
+      "to": "shared",
+      "label": "MoE: hidden"
+    },
+    {
+      "id": "shared-to-sum",
+      "from": "shared",
+      "to": "sum",
+      "label": "Always active"
+    },
+    {
+      "id": "sum-to-output",
+      "from": "sum",
+      "to": "output",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "Two Independent Type Axes",
+      "dot": "cyan",
+      "items": [
+        "KDA/DSA selects attention; dense/MoE selects FFN. A KDA layer can use MoE, so KDA does not mean dense.",
+        "Router correction bias affects expert selection; combine weights use normalized original sigmoid scores.",
+        "The shared expert does not compete in the 8-of-288 selection. Kernels may fuse it, but both mathematical contributions remain."
+      ]
+    },
+    {
+      "title": "Activation and Width",
+      "dot": "amber",
+      "items": [
+        "Dense, routed, and shared paths use clamped SwiGLU: gate capped at 10, up clipped to [−10,10], then SiLU(gate) times up.",
+        "Widths are complete logical widths. TP partitions and EP dispatch do not add network layers."
+      ]
+    }
+  ]
+}

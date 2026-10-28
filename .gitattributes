@@ -1,1 +1,4 @@
 *.md text eol=lf
+# Archify output is kept byte-identical to the validated renderer/export bytes.
+learning/**/assets/glm-5.3-flash/architecture/*.html linguist-generated=true whitespace=-blank-at-eol
+learning/**/assets/glm-5.3-flash/architecture/*.svg linguist-generated=true whitespace=-blank-at-eol

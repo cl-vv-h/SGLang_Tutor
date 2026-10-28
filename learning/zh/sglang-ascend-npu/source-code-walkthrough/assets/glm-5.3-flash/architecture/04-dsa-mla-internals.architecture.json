@@ -1,0 +1,542 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — DSA、KPool与NoPE MLA",
+    "locale": "zh-CN",
+    "output": "learning/zh/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/04-dsa-mla-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "计算模块"
+        },
+        "database": {
+          "label": "内存缓存 / 状态"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "input",
+      "type": "backend",
+      "label": "输入 U",
+      "sublabel": "[N,4096]；mHC读出后",
+      "pos": [
+        340,
+        40
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 966,
+          "end_line": 977
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "latents",
+      "type": "backend",
+      "label": "Q / KV 下投影+Norm",
+      "sublabel": "Q latent 1536；KV latent 512",
+      "pos": [
+        340,
+        210
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 340,
+          "end_line": 370
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 117,
+          "end_line": 121
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "qexpand",
+      "type": "backend",
+      "label": "Q 上投影",
+      "sublabel": "64 heads × 256维；NoPE",
+      "pos": [
+        340,
+        380
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 720,
+          "end_line": 739
+        },
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 367,
+          "end_line": 410
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "qabsorb",
+      "type": "backend",
+      "label": "Q 吸收 K 上投影",
+      "sublabel": "每head：256 → 512",
+      "pos": [
+        340,
+        550
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 548,
+          "end_line": 585
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "mlacache",
+      "type": "database",
+      "label": "原始 MLA cache",
+      "sublabel": "每历史token保留512维latent",
+      "pos": [
+        40,
+        550
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa_backend.py",
+          "line": 2164,
+          "end_line": 2177
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 117,
+          "end_line": 121
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "iq",
+      "type": "backend",
+      "label": "检索 Q 与head权重",
+      "sublabel": "32 heads × 128；共用Q latent",
+      "pos": [
+        600,
+        380
+      ],
+      "size": [
+        150,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 199,
+          "end_line": 242
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 1762,
+          "end_line": 1810
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "ik",
+      "type": "backend",
+      "label": "检索 key 与压缩门",
+      "sublabel": "每token 128维；不是MLA KV",
+      "pos": [
+        940,
+        210
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 185,
+          "end_line": 223
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "pool",
+      "type": "backend",
+      "label": "4-token KPool",
+      "sublabel": "特征softmax池化+Hadamard/FP8",
+      "pos": [
+        780,
+        380
+      ],
+      "size": [
+        170,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 699,
+          "end_line": 754
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 1778,
+          "end_line": 1789
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "indexcache",
+      "type": "database",
+      "label": "Pooled index cache",
+      "sublabel": "每完成组一个128维检索键",
+      "pos": [
+        940,
+        550
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 283,
+          "end_line": 338
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "score",
+      "type": "backend",
+      "label": "因果评分 + 选组",
+      "sublabel": "最多选512组；主预算2048token",
+      "pos": [
+        640,
+        720
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 756,
+          "end_line": 794
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 589,
+          "end_line": 696
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "tail",
+      "type": "database",
+      "label": "保留可见 tail",
+      "sublabel": "0–3个尚未成组的token",
+      "pos": [
+        1040,
+        380
+      ],
+      "size": [
+        160,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 496,
+          "end_line": 589
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "expand",
+      "type": "backend",
+      "label": "组ID展开 + tail",
+      "sublabel": "4个原token/组；不池化主V",
+      "pos": [
+        640,
+        890
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 411,
+          "end_line": 455
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 457,
+          "end_line": 524
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "mapping",
+      "type": "backend",
+      "label": "原位置 → cache地址",
+      "sublabel": "按请求page table映射",
+      "pos": [
+        640,
+        1060
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py",
+          "line": 869,
+          "end_line": 889
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py",
+          "line": 589,
+          "end_line": 696
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "attention",
+      "type": "backend",
+      "label": "稀疏 latent Attention",
+      "sublabel": "选中原始KV → softmax → 聚合",
+      "pos": [
+        340,
+        1230
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 693,
+          "end_line": 770
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/dsa_backend.py",
+          "line": 2741,
+          "end_line": 2806
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "V 上投影 + O 投影",
+      "sublabel": "64×256 → 4096 → mHC post",
+      "pos": [
+        340,
+        1400
+      ],
+      "size": [
+        190,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py",
+          "line": 895,
+          "end_line": 944
+        },
+        {
+          "path": "python/sglang/srt/configs/glm5_next.py",
+          "line": 117,
+          "end_line": 121
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "input-to-latents",
+      "from": "input",
+      "to": "latents",
+      "variant": "emphasis"
+    },
+    {
+      "id": "latents-to-qexpand",
+      "from": "latents",
+      "to": "qexpand",
+      "variant": "emphasis"
+    },
+    {
+      "id": "qexpand-to-qabsorb",
+      "from": "qexpand",
+      "to": "qabsorb",
+      "variant": "emphasis"
+    },
+    {
+      "id": "latents-to-mlacache",
+      "from": "latents",
+      "to": "mlacache",
+      "label": "写新KV"
+    },
+    {
+      "id": "latents-to-iq",
+      "from": "latents",
+      "to": "iq",
+      "label": "Q latent"
+    },
+    {
+      "id": "input-to-ik",
+      "from": "input",
+      "to": "ik",
+      "label": "hidden"
+    },
+    {
+      "id": "ik-to-pool",
+      "from": "ik",
+      "to": "pool",
+      "label": "key/gate"
+    },
+    {
+      "id": "pool-to-indexcache",
+      "from": "pool",
+      "to": "indexcache",
+      "label": "完成组"
+    },
+    {
+      "id": "iq-to-score",
+      "from": "iq",
+      "to": "score",
+      "label": "Q + head权重"
+    },
+    {
+      "id": "indexcache-to-score",
+      "from": "indexcache",
+      "to": "score",
+      "label": "pooled keys"
+    },
+    {
+      "id": "pool-to-tail",
+      "from": "pool",
+      "to": "tail",
+      "label": "未成组部分"
+    },
+    {
+      "id": "score-to-expand",
+      "from": "score",
+      "to": "expand",
+      "label": "group IDs"
+    },
+    {
+      "id": "tail-to-expand",
+      "from": "tail",
+      "to": "expand",
+      "label": "tail"
+    },
+    {
+      "id": "expand-to-mapping",
+      "from": "expand",
+      "to": "mapping",
+      "variant": "emphasis"
+    },
+    {
+      "id": "mapping-to-attention",
+      "from": "mapping",
+      "to": "attention",
+      "label": "选中地址"
+    },
+    {
+      "id": "mlacache-to-attention",
+      "from": "mlacache",
+      "to": "attention",
+      "label": "读原始KV"
+    },
+    {
+      "id": "qabsorb-to-attention",
+      "from": "qabsorb",
+      "to": "attention",
+      "label": "Q_latent",
+      "variant": "emphasis"
+    },
+    {
+      "id": "attention-to-output",
+      "from": "attention",
+      "to": "output",
+      "variant": "emphasis"
+    },
+    {
+      "id": "hidden-to-index-head-weights",
+      "from": "input",
+      "to": "iq",
+      "label": "head权重"
+    }
+  ],
+  "cards": [
+    {
+      "title": "两份cache，不混为一谈",
+      "dot": "cyan",
+      "items": [
+        "MLA cache逐原始token保存512维latent；KPool仅压缩检索用的128维key。主Attention不读取池化V。",
+        "Indexer利用Q latent生成检索Query，同时从hidden生成key、compression gate与head weights。两种head数分别为32和64。",
+        "2048是历史主token预算：最多512个完成组，每组展开4个原token，再加入0–3个可见tail。"
+      ]
+    },
+    {
+      "title": "逻辑依赖，不是固定调度",
+      "dot": "amber",
+      "items": [
+        "图示本层运行Indexer的逻辑路径。短序列shortcut、跨层top-k复用、FP8打包与投影融合可改变物理执行。",
+        "NoPE仅说明文本MLA不使用RoPE；因果位置、请求边界和page table仍不可丢弃。"
+      ]
+    }
+  ]
+}

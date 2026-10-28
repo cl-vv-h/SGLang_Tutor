@@ -165,6 +165,8 @@ flowchart TB
 
 已完成：[examples/03-glm-5.3-flash-end-to-end.md](./examples/03-glm-5.3-flash-end-to-end.md)
 
+附[六组完整模型与层内架构图](./assets/glm-5.3-flash/architecture/README.md)：Archify 交互 HTML、固定源码节点和 GitHub 静态 PNG/SVG，覆盖完整主干、Decoder、KDA、DSA/MLA、FFN/MoE 与视觉层。
+
 这篇样例固定官方 checkpoint 与较新的上游 commit，逐步解释 34 个 KDA / 11 个 NoPE DSA-MLA 层、四路 mHC、KPool 四-token 检索组与因果 tail、288 选 8 MoE、视觉注入、hybrid cache 与 MTP 回滚。包含 TP=8 的投影/状态 shape、手算例子、流程图及无权重 CPU 自检；明确区分仓内旧源码快照、上游模型支持与未经整模型实测的 Ascend 路径。
 
 先读端到端样例的目的，是让后续每个组件都能放回真实模型执行路径中，而不是把 backend、metadata 和 custom op 当成互不相干的文件。GLM-4.7 样例适合理解 dense-Prefill / absorbed-Decode MLA，GLM-5.2 样例适合理解 DSA、IndexShare 和超大规模 MoE；Qwen3.5 样例适合理解 hybrid attention、GDN state 和多 backend 协同；GLM-5.3-Flash 则进一步串起 KDA、KPool、mHC、多模态与多种持久状态的协作。

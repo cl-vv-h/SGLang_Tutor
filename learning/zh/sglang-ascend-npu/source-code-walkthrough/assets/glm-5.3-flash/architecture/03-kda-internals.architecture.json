@@ -1,0 +1,444 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "GLM-5.3-Flash — KDA层内部结构",
+    "locale": "zh-CN",
+    "output": "learning/zh/sglang-ascend-npu/source-code-walkthrough/assets/glm-5.3-flash/architecture/03-kda-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/sgl-project/sglang.git",
+      "revision": "92580581da6fc8542a997a00c1a8b71b03497680"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "计算模块"
+        },
+        "database": {
+          "label": "内存缓存 / 状态"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "input",
+      "type": "backend",
+      "label": "归一化后的输入 U",
+      "sublabel": "[N,4096]；来自mHC pre",
+      "pos": [
+        440,
+        40
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 966,
+          "end_line": 977
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "projection",
+      "type": "backend",
+      "label": "QKV 与门投影",
+      "sublabel": "全局64 heads；每head 128维",
+      "pos": [
+        440,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 459,
+          "end_line": 529
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 600,
+          "end_line": 637
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "conv",
+      "type": "backend",
+      "label": "因果短卷积 + SiLU",
+      "sublabel": "Q/K/V各自卷积；窗口4",
+      "pos": [
+        440,
+        380
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 544,
+          "end_line": 554
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 935,
+          "end_line": 943
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 1003,
+          "end_line": 1021
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "normalize",
+      "type": "backend",
+      "label": "仅 Q/K 做L2 Norm",
+      "sublabel": "V保留卷积与SiLU后的值",
+      "pos": [
+        440,
+        550
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 49,
+          "end_line": 54
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 109,
+          "end_line": 120
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 141,
+          "end_line": 156
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "gates",
+      "type": "backend",
+      "label": "β 与逐通道 α",
+      "sublabel": "sigmoid β；safe decay 下界−5",
+      "pos": [
+        840,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 506,
+          "end_line": 512
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 598,
+          "end_line": 618
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 109,
+          "end_line": 120
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "zgate",
+      "type": "backend",
+      "label": "输出门 z",
+      "sublabel": "低秩投影；后续使用sigmoid",
+      "pos": [
+        40,
+        210
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 515,
+          "end_line": 529
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 610,
+          "end_line": 618
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 676,
+          "end_line": 678
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "recurrence",
+      "type": "backend",
+      "label": "Delta rule + 状态读出",
+      "sublabel": "预测V → 只写残差 → 读Q",
+      "pos": [
+        440,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 109,
+          "end_line": 120
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 141,
+          "end_line": 156
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 1086,
+          "end_line": 1155
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "请求独立的 KDA state",
+      "sublabel": "每层：[64,128,128]；非历史KV",
+      "pos": [
+        840,
+        720
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kda_backend.py",
+          "line": 1056,
+          "end_line": 1058
+        },
+        {
+          "path": "python/sglang/srt/layers/attention/linear/kernels/kda_triton.py",
+          "line": 82,
+          "end_line": 98
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "normgate",
+      "type": "backend",
+      "label": "输出 RMSNorm × 门",
+      "sublabel": "逐head归一化 × sigmoid(z)",
+      "pos": [
+        440,
+        890
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 568,
+          "end_line": 579
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 676,
+          "end_line": 678
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "outproj",
+      "type": "backend",
+      "label": "O projection",
+      "sublabel": "64×128 → 4096",
+      "pos": [
+        440,
+        1060
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 571,
+          "end_line": 579
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 676,
+          "end_line": 682
+        }
+      ],
+      "icon": "none"
+    },
+    {
+      "id": "output",
+      "type": "backend",
+      "label": "KDA 子层输出",
+      "sublabel": "[N,4096] → mHC post",
+      "pos": [
+        440,
+        1230
+      ],
+      "size": [
+        210,
+        78
+      ],
+      "sources": [
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 669,
+          "end_line": 682
+        },
+        {
+          "path": "python/sglang/srt/models/glm5_next.py",
+          "line": 970,
+          "end_line": 985
+        }
+      ],
+      "icon": "none"
+    }
+  ],
+  "connections": [
+    {
+      "id": "input-to-projection",
+      "from": "input",
+      "to": "projection",
+      "variant": "emphasis"
+    },
+    {
+      "id": "projection-to-conv",
+      "from": "projection",
+      "to": "conv",
+      "label": "Q/K/V",
+      "variant": "emphasis"
+    },
+    {
+      "id": "conv-to-normalize",
+      "from": "conv",
+      "to": "normalize",
+      "variant": "emphasis"
+    },
+    {
+      "id": "normalize-to-recurrence",
+      "from": "normalize",
+      "to": "recurrence",
+      "label": "Q、K、V",
+      "variant": "emphasis"
+    },
+    {
+      "id": "projection-to-gates",
+      "from": "projection",
+      "to": "gates",
+      "label": "β/f raw"
+    },
+    {
+      "id": "projection-to-zgate",
+      "from": "projection",
+      "to": "zgate",
+      "label": "z raw"
+    },
+    {
+      "id": "gates-to-recurrence",
+      "from": "gates",
+      "to": "recurrence",
+      "label": "β、α"
+    },
+    {
+      "id": "state-to-recurrence",
+      "from": "state",
+      "to": "recurrence",
+      "label": "读 M_prev"
+    },
+    {
+      "id": "recurrence-to-state",
+      "from": "recurrence",
+      "to": "state",
+      "label": "写 M_new"
+    },
+    {
+      "id": "recurrence-to-normgate",
+      "from": "recurrence",
+      "to": "normgate",
+      "variant": "emphasis"
+    },
+    {
+      "id": "zgate-to-normgate",
+      "from": "zgate",
+      "to": "normgate",
+      "label": "z"
+    },
+    {
+      "id": "normgate-to-outproj",
+      "from": "normgate",
+      "to": "outproj",
+      "variant": "emphasis"
+    },
+    {
+      "id": "outproj-to-output",
+      "from": "outproj",
+      "to": "output",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "title": "卷积与状态",
+      "dot": "cyan",
+      "items": [
+        "Q/K/V短卷积有独立的请求窗口缓存，保存最近3个投影输入；不同请求不能串接卷积。",
+        "主recurrent state按value行、key列解释；逐key通道遗忘后预测当前V，只把预测误差写入，再沿Q读出。",
+        "Prefill通常使用chunk算法，Decode做增量递推；图画数学依赖，不表示一次token一次kernel。"
+      ]
+    },
+    {
+      "title": "三个门",
+      "dot": "amber",
+      "items": [
+        "β控制写入强度；α是每个key通道的保留率；z用于输出RMSNorm之后的sigmoid门。",
+        "图中state为完整64 heads。正文TP=8例子每rank仅8 heads，状态为[8,128,128]。"
+      ]
+    }
+  ]
+}
