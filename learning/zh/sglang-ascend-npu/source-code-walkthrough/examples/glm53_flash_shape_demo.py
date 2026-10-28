@@ -260,6 +260,28 @@ class WalkthroughChecks(unittest.TestCase):
         written = mhc_write(streams, [2, 1], [1, 0.5, 1.5, 0.25], identity)
         self.assertMatrixClose(written, [[3, 1], [1, 1.5], [4, 2.5], [2.5, 0.25]])
 
+    def test_mhc_identical_entry_streams_diverge_on_writeback(self):
+        embedding = [1.0, 2.0]
+        streams = [embedding.copy() for _ in range(4)]
+        self.assertVectorClose(mhc_read(streams, [0.25] * 4), embedding)
+        post = [0.25, 0.5, 1.0, 1.5]
+        expected = [[1.5, 1.75], [2.0, 1.5], [3.0, 1.0], [4.0, 0.5]]
+        identity = [[float(i == j) for j in range(4)] for i in range(4)]
+        averaging = [[0.25] * 4 for _ in range(4)]
+        # Equal old streams stay equal under either doubly stochastic matrix.
+        # Different post coefficients, not the copy or reshape, break equality.
+        for mixing in (identity, averaging):
+            self.assertMatrixClose(
+                mhc_write(streams, [2.0, -1.0], post, mixing), expected
+            )
+            self.assertMatrixClose(
+                mhc_write(streams, [2.0, -1.0], [1.0] * 4, mixing),
+                [[3.0, 1.0]] * 4,
+            )
+            self.assertMatrixClose(
+                mhc_write(streams, [0.0, 0.0], post, mixing), streams
+            )
+
     def test_mhc_mixing_orientation(self):
         # Non-symmetric cyclic permutation catches C@R versus transpose(C)@R.
         mixing = [[0, 1, 0], [0, 0, 1], [1, 0, 0]]
