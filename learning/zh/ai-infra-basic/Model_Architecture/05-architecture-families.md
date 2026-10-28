@@ -484,6 +484,8 @@ RMSNorm: scale only
 
 两者均保持 $`\left[B,S,H\right]`$。
 
+以上残差方程以常见的单流结构为基线；mHC 会扩展残差流轴，但 Attention/FFN 的输入宽度仍可保持不变。它改造的是子层之间的连接方式，不是新的 Token Mixer。独立数学推导、Sinkhorn、张量流和数值例子见 [10：mHC 原理](./10-manifold-constrained-hyper-connections.md)。
+
 ## 15. 从配置参数还原模型结构
 
 读取一个模型配置时，可按以下顺序恢复架构：

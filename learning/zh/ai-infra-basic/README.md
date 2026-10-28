@@ -8,7 +8,7 @@
 
 | 顺序 | 目录 | 内容 | 建议先看 |
 |---|---|---|---|
-| 1 | [Model_Architecture](./Model_Architecture/) | Decoder-only Transformer、MHA/GQA/MLA、DSA、CSA/HCA、GDN/KDA、Sparse MoE 与主流架构谱系 | [README.md](./Model_Architecture/README.md) |
+| 1 | [Model_Architecture](./Model_Architecture/) | Decoder-only Transformer、MHA/GQA/MLA、DSA、CSA/HCA、GDN/KDA、Sparse MoE、mHC 残差连接与架构谱系 | [README.md](./Model_Architecture/README.md) |
 | 2 | [Inference_Basics](./Inference_Basics/) | Transformer 推理、Prefill/Decode、吞吐与延迟基础 | [README.md](./Inference_Basics/README.md) |
 | 3 | [Schedule_Optimization](./Schedule_Optimization/) | Continuous batching、Chunked Prefill、调度权衡 | [README.md](./Schedule_Optimization/README.md) |
 | 4 | [KV_Cache_Memory](./KV_Cache_Memory/) | KV Cache 布局、分页、prefix cache、显存估算 | [README.md](./KV_Cache_Memory/README.md) |
@@ -38,7 +38,7 @@
 
 ## 与 SGLang 源码阅读的关系
 
-- `Model_Architecture` 对应模型编排以及 MLA、DSA、DeepSeek-V4 CSA/HCA、KDA 等注意力实现。
+- `Model_Architecture` 对应模型编排、MLA/DSA/CSA/HCA/KDA 等注意力实现，以及 [mHC 多流残差连接](./Model_Architecture/10-manifold-constrained-hyper-connections.md)。
 - `Inference_Basics` 对应请求生命周期、forward mode、sampling 和 token generation loop。
 - `Schedule_Optimization` 对应 Scheduler、waiting/running queue、continuous batching、chunked prefill。
 - `KV_Cache_Memory` 对应 KV cache manager、memory pool、RadixAttention、prefix cache、HiCache。

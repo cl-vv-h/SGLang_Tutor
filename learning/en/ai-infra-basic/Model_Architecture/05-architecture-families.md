@@ -419,6 +419,8 @@ Position encoding affects long-context extrapolation, cache content, and attenti
 
 Deep models commonly use Pre-Norm or a variant for optimization stability. LayerNorm centers and scales, while RMSNorm only rescales by the root-mean-square magnitude. Both preserve $`\left[B,S,H\right]`$.
 
+These residual equations use the common single-stream structure as a baseline. mHC expands the residual-stream axis while Attention/FFN input width can remain unchanged. It changes sublayer connectivity, not the Token Mixer. See [10: mHC principles](./10-manifold-constrained-hyper-connections.md) for the mathematics, Sinkhorn, tensor flow, and numerical examples.
+
 ## 15. Reconstruct an Architecture from Configuration
 
 Read a model configuration in this order:

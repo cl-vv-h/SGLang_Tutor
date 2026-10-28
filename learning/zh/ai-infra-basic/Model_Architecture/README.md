@@ -17,6 +17,7 @@
 | [07-deepseek-sparse-attention.md](./07-deepseek-sparse-attention.md) | 区分 indexer 与主 Attention 两次打分，逐 shape 追踪 top-k、paged 地址翻译、MLA 稀疏主核和训练流程 |
 | [08-compressed-sparse-attention.md](./08-compressed-sparse-attention.md) | 用压缩时间线和数值例子讲解 CSA 重叠压缩、HCA、局部 SWA、条目就绪条件、异构缓存与 NPU 适配 |
 | [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | 从可改写键值记忆推导 KDA 的逐通道衰减与 delta rule，并追踪卷积、chunk prefill、融合 decode 和 serving 状态 |
+| [10-manifold-constrained-hyper-connections.md](./10-manifold-constrained-hyper-connections.md) | 普通 Residual → HC → mHC：多流读写、双随机约束、Sinkhorn 手算、完整 tensor flow、稳定性边界与 CPU 自检 |
 
 ## 统一符号
 
@@ -52,3 +53,4 @@
 5. 再读 KDA，对比“保存可寻址历史条目”与“把历史折叠到固定矩阵”这两类根本不同的状态契约。
 6. 回到高效 Attention 全景，用缓存宽度、访问位置数、状态增长方式与 kernel 执行四个问题横向比较。
 7. 展开 Sparse MoE，再用架构谱系章节把 Token Mixer、Channel Mixer 与 Runtime State 拼回完整模型。
+8. 残差连接单独读 10：学过 01 后即可进入，不要求先学完 Attention 变体；mHC 改的是子层连接，不是另一种 Attention。

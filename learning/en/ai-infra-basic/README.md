@@ -8,7 +8,7 @@ This directory supplements the foundational knowledge needed before and during S
 
 | Order | Directory | Content | Read First |
 |---|---|---|---|
-| 1 | [Model_Architecture](./Model_Architecture/) | Decoder-only Transformer, MHA/GQA/MLA, DSA, CSA/HCA, GDN/KDA, Sparse MoE, and mainstream architecture families | [README.md](./Model_Architecture/README.md) |
+| 1 | [Model_Architecture](./Model_Architecture/) | Decoder-only Transformer, MHA/GQA/MLA, DSA, CSA/HCA, GDN/KDA, Sparse MoE, mHC residual connections, and architecture families | [README.md](./Model_Architecture/README.md) |
 | 2 | [Inference_Basics](./Inference_Basics/) | Transformer inference, Prefill/Decode, throughput and latency fundamentals | [README.md](./Inference_Basics/README.md) |
 | 3 | [Schedule_Optimization](./Schedule_Optimization/) | Continuous batching, Chunked Prefill, scheduling trade-offs | [README.md](./Schedule_Optimization/README.md) |
 | 4 | [KV_Cache_Memory](./KV_Cache_Memory/) | KV Cache layout, paging, prefix cache, memory estimation | [README.md](./KV_Cache_Memory/README.md) |
@@ -38,7 +38,7 @@ Read [Communication](./Communication/README.md) after parallel strategies to con
 
 ## Relationship to SGLang Source Code Reading
 
-- `Model_Architecture` maps to model wiring and the MLA, DSA, DeepSeek-V4 CSA/HCA, and KDA attention implementations.
+- `Model_Architecture` maps to model wiring, MLA/DSA/CSA/HCA/KDA attention implementations, and [mHC multi-stream residual connections](./Model_Architecture/10-manifold-constrained-hyper-connections.md).
 - `Inference_Basics` maps to request lifecycle, forward mode, sampling, and token generation loop.
 - `Schedule_Optimization` maps to Scheduler, waiting/running queue, continuous batching, chunked prefill.
 - `KV_Cache_Memory` maps to KV cache manager, memory pool, RadixAttention, prefix cache, HiCache.
