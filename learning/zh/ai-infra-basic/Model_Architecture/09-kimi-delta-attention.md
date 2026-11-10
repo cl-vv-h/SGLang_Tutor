@@ -2,6 +2,17 @@
 
 > English version: [Kimi Delta Attention](../../../en/ai-infra-basic/Model_Architecture/09-kimi-delta-attention.md)
 
+建议先读 [GDN 完整教程](../Gated_Delta_Network/01-gated-deltanet.md)，再沿下表阅读。本章使用本仓库固定源码快照，具体调用链见第 13 节。
+
+| 想解决的问题 | 阅读位置 |
+|---|---|
+| GDN 到 KDA 究竟改了什么 | [第 3 节：门控、时间尺度与退化关系](#3-gdn-与-kda-的区别) |
+| 为什么减去旧预测，数学怎么成立 | [第 5 节：递归与在线学习](#5-kda-递归公式) |
+| 一层里每个张量从哪来 | [第 6 节：投影、卷积、三种门](#6-投影短卷积与输出门) |
+| Prefill 怎样保持因果又利用矩阵计算 | [第 8 节：完整 chunk 推导](#8-prefill从逐-token-递归推导-chunk-并行) |
+| SGLang 到底在哪执行公式 | [第 13 节：模型 → backend → kernel](#13-sglang-源码从模型投影走到状态写回) |
+| 自己动手核对数字 | [第 19 节：CPU 自检](#19-运行-cpu-参考程序核对递归与-chunk) 与 [第 20 节：对照演算](#20-同一组输入gdn-与-kda-完整对照演算) |
+
 ## 阅读地图：把状态矩阵看成“可改写的键值记忆”
 
 Softmax Attention 把每个历史 `(k_s,v_s)` 原样保留，查询时再逐个比较；KDA 则把历史写入一个矩阵 `M`。对一个 head：
@@ -160,27 +171,82 @@ M_{t}={M}_{t-1}+\beta_{t}\cdot r_{t}\,{k_{t}}^{\mathsf T}
 
 ## 3. GDN 与 KDA 的区别
 
-GDN 在 delta 更新前加入衰减，但其衰减门对每个 token、每个 head 是标量。KDA 把它替换为 key 通道上的向量：
+先读 [GDN 完整教程](../Gated_Delta_Network/01-gated-deltanet.md#gdn-update)，再看这一处变化：**保留 delta rule，把每 head 一个遗忘系数变成每 key 通道一个遗忘系数。** 对当前 token 的一个 head，两者都有：
 
-| 门控 | GDN | KDA |
+```math
+M_t=\widetilde M_t+\beta_t\left(v_t-\widetilde M_tk_t\right)k_t^{\mathsf T}
+```
+
+区别只在得到 $`\widetilde M_t`$ 的方式：
+
+| 项目 | GDN | KDA |
 |---|---|---|
-| 每 token/head 的遗忘因子 | 标量 `alpha_t` | 向量 `alpha_t in R[d_k]` |
-| 状态列 | 同步衰减 | 独立衰减 |
-| 递归状态 | 固定大小 | 固定大小 |
+| 遗忘系数 | 标量 $`\alpha_t`$ | 向量 $`\boldsymbol\alpha_t\in\mathbb R^{d_k}`$ |
+| 衰减后的状态 | $`\widetilde M_t=\alpha_tM_{t-1}`$ | $`\widetilde M_t=M_{t-1}\mathrm{Diag}(\boldsymbol\alpha_t)`$ |
+| 状态列的保留率 | 同一个 head 内相同 | 每个 key 通道可不同 |
+| 写入门 | 每 token/head 一个标量 $`\beta_t`$ | 同样是标量 $`\beta_t`$ |
+| 同等 head 配置下的状态容量 | $`H d_vd_k`$ | $`H d_vd_k`$ |
 
-细粒度门控允许一个特征长期稳定，同时让另一个特征快速刷新。
+本表的 $`\alpha_t`$ 是保留率；后文代码中的 `a` 是激活前的原始信号。实现中通常用 `alpha = exp(g)` 表示保留率。
+
+### 3.1 逐通道到底指什么？
+
+对于状态 $`M\in\mathbb R^{d_v\times d_k}`$，第 $`c`$ 列对应一个 key 特征方向。KDA 的衰减是：
+
+```math
+\widetilde M_{r,c}=M_{r,c}\alpha_c
+```
+
+它沿 key 轴广播，同一列的所有 value 行乘同一个系数。它**不是给每个历史 token 一个门**，也不是给每个矩阵元素独立生成一个门。
+
+![GDN 与 KDA 的遗忘粒度](./assets/gdn-kda-decay-comparison.svg)
+
+图中只展示遗忘，后面仍要执行两者共有的 delta 更新。例如旧状态为 $`\left[\left[10,20\right],\left[30,40\right]\right]`$，GDN 保留率为 $`0.5`$，KDA 保留率为 $`[0.9,0.1]`$。GDN 两列都减半，KDA 第一列保留 90%、第二列保留 10%。
+
+### 3.2 为什么这种变化有意义？
+
+如果一个 head 需要同时保留较稳定的特征并快速刷新另一些特征，GDN 的**遗忘步骤**只能为它们选择同一个倍率；KDA 能分别选择。这里的特征方向由训练学习，没有预设“第一列记人名、第二列记地点”的含义。
+
+GDN 原本也能通过 $`(v-\widetilde Mk)k^{\mathsf T}`$ 定向修正当前 key 涉及的记忆。不能说 GDN 完全不会选择性更新；KDA 增强的是**遗忘的粒度**。增加 head 也能增加独立门，但会改变 head 分解与投影组织，不等价于在一个 head 内加入通道门。
+
+如果 KDA 所有通道恰好取同一个保留率：
+
+```math
+\boldsymbol\alpha_t=[\alpha_t,\ldots,\alpha_t],\qquad
+\mathrm{Diag}(\boldsymbol\alpha_t)=\alpha_tI
+```
+
+则递归公式退化为 GDN。这是递归规则的包含关系，不表示不同模型的 checkpoint、卷积或输出门可以直接互换。
+
+### 3.3 记忆生命周期如何改变？
+
+先忽略 delta 写入，只追踪一个旧状态分量经过多步遗忘后的系数：
+
+```math
+M_{t,c}=M_{0,c}\prod_{s=1}^{t}\alpha_{s,c}
+```
+
+若保留率暂时恒定且满足 $`0\lt\alpha_c\lt1`$，其衰减半衰期为：
+
+```math
+n_{1/2,c}=\frac{\log(1/2)}{\log\alpha_c}
+```
+
+$`\alpha_c=0.99`$ 时约 69 步，$`\alpha_c=0.5`$ 时为 1 步。KDA 可在同一 head 内形成不同的遗忘时间尺度；GDN 的不同 head 之间也可以形成不同时间尺度。真实递归还包含 key 驱动的纠错和新写入，因此这个半衰期只解释**纯衰减路径**，不保证某条语义事实能保存这么多 token。
+
+这与 [Kimi Linear 报告 §2–3](https://arxiv.org/html/2510.26692v1#S3) 中标量门到对角门的扩展一致。下面继续把门控放回完整递归，并在第 20 节用同一组输入演算两者。
 
 ## 4. 形状账本
 
 对一个 token 和一个 head，设：
 
-- `q_t, k_t in R[d_k]`；
-- `v_t in R[d_v]`；
-- `a_t in R[d_k]`：原始遗忘门激活；
-- `alpha_t in (0, 1]^{d_k}`：逐通道保留率；
-- `beta_t in (0, 1)`：标量 delta 写入强度；
-- `M_t in R[d_v, d_k]`：递归状态；
-- `o_t in R[d_v]`：归一化与输出门之前的输出。
+- $`q_t,k_t\in\mathbb R^{d_k}`$；
+- $`v_t\in\mathbb R^{d_v}`$；
+- $`a_t\in\mathbb R^{d_k}`$：原始遗忘门激活；
+- $`\boldsymbol\alpha_t\in(0,1]^{d_k}`$：逐通道保留率；
+- $`\beta_t\in(0,1)`$：标量 delta 写入强度；
+- $`M_t\in\mathbb R^{d_v\times d_k}`$：递归状态；
+- $`o_t\in\mathbb R^{d_v}`$：归一化与输出门之前的输出。
 
 对一批 token，实现通常把张量排布为 $`\left[T,H,D\right]`$；递归状态由每个 request、layer 与 KV head 独立持有。
 
@@ -218,7 +284,7 @@ o_{t}=M_{t}\left(\frac{q_{t}}{\sqrt{d_{k}}}\right)
 
 由于 $`g_{t} \le 0`$，`alpha_t` 位于 `(0, 1]`。`M` 的每一列都会获得不同的保留因子。
 
-KDA 技术报告使用转置后的方向 `S_t in R[d_k, d_v]`：
+KDA 技术报告使用转置后的方向 $`S_t\in\mathbb R^{d_k\times d_v}`$：
 
 ```math
 S_{t} = \left(I - \beta_{t} k_{t} k_{t}^{\mathsf T}\right) \mathrm{Diag}\left(\alpha_{t}\right) S_{t-1} + \beta_{t} k_{t} v_{t}^{\mathsf T}
@@ -278,6 +344,40 @@ M_{t} = M_{\mathrm{decay}} - \beta \left(M_{\mathrm{decay}} k\right) k^{\mathsf 
 - $`{\mathrm{residual}}_{r}\cdot {k}_{c}`$ 决定当前 token 如何改变矩阵单元 `(r,c)`。
 
 GDN 的标量 `alpha` 无法为不同列选择不同生命周期。
+
+### 5.3 从一次在线学习看懂纠错方向
+
+把遗忘后的矩阵 $`\widetilde M`$ 临时视为一个可更新的线性映射，对当前 key/value 定义重建误差：
+
+```math
+\mathcal L(M)=\frac12\lVert Mk-v\rVert_2^2,\qquad
+\nabla_M\mathcal L=(Mk-v)k^{\mathsf T}
+```
+
+从 $`\widetilde M`$ 出发做一步学习率为 $`\beta`$ 的梯度下降：
+
+```math
+M_{\mathrm{new}}=\widetilde M-\beta\nabla_M\mathcal L(\widetilde M)
+=\widetilde M+\beta(v-\widetilde Mk)k^{\mathsf T}
+```
+
+这解释了为什么要“减去旧预测”：目标是修正映射 $`k\mapsto v`$，不是无条件叠加更多 value。这里的在线更新是**激活状态的 forward 计算**，并不是推理时 optimizer 训练了模型权重。模型权重仍在离线训练时通过语言建模 loss 学习。
+
+若 $`\lVert k\rVert_2=1`$，更新后再读取当前 key：
+
+```math
+M_{\mathrm{new}}k=(1-\beta)\widetilde Mk+\beta v
+```
+
+例如 $`\beta=0.5`$ 会把当前预测向 v 移动一半，$`\beta=1`$ 在精确归一化与实数运算下可完全匹配。读取另一方向 $`q`$ 的变化则是：
+
+```math
+(M_{\mathrm{new}}-\widetilde M)q=\beta(v-\widetilde Mk)(k^{\mathsf T}q)
+```
+
+当 q 与 k 正交，这次写入不改变该方向的读出；方向重叠时会有影响。这同时解释了定向更新与记忆干扰。实际 kernel 的 L2 norm 有 epsilon，浮点结果也存在误差，上述单位范数结论是解释原理的理想形式。
+
+KDA 的对角衰减后接这个 rank-one 修正。把变换写成 $`D(I-\beta kk^{\mathsf T})`$，展开为 $`D-\beta(Dk)k^{\mathsf T}`$，可见它是对角项加秩一项的特定结构（DPLR）。kernel 不必构造一个完整的 $`d_k\times d_k`$ 转移矩阵，就能用逐元素乘法、reduction 与外积执行它。对角衰减与 key 修正一般不可交换，调整顺序会改变函数。
 
 ## 6. 投影、短卷积与输出门
 
@@ -391,6 +491,29 @@ core out:  [1,T,Hk,Dv]
 \mathrm{shape}\left(\mathrm{out}\right)=\left[T,\mathrm{Hmodel}\right]
 ```
 
+### 6.4 参数、激活、状态不要混成一类
+
+| 对象 | 单 rank 逻辑形状 | 性质 |
+|---|---|---|
+| `A_log` | $`[H_{\mathrm{local}}]`$，源码有额外广播维 | 每 head 的可训练基础速率 |
+| `dt_bias` | $`[H_{\mathrm{local}}d_k]`$ | 每 key 通道可训练偏置 |
+| 原始 `a` 与激活后的 `g/alpha` | $`[T,H_{\mathrm{local}},d_k]`$ | 随 token 变化的控制信号 |
+| `beta_raw/beta` | $`[T,H_{\mathrm{local}}]`$ | 随 token 变化的标量写入信号 |
+| 输出门 `z` | $`[T,H_{\mathrm{local}},d_v]`$ | 调制读出，不改变递归状态 |
+| 状态矩阵与卷积尾部 | 请求槽位索引的固定形状 | 运行时缓存，不是 optimizer 参数 |
+
+`A_log` 仍是每 head 一个参数，不妨碍最终门逐通道：原始激活 `a` 与 `dt_bias` 已有通道轴。输出门有通道轴也不意味着它就是 KDA 的遗忘门，关键要看它是否作用于**旧状态**。
+
+本地 `KimiDeltaAttention` 的融合投影、norm 和状态配置采用相等的 key/value head 宽度；本章的通用递归允许 $`d_k\ne d_v`$，但不能因此推断这个具体模型类支持任意非方形配置。第 19 节 CPU 程序用非方形状态专门检查转置与广播，避免方形例子把错误掩盖。
+
+短卷积同样是逐投影通道的局部顺序特征提取。对某个通道 $`c`$，以滞后量编号权重：
+
+```math
+\widehat x_{t,c}=\mathrm{SiLU}\left(\sum_{j=0}^{C-1}w_{c,j}x_{t-j,c}\right)
+```
+
+序列开头缺失历史置零，继续请求则读取旧窗口；不同 packed 请求之间不能借用彼此的尾部。它发生在矩阵写入之前，因而决定被存进长期记忆的内容。详见 [GDN 短卷积机制和消融证据](../Gated_Delta_Network/01-gated-deltanet.md#gdn-conv)。
+
 ## 7. 内存与计算复杂度
 
 对每一层、每个 request，持久状态约为：
@@ -404,29 +527,184 @@ KDA 状态：H_kv * d_v * d_k 个元素
 
 这并不代表 KDA 会自动变快。状态矩阵可能很大，性能取决于能否让它在片上停留足够久、把逐元素门控与矩阵/向量运算融合，以及避免大量微小 kernel launch。
 
-## 8. Prefill：分块并行训练与推理
+## 8. Prefill：从逐 token 递归推导 Chunk 并行
 
-长 prefill 若逐 token 应用递归，会让加速器利用率很低。因此 KDA 使用分块算法并行处理 token block，同时在块之间传递边界状态。
+Decode 每次处理一个 token，递归很合适；prefill 一次处理几千个 token，若每步都单独启动 kernel，大量小运算无法充分利用矩阵计算单元。Chunk 算法的目标是**把同一条递归改写成块内矩阵运算**，同时保留块之间的状态依赖。它不是 CP，也不是把一条序列随意拆到多个设备上独立计算。
 
-prefill kernel 必须保留完全相同的因果递归：
+本节只看单 head，令 chunk 长度为 $`C_b`$，与短卷积窗口 $`C`$ 区分；$`M_0`$ 是该块的输入状态。以下把读出缩放吸收到 $`\bar q_i=q_i/\sqrt{d_k}`$，q/k 的归一化已在进入公式前完成。
 
-```text
-state_in -> chunk(tokens i ... i+C-1) -> outputs + state_out
+### 8.1 把每次写入单独命名
+
+定义：
+
+```math
+D_i=\mathrm{Diag}(\boldsymbol\alpha_i),\qquad
+u_i=\beta_i(v_i-M_{i-1}D_ik_i),\qquad
+M_i=M_{i-1}D_i+u_ik_i^{\mathsf T}
 ```
 
-关键调优变量包括 chunk 大小、head 维度、累加精度、状态流量，以及门控乘积的物化成本。应把分块输出与最终状态都和逐 token 参考实现比较。
+$`u_i`$ 是本 token 的实际写入向量。先展开前三步，不急着看大公式：
 
-## 9. Decode：融合的递归更新
-
-Decode 中，每个 request 一次只有一个或少数新 token。高效路径会融合整条递归：
-
-```text
-衰减状态 -> 预测 -> 残差 -> rank-1 更新 -> 读取输出
+```math
+M_1=M_0D_1+u_1k_1^{\mathsf T}
 ```
 
-若拆成多个 kernel，就会反复读写完整状态矩阵。融合 kernel 能减少高带宽内存流量与 launch 开销。
+```math
+M_2=M_0D_1D_2+u_1k_1^{\mathsf T}D_2+u_2k_2^{\mathsf T}
+```
 
-连续批处理还带来状态路由问题：每个 decode 行必须装载并更新正确 request 的状态。request 压缩与槽位复用必须原子地更新这一映射。
+```math
+M_3=M_0D_1D_2D_3+u_1k_1^{\mathsf T}D_2D_3
++u_2k_2^{\mathsf T}D_3+u_3k_3^{\mathsf T}
+```
+
+每个旧写入都会被后续 token 的遗忘门继续衰减。这里只展开加法；$`u_i`$ 本身仍依赖之前的状态，尚不能当作独立已知量。
+
+### 8.2 为什么出现一个下三角系统？
+
+定义连续位置的衰减乘积：
+
+```math
+D_{a:b}=D_aD_{a+1}\cdots D_b,\qquad D_{a:b}=I\quad(a\gt b)
+```
+
+空乘积是单位矩阵，例如当前 token 的新写入还没有经历后续遗忘。将前面的展开代入写入向量：
+
+```math
+u_i=\beta_i\left(v_i-M_0D_{1:i}k_i\right)
+-\sum_{j\lt i}\beta_i\left(k_j^{\mathsf T}D_{j+1:i}k_i\right)u_j
+```
+
+括号中的点积是一个标量：token $`j`$ 写入的 key 方向，在后续衰减后，与 token $`i`$ 的读取方向有多大重叠。它正是 token 间的记忆干扰。令：
+
+```math
+b_i=\beta_i\left(v_i-M_0D_{1:i}k_i\right),\qquad
+A_{ij}=\begin{cases}
+\beta_i k_j^{\mathsf T}D_{j+1:i}k_i,&j\lt i,\\
+0,&j\ge i.
+\end{cases}
+```
+
+则前三个 token 满足：
+
+```math
+u_1=b_1,\qquad
+u_2+A_{21}u_1=b_2,\qquad
+u_3+A_{31}u_1+A_{32}u_2=b_3
+```
+
+把 $`u_i^{\mathsf T}`$ 堆成行矩阵 $`U\in\mathbb R^{C_b\times d_v}`$，把 $`b_i^{\mathsf T}`$ 堆成 $`B`$：
+
+```math
+(I+A)U=B
+```
+
+$`A`$ 严格下三角，$`I+A`$ 对角线全为 1，所以可用前代求解。kernel 利用分块求解和矩阵乘法组织计算；这不意味着所有依赖都消失，也不要求显式构造一个稠密逆矩阵。
+
+![KDA Chunk 的下三角依赖与输出](./assets/kda-chunk-triangular.svg)
+
+### 8.3 状态边界和所有输出怎样计算？
+
+有了 $`U`$，整块最终状态就是：
+
+```math
+M_{C_b}=M_0D_{1:C_b}+\sum_{j=1}^{C_b}u_jk_j^{\mathsf T}D_{j+1:C_b}
+```
+
+当前块内第 $`i`$ 个输出为：
+
+```math
+o_i=M_0D_{1:i}\bar q_i
++\sum_{j\le i}u_j\left(k_j^{\mathsf T}D_{j+1:i}\bar q_i\right)
+```
+
+第一项从块输入状态读取，第二项包含当前块截至当前位置的写入。包含 $`j=i`$，因为当前输出读取的是**本 token 已写入后的状态**。两个部分分别组织成矩阵乘法与因果下三角乘法。
+
+实际实现不会先顺序计算所有 $`u_i`$ 才开始块内准备。写成：
+
+```math
+B=B_\beta V-B_\beta\widetilde K M_0^{\mathsf T},\qquad
+B_\beta=\mathrm{Diag}(\beta_1,\ldots,\beta_{C_b}),\qquad
+\widetilde K_{i,:}=(D_{1:i}k_i)^{\mathsf T}
+```
+
+再定义：
+
+```math
+U_v=(I+A)^{-1}B_\beta V,\qquad
+W=(I+A)^{-1}B_\beta\widetilde K,\qquad
+U=U_v-WM_0^{\mathsf T}
+```
+
+这样，与块输入状态无关的 $`U_v,W`$ 可以先为各块准备，之后状态扫描时再得到真正写入量。这解释了源码为什么先计算 `w/u`，再在 `chunk_gated_delta_rule_fwd_h` 中计算 `v_new = u - w @ state.T`。**源码名 `u` 对应这里的 $`U_v`$，源码名 `v_new` 对应这里的 $`U`$；不要仅按变量名认公式。**
+
+### 8.4 KDA 比 GDN 的 Chunk 多处理什么？
+
+若所有 $`D_i=\alpha_i I`$，干扰项退化为：
+
+```math
+A_{ij}=\beta_i\left(\prod_{s=j+1}^{i}\alpha_s\right)k_j^{\mathsf T}k_i
+```
+
+GDN 可以先计算 key 的 Gram 矩阵，再乘标量衰减。KDA 则需要：
+
+```math
+k_j^{\mathsf T}D_{j+1:i}k_i
+=\sum_{c=1}^{d_k}k_{j,c}k_{i,c}
+\exp\left(\sum_{s=j+1}^{i}g_{s,c}\right)
+```
+
+衰减在通道求和的**里面**，通常不能提到外面。源码因此保存逐通道的 chunk-local log-gate 累积和 $`G_{i,c}=\sum_{s=1}^{i}g_{s,c}`$，用 $`\exp(G_{i,c}-G_{j,c})`$ 表示区间衰减；无需物化每个 $`D`$ 稠密矩阵，也无需保存三维 token-pair/channel 权重。
+
+对固定 head 维度和固定 $`C_b`$，块内中间量按块分配，整个序列工作量随长度线性增长，而不是建立全序列的平方 attention 矩阵。实数代数上它与递归等价；浮点重排会产生误差，必须同时验证每步输出和最终状态。推导依据为 [KDA 报告 §3.1 与附录 B](https://arxiv.org/html/2510.26692v1#S3.SS1)；上面采用的是便于逐步理解的残差写入形式，第 13 节再逐项对应源码。
+
+## 9. Decode：一次融合更新到底融合了什么？
+
+正常 decode 每个 request 在当前 batch 中贡献一个新 token。输入不是整段历史，而是新 token 的投影和这个请求已有的两类状态：
+
+```text
+new hidden -> Q/K/V projection -> conv update -> filtered Q/K/V
+                                     ↕
+                              conv_state[slot]
+
+filtered Q/K/V + raw a/b -> fused recurrence -> head output
+                                     ↕
+                                M_pool[slot]
+```
+
+融合不改变公式顺序：先 L2 归一化 q/k，计算门；再衰减状态、预测 value、纠错写入、读取输出，最后保存状态。输出门与输出投影仍在模型层处理，不要把 packed recurrence 当作整个 KDA layer。
+
+### 9.1 状态 Tile 与广播轴
+
+本仓库 `fused_recurrent_kda_packed_decode_kernel` 中，一个 program 处理一个 request、一个 value head 和若干 value 行。状态 tile 为 $`[B_V,B_K]`$；不同 value tile 覆盖同一个 head 的不同状态行。
+
+下面摘录核心五行；q 已包含读取缩放，`b_v` 初始是本 token 的 value，`beta_val` 已过 sigmoid：
+
+```python
+b_h *= exp(b_g)[None, :]
+b_v -= tl.sum(b_h * b_k[None, :], 1)
+b_v *= beta_val
+b_h += b_v[:, None] * b_k[None, :]
+b_o = tl.sum(b_h * b_q[None, :], 1)
+```
+
+| 代码 | 对应数学 | 形状变化 |
+|---|---|---|
+| 第 1 行 | 逐 key 通道遗忘 | $`[B_V,B_K]\odot[1,B_K]`$ |
+| 第 2 行 | 从 v 减去衰减状态的预测 | 沿 key 轴求和，得到 $`[B_V]`$ |
+| 第 3 行 | 用 beta 控制纠错强度 | 标量广播到 value 行 |
+| 第 4 行 | 外积写回 | $`[B_V,1]\,[1,B_K]`$ |
+| 第 5 行 | query 读取更新后的状态 | 再沿 key 轴求和 |
+
+`b_v` 在第 2–3 行后已变成写入残差，不再是原始 value。源文件一处注释把衰减轴称为 “K-row”，但这里的存储和索引是 $`[V,K]`$，`[None,:]` 实际沿**列**广播；应以地址和运算为准。
+
+tile 在计算期间可复用已经加载的状态，避免为了预测、写入、读取分别往返 HBM。寄存器溢出、cache 行为与 tile 划分仍可能带来额外流量，“一次读写”是融合的数据流目标，不是对所有硬件实际事务数的保证。
+
+### 9.2 Batch 行不是状态槽位
+
+假设本轮 batch 顺序是 request C、A、B，而 `cache_indices = [7,2,9]`，则第 0 行更新 `M_pool[7]`，不能更新 `M_pool[0]`。kernel 从 `ssm_state_indices` 读取映射后再寻址；packed 路径遇到负槽位会返回零输出而跳过状态访问。
+
+[后端](../../../../python/sglang/srt/layers/attention/linear/kda_backend.py) 先更新卷积，再选择 packed 或显式 split 路径；[Triton 包装](../../../../python/sglang/srt/layers/attention/linear/kernels/kda_triton.py) 只在非 CPU、非 NPU 时声明 packed 支持，并检查每请求恰好一个 token。多 token verify 不能直接套这个单步契约。
 
 ![KDA 分块 prefill 与递归 decode](./assets/kda-prefill-decode.svg)
 
@@ -474,20 +752,94 @@ KDA head 可以在张量并行 rank 间划分。每个 rank 持有本地 Q/K/V �
 
 由于递归更新在 head 内局部完成，其主核通常不需要逐 token all-reduce。
 
-## 13. SGLang 源码地图
+## 13. SGLang 源码：从模型投影走到状态写回
 
-在本教程对应的源码快照中：
+本节对应**本仓库源码快照**，由提交 [`c6de33f`](https://github.com/cl-vv-h/SGLang_Tutor/tree/c6de33fcaa2027826f89f375d1e805ab3305f8cb/python/sglang) 引入；不是对上游最新实现的概括。按下面顺序打开文件即可把每层职责分开：
 
-- 架构配置：[`kimi_linear.py`](../../../../python/sglang/srt/configs/kimi_linear.py)；
-- layer/模型编排：[`kimi_linear.py`](../../../../python/sglang/srt/models/kimi_linear.py)；
-- prefill/decode 调度：[`kda_backend.py`](../../../../python/sglang/srt/layers/attention/linear/kda_backend.py)；
-- Triton 递归实现：[`kda_triton.py`](../../../../python/sglang/srt/layers/attention/linear/kernels/kda_triton.py)；
-- FLA 封装：[`kda.py`](../../../../python/sglang/srt/layers/attention/fla/kda.py)；
-- 融合递归 fallback：[`fused_recurrent.py`](../../../../python/sglang/srt/layers/attention/fla/fused_recurrent.py)；
-- 可选 CuTe DSL kernel：[`cutedsl_kda.py`](../../../../python/sglang/jit_kernel/cutedsl_kda.py)；
-- 递归状态尺寸：[`mamba_utils.py`](../../../../python/sglang/srt/configs/mamba_utils.py)。
+| 顺序 | 文件与函数 | 要回答的问题 |
+|---|---|---|
+| 1 | [`KimiLinearConfig.is_kda_layer`](../../../../python/sglang/srt/configs/kimi_linear.py) | 当前层选择 KDA 还是 MLA？配置层号采用什么基准？ |
+| 2 | [`KimiDeltaAttention`](../../../../python/sglang/srt/models/kimi_linear.py) | 投影怎样生成 Q/K/V、遗忘门、beta 与输出门？ |
+| 3 | [`RadixLinearAttention.forward`](../../../../python/sglang/srt/layers/radix_linear_attention.py) | 模型怎样把张量交给当前 attention backend？ |
+| 4 | [`KDAAttnBackend.forward_decode/forward_extend`](../../../../python/sglang/srt/layers/attention/linear/kda_backend.py) | 怎样取状态、做卷积、按模式分发？ |
+| 5 | [`TritonKDAKernel`](../../../../python/sglang/srt/layers/attention/linear/kernels/kda_triton.py) | 怎样选择 packed、通用 decode 或 chunk？ |
+| 6 | [`chunk_kda_fwd`](../../../../python/sglang/srt/layers/attention/fla/kda.py) | chunk 门控、块内准备、状态扫描、输出怎样连接？ |
+| 7 | [`chunk_kda_fwd_intra`](../../../../python/sglang/srt/layers/attention/fla/chunk_intra.py) | 下三角求解与 w/u 重算在哪里？ |
+| 8 | [`chunk_gated_delta_rule_fwd_h`](../../../../python/sglang/srt/layers/attention/fla/chunk_delta_h.py) | 怎样结合块输入状态并原地写回最终状态？ |
+| 9 | [`fused_recurrent_kda_packed_decode_kernel`](../../../../python/sglang/srt/layers/attention/fla/fused_recurrent.py) | 单 token 的五步递归怎样融合？ |
+| 10 | [`KimiLinearStateShape.create`](../../../../python/sglang/srt/configs/mamba_utils.py) | TP 后每卡究竟分配什么形状、什么 dtype？ |
 
-模型文件最适合用来核对 gate shape、短卷积状态、KDA/MLA 层选择与张量并行所有权。
+### 13.1 模型层：两个分解门控与一条 QKV 路径
+
+`forward_qkvbfg` 的逻辑是：
+
+```python
+qkv = self.qkv_proj(hidden_states)[0]
+beta_raw = self.b_proj(hidden_states)[0]
+forget_raw = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
+output_gate = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
+```
+
+这里用教学变量名标明 raw/activated；源码返回值中的 `beta` 在这一步实际仍是 logit。非量化路径的 `forward_qkvbfg_fused` 把部分投影合并：先一次生成 QKV、beta 与两个低秩中间量，再用 batched projection 生成两个门。融合改变计算组织，不增加一种新门。
+
+**`g_proj_states` 是输出门，不是递归里的 log-retention `g`。** 本实现 `o_norm` 使用 sigmoid 门；GDN 的 Qwen3-Next 示例使用的 SiLU 输出门不能原样套过来。门控后的张量展平，再由 row-parallel `o_proj` 投回 hidden 宽度。
+
+模型的 `forward` 对两种模式还做了重要区分：
+
+| 模式 | 传给 backend 的遗忘激活 | 传给 backend 的 beta |
+|---|---|---|
+| Prefill/extend | 原始 gate，整理为 $`[1,T,H,d_k]`$ | 已执行一次 sigmoid |
+| Decode | 原始 gate | 原始 logit，sigmoid 在递归 kernel 内执行 |
+
+所以不能在公共调用点“统一再 sigmoid 一次”。packed wrapper 的某处参数说明把 `b` 写成 post-sigmoid，但实际模型调用和 kernel 中的 `tl.sigmoid(b_val)` 表明 decode 传的是原始 logit；应沿真实调用链核对。
+
+### 13.2 Prefill：四阶段如何对应第 8 节公式？
+
+`forward_extend` 根据请求边界分别处理 Q/K/V 的 causal conv，然后 reshape，调用 `TritonKDAKernel.extend → chunk_kda`。本快照的 `chunk_kda_fwd` 使用块长 64：
+
+```text
+raw gate + A_log + dt_bias
+  -> kda_gate_chunk_cumsum          # G: channel-wise cumulative log-retention
+q, k, v, beta, G
+  -> chunk_kda_fwd_intra            # lower-triangular interactions + solve
+  -> w, u, kg, Aqk
+  -> chunk_gated_delta_rule_fwd_h   # actual writes and chunk boundary states
+  -> h, v_new                      # also updates indexed final state in place
+  -> chunk_gla_fwd_o_gk             # combine input-state and within-chunk readouts
+  -> token outputs
+```
+
+- `w/u` 是与块输入状态无关的准备量，对应第 8.3 节的 $`W,U_v`$。
+- `v_new` 是结合实际输入状态后的写入量，对应 $`U`$。
+- `kg` 吸收了到块末尾的 key 通道衰减，用于状态更新；`Aqk` 对应块内因果读取权重并包含缩放。
+- `h` 保存块输入状态，帮助一次计算块内输出；不是为每个历史 token 永久保留一份矩阵。
+- `initial_state_indices` 指向请求槽位。最终状态在 `chunk_delta_h.py` 的 epilogue 原地存回该槽位，不需要 `chunk_kda` 再返回完整状态池。
+
+块内函数依据网格大小选择是否融合 diagonal/inter-solve/recompute。代码中“块内准备”对应的 kernel 数不是固定的；不要把教学阶段数当作 profiler 中一定出现的 launch 数。
+
+### 13.3 Decode：packed 和显式 split 两条路径
+
+`forward_decode` 先执行 `causal_conv1d_update`，随后：
+
+```text
+supports_packed_decode?
+  yes -> conv output directly into fused_recurrent_kda_packed_decode
+  no  -> split/reshape Q/K/V -> fused_sigmoid_gating_delta_rule_update(is_kda=True)
+```
+
+两条路径都需要逐 key 通道遗忘。通用 kernel 的片上布局可能采用 $`[B_K,B_V]`$，packed kernel 采用 $`[B_V,B_K]`$，但二者寻址的持久池仍是 $`[\mathrm{slots},H,d_v,d_k]`$。核对 `stride`、地址和 reduction 轴，比仅看局部变量 shape 更可靠。
+
+### 13.4 与 GLM-5.3-Flash 的 KDA 有什么关系？
+
+本章首先解释 KDA 算法及本地 `KimiDeltaAttention` 实现；[GLM-5.3-Flash 端到端教程](../../sglang-ascend-npu/source-code-walkthrough/examples/03-glm-5.3-flash-end-to-end.md) 使用另一个固定版本的 `Glm5NextKDA`。两者共享逐通道 delta recurrence，但投影命名、门控参数化、模型连接和硬件路径要分别核对。
+
+特别是 `chunk_kda` 的 `lower_bound` 分支使用 safe log-gate：
+
+```math
+g_c=\ell\,\mathrm{sigmoid}\left(\exp(A_{\log})(a_c+b_c)\right),\qquad \ell\lt0
+```
+
+这里 $`b_c`$ 表示该通道的 `dt_bias`。因此 $`g_c\in(\ell,0)`$。本地 Kimi 模型不设置这个字段，默认使用第 5 节的负 softplus 门；不能仅因函数签名存在 `lower_bound`，就认定 packed decode 也支持这个分支。本快照的 packed kernel 固定计算 softplus 门。算法解释、具体 checkpoint 参数化和 backend 能力是三个需要分别核对的问题。
 
 ## 14. Ascend NPU 优化视角
 
@@ -546,8 +898,8 @@ KDA head 可以在张量并行 rank 间划分。每个 rank 持有本地 Q/K/V �
 | 写入门激活 | `beta_raw` | $`\left[T,\mathrm{Hk}\right]`$ | 否 |
 | 遗忘激活 | `a` | $`\left[T,\mathrm{Hk},\mathrm{Dk}\right]`$ | 否 |
 | 输出门激活 | `z` | $`\left[T,\mathrm{Hk},\mathrm{Dv}\right]`$ | 否 |
-| Packed conv 输入 | `mixed_qkv` | `[T,Hk*(2Dk+Dv)]` | 否 |
-| 卷积缓存 | `conv_state` | `[slots,Hk*(2Dk+Dv),C-1]` | 是 |
+| Packed conv 输入 | `mixed_qkv` | $`[T,\mathrm{Hk}(2\mathrm{Dk}+\mathrm{Dv})]`$ | 否 |
+| 卷积缓存 | `conv_state` | $`[\mathrm{slots},\mathrm{Hk}(2\mathrm{Dk}+\mathrm{Dv}),C-1]`$ | 是 |
 | 保留率 log | `g` | $`\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]`$ | 否，可被融合 |
 | 保留率 | $`\alpha=\mathrm{exp}\left(g\right)`$ | $`\left[1,T,\mathrm{Hk},\mathrm{Dk}\right]`$ | 否，可被融合 |
 | Delta gate | `beta` | $`\left[1,T,\mathrm{Hk}\right]`$ | 否，可被融合 |
@@ -558,104 +910,48 @@ KDA head 可以在张量并行 rank 间划分。每个 rank 持有本地 Q/K/V �
 
 Decode 时 $`T=B`$，`cache_indices [B]` 把第 `b` 行映射到持久 slot。Packed prefill 时，`query_start_loc [R+1]` 标识 `R` 个 request 各自的 token 区间。
 
-## 19. 为什么 Prefill 需要 Chunk 代数
+## 19. 运行 CPU 参考程序：核对递归与 Chunk
 
-递归具有因果依赖：
+[delta_attention_reference.py](./delta_attention_reference.py) 只依赖 Python 标准库，无需 GPU、NPU、PyTorch 或 NumPy。在仓库根目录运行：
+
+```bash
+python3 learning/zh/ai-infra-basic/Model_Architecture/delta_attention_reference.py
+python3 learning/zh/ai-infra-basic/Model_Architecture/delta_attention_reference.py --self-test
+```
+
+默认打印第 20 节的 GDN/KDA 数字；`--self-test` 执行 12 项检查。其中 `recurrent` 每步调用状态更新，而 `chunk` **不调用递归函数**，独立构造下三角耦合、前代求解、输出和块末状态，避免只是在两处运行同一个循环。
+
+检查覆盖：相同通道 gate 退化为 GDN、多个独立 head、非零初始状态、非方形状态、不同块长和尾块、零/极小保留率、beta 为零、没有遗忘、当前 token 写后再读，以及 prefill 后接一次 decode。随机例子使用固定 seed，同时比较全部输出与最终状态。
+
+代码用 Python 浮点数做代数参考，不模拟低精度存储、卷积、请求调度或真实 kernel 的并行执行；这些自检不能替代 GPU/NPU 的模型精度测试与 profile。测试覆盖多个 head 是分别调用同一单 head 参考函数，不是声称实现了真实 TP。
+
+## 20. 同一组输入：GDN 与 KDA 完整对照演算
+
+为了隔离遗忘粒度，取相同的旧状态、单位范数 q/k、value 和写入门，只改变遗忘系数：
 
 ```math
-M_{1}=F\left(M_{0},\mathrm{token\_1}\right)
+M_0=\begin{pmatrix}1&0.5\\-0.5&1\end{pmatrix},\quad
+k=\begin{pmatrix}0.6\\0.8\end{pmatrix},\quad
+v=\begin{pmatrix}1\\-0.5\end{pmatrix},\quad
+q=\begin{pmatrix}0.8\\0.6\end{pmatrix},\quad\beta=0.5
 ```
 
-```math
-M_{2}=F\left(M_{1},\mathrm{token\_2}\right)
-```
+GDN 用标量 $`0.8`$，KDA 用向量 $`[0.8,0.25]`$。这是教学输入，不是说实际模型只会学到这些系数。
 
-```text
-...
-```
+| 步骤 | GDN | KDA |
+|---|---|---|
+| 遗忘 | $`\widetilde M=\left[\left[0.8,0.4\right],\left[-0.4,0.8\right]\right]`$ | $`\widetilde M=\left[\left[0.8,0.125\right],\left[-0.4,0.25\right]\right]`$ |
+| 预测 $`\widetilde Mk`$ | $`[0.8,0.4]`$ | $`[0.58,-0.04]`$ |
+| 残差 $`v-\widetilde Mk`$ | $`[0.2,-0.9]`$ | $`[0.42,-0.46]`$ |
+| 写入 $`\beta r k^{\mathsf T}`$ | $`\left[\left[0.06,0.08\right],\left[-0.27,-0.36\right]\right]`$ | $`\left[\left[0.126,0.168\right],\left[-0.138,-0.184\right]\right]`$ |
+| 新状态 | $`\left[\left[0.86,0.48\right],\left[-0.67,0.44\right]\right]`$ | $`\left[\left[0.926,0.293\right],\left[-0.538,0.066\right]\right]`$ |
+| 读取 $`M q/\sqrt2`$ | $`[0.6901,-0.1923]`$ | $`[0.6481,-0.2763]`$ |
 
-```math
-M_{L}=F\left({M}_{L-1},\mathrm{token\_L}\right)
-```
+差别不止“旧状态第二列小一点”：衰减改变了旧预测，预测改变了残差，残差又改变了**所有被当前 key 涉及的列**。所以不能先用 GDN 计算完整一步，再把输出乘一个通道 gate 来模拟 KDA。
 
-直接循环会启动或执行 `L` 个相互依赖的小更新。Chunk 算法保留 chunk 之间的依赖，同时暴露 chunk 内矩阵计算：
+若将 KDA 保留率改为 $`[0.8,0.8]`$，其预测、残差、新状态与输出都会与上面 GDN 一列一致。若令 $`\beta=0`$，只剩遗忘与读取；若令所有保留率为 1，则两者都退化为无显式遗忘的 DeltaNet。这些极限值用于检验代数，实际 sigmoid/exp 参数化可能只能逼近端点。
 
-```text
-chunk 0: M_0  + tokens [0:C]   -> outputs_0, boundary M_C
-chunk 1: M_C  + tokens [C:2C]  -> outputs_1, boundary M_2C
-...
-```
-
-在 chunk 内，kernel 把衰减乘积、delta 相互作用与三角因果依赖重排成 tile。关键正确性条件不是内部算法名称，而是：
-
-```text
-chunk_output == recurrent_reference_output
-chunk_final_state == recurrent_reference_final_state
-```
-
-两者都必须比较。输出一致但最终状态错误，会让下一个 decode token 立即出错。
-
-## 20. 数值更新实例
-
-设 $`\mathrm{Dk}=\mathrm{Dv}=2`$：
-
-```math
-M_{\mathrm{prev}}=\left[\left[1.0,0.5\right],\left[-0.5,1.0\right]\right]
-```
-
-```math
-\alpha=\left[0.8,0.25\right]
-```
-
-```math
-k=\left[0.6,0.8\right]
-```
-
-```math
-v=\left[1.0,-0.5\right]
-```
-
-```math
-\beta=0.5
-```
-
-```math
-q=\left[0.8,0.6\right]
-```
-
-逐列衰减：
-
-```math
-M_{\mathrm{decay}}=\left[\left[0.8,0.125\right],\left[-0.4,0.25\right]\right]
-```
-
-预测与残差：
-
-```math
-v_{\mathrm{hat}}=M_{\mathrm{decay}}\,k=\left[0.58,-0.04\right]
-```
-
-```math
-r=v-v_{\mathrm{hat}}=\left[0.42,-0.46\right]
-```
-
-Delta 与新状态：
-
-```math
-\beta\cdot r\,{k}^{\mathsf T}=\left[\left[0.126,0.168\right],\left[-0.138,-0.184\right]\right]
-```
-
-```math
-M=\left[\left[0.926,0.293\right],\left[-0.538,0.066\right]\right]
-```
-
-在后续输出门/归一化之前读出：
-
-```math
-o=M\,\frac{q}{\sqrt{2}}\approx \left[0.648,-0.276\right]
-```
-
-这个例子清楚展示了两个动作：旧状态列按不同因子缩小，然后用一个 rank-one 矩阵写入预测误差。
+[CPU 演算程序](./delta_attention_reference.py) 会打印这张表的关键数字，并检查多 token、多个 head、不同块长以及非方形状态的递归/chunk 等价性。
 
 ## 21. 内存与带宽实例
 
@@ -669,6 +965,8 @@ o=M\,\frac{q}{\sqrt{2}}\approx \left[0.648,-0.276\right]
 \text{BF16 状态容量}= 1 \mathrm{MiB}/\mathrm{request}/\mathrm{layer}
 ```
 
+上面只是 BF16 容量算例；本地 `mamba2_state_dtype()` 默认 recurrent state 为 FP32，对应每请求每层 2 MiB。实际按配置 dtype 计算，卷积和临时状态另外计入。
+
 当 $`B=64`$ 时，一层拥有 64 MiB 活跃状态容量。朴素 decode 若为衰减、预测、更新与输出分别读写完整矩阵，会把流量放大多次。融合递归 kernel 的目标是读入一个状态 tile，完成全部计算，再只写回一次。
 
 状态大小不随序列长度变化，但不代表状态本身很小。可以和 KV layer 比较交叉长度：
@@ -680,6 +978,8 @@ L_{\mathrm{cross}}\cdot \mathrm{Nkv}\cdot \left(\mathrm{Dk}+\mathrm{Dv}\right)=\
 当 $`\mathrm{Nkv}=\mathrm{Hk}`$ 且 $`\mathrm{Dk}=\mathrm{Dv}=128`$ 时，按元素数计算的 $`L_{\mathrm{cross}}=64`$ token。长上下文优势来自不再继续线性增长；实际字节数取决于 KV/state dtype 与混合层数量。
 
 ## 22. 递归参考伪代码
+
+下面是 tensor 运算伪代码：q/k 已做 L2 normalization，`A_log` 已广播为每 head 的一个列向量；`Dk` 从 key 最后一维取得。可直接运行的标准库版本见第 19 节。
 
 ```python
 def kda_step(M, q, k, v, a, beta_raw, A_log, dt_bias):
@@ -729,5 +1029,5 @@ def kda_step(M, q, k, v, a, beta_raw, A_log, dt_bias):
 
 - [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)
 - [MoonshotAI/Kimi-Linear 官方仓库](https://github.com/MoonshotAI/Kimi-Linear)
-- [本仓库的 Gated DeltaNet 教程](../Gated_Delta_Network/README.md)
+- [本仓库的 Gated DeltaNet 教程](../Gated_Delta_Network/01-gated-deltanet.md)
 - [本仓库的 MLA 教程](./04-multi-head-latent-attention.md)

@@ -4,13 +4,12 @@
 
 In this topic, **GDN** means **Gated Delta Network / Gated DeltaNet**, the linear-attention-style layer used by hybrid models such as Qwen3-Next. It is not Generalized Divisive Normalization from image compression. The core idea is to replace a KV Cache that grows with context length by a fixed-size recurrent state: every token reads and writes the state through `q/k/v`, `g` controls forgetting, and `beta` controls how strongly new information is written.
 
-## Reading Order
+## Learning Entry Points
 
-| Order | File | Key Question |
-|---|---|---|
-| 1 | [01-gdn-math-and-state.md](./01-gdn-math-and-state.md) | GDN equations, variable meanings, and why the state update is called a delta rule |
-| 2 | [02-gdn-layer-dataflow-and-shapes.md](./02-gdn-layer-dataflow-and-shapes.md) | End-to-end shapes, the `z` output gate, short-convolution mechanisms and ablations, q/k-to-value head grouping, and state size |
-| 3 | [03-gdn-training-and-serving.md](./03-gdn-training-and-serving.md) | Trainable parameters, training flow, prefill/decode/target-verify execution, and serving state management |
+| File | Contents |
+|---|---|
+| [Complete GDN tutorial](./01-gated-deltanet.md) | Matrix memory → gates and short convolution → layer shapes → training → prefill/decode → serving state; consolidates the former three chapters |
+| [KDA in depth](../Model_Architecture/09-kimi-delta-attention.md) | Extends GDN with channel-wise gates; side-by-side arithmetic, chunk derivation, implementation walkthrough, and CPU checks |
 
 ## One Overview Diagram
 
@@ -28,7 +27,7 @@ In this topic, **GDN** means **Gated Delta Network / Gated DeltaNet**, the linea
 | Why is GDN useful for long context? | Per-layer per-request state is roughly $`\mathrm{num\_value\_heads}\cdot \mathrm{value\_dim}\cdot \mathrm{key\_dim}`$, and does not grow linearly with historical token count. |
 | How does KDA differ? | GDN applies one retention scalar per token/head; Kimi Delta Attention applies a vector over key channels so state columns can decay independently. |
 
-After these three chapters, continue with [Kimi Delta Attention](../Model_Architecture/09-kimi-delta-attention.md) to see how fine-grained gating changes the recurrence, kernels, and serving-state contract.
+After the complete GDN tutorial, continue with [Kimi Delta Attention](../Model_Architecture/09-kimi-delta-attention.md) to see how fine-grained gating changes the recurrence, kernels, and serving-state contract.
 
 ## Relationship to SGLang Source Reading
 

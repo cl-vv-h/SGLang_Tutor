@@ -65,7 +65,7 @@ At aggregate effective bandwidth `50 GB/s`, the ideal payload-only transfer time
 
 With uniform TP sharding and no replication, each sender may hold roughly `1/P` of the bytes. Shared NICs or switches limit aggregate bandwidth, so total time cannot automatically be divided by `P` again. Different P/D TP degrees also require shard remapping.
 
-Recompute from the actual storage format for compressed MLA caches, quantized KV, prefix hits, and GDN/Mamba recurrent state. The ordinary GQA equation is not universal. See [KV Cache Memory](../KV_Cache_Memory/README.md) and [GDN state](../Gated_Delta_Network/02-gdn-layer-dataflow-and-shapes.md).
+Recompute from the actual storage format for compressed MLA caches, quantized KV, prefix hits, and GDN/Mamba recurrent state. The ordinary GQA equation is not universal. See [KV Cache Memory](../KV_Cache_Memory/README.md) and [GDN state](../Gated_Delta_Network/01-gated-deltanet.md#gdn-state).
 
 ## 5. Are NIXL and Mooncake Alternatives or Layers?
 

@@ -16,8 +16,10 @@ This topic independently explains the computational structure of large language 
 | [06-efficient-attention-landscape.md](./06-efficient-attention-landscape.md) | Compares MHA/GQA/MLA, SWA/DSA/CSA/HCA, and GDN/KDA along four independent axes: cache width, visited positions, recurrent state, and kernel execution |
 | [07-deepseek-sparse-attention.md](./07-deepseek-sparse-attention.md) | Separates indexer and main-attention scores, then traces top-k, paged-address translation, sparse MLA, and training tensor by tensor |
 | [08-compressed-sparse-attention.md](./08-compressed-sparse-attention.md) | Uses timelines and numerical examples for CSA overlap compression, HCA, local SWA, entry readiness, heterogeneous caches, and NPU adaptation |
-| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | Derives KDA decay and delta rule as rewritable key-value memory, including convolution, chunk prefill, fused decode, and serving state |
+| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | GDN/KDA numerical comparison, channel-wise gates, online-learning interpretation, chunk triangular derivation, SGLang call chain, and CPU checks |
 | [10-manifold-constrained-hyper-connections.md](./10-manifold-constrained-hyper-connections.md) | Ordinary residual → HC → mHC: multi-stream read/write, doubly stochastic constraints, worked Sinkhorn iterations, tensor flow, stability boundaries, and CPU checks |
+
+Companion program: [delta_attention_reference.py](./delta_attention_reference.py), a standard-library GDN/KDA recurrence and chunk reference; `--self-test` runs 12 checks.
 
 ## Unified Notation
 

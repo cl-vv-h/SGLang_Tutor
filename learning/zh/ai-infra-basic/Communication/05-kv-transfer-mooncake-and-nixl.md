@@ -65,7 +65,7 @@ L=32, T=8192, H_{\mathrm{kv}}=8, D=128, \mathrm{BF16}=2 \mathrm{bytes}
 
 TP 完全均匀分片且不复制时，每个 sender 的数据可能约为 `1/P`，但共享 NIC 或交换网络会限制聚合带宽，不能再无条件把总时间除以 `P`。P/D 使用不同 TP degree 时，还要重映射分片。
 
-MLA 的压缩 cache、量化 KV、prefix 命中和 GDN/Mamba recurrent state 都需要按真实存储格式重算；不要把普通 GQA 公式套到所有模型。参见 [KV Cache Memory](../KV_Cache_Memory/README.md) 与 [GDN state](../Gated_Delta_Network/02-gdn-layer-dataflow-and-shapes.md)。
+MLA 的压缩 cache、量化 KV、prefix 命中和 GDN/Mamba recurrent state 都需要按真实存储格式重算；不要把普通 GQA 公式套到所有模型。参见 [KV Cache Memory](../KV_Cache_Memory/README.md) 与 [GDN state](../Gated_Delta_Network/01-gated-deltanet.md#gdn-state)。
 
 ## 5. NIXL 与 Mooncake 是竞争关系还是上下层关系
 

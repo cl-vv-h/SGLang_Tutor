@@ -16,8 +16,10 @@
 | [06-efficient-attention-landscape.md](./06-efficient-attention-landscape.md) | 按缓存宽度、访问位置、递归状态和执行 kernel 四条独立轴比较 MHA/GQA/MLA、SWA/DSA/CSA/HCA、GDN/KDA |
 | [07-deepseek-sparse-attention.md](./07-deepseek-sparse-attention.md) | 区分 indexer 与主 Attention 两次打分，逐 shape 追踪 top-k、paged 地址翻译、MLA 稀疏主核和训练流程 |
 | [08-compressed-sparse-attention.md](./08-compressed-sparse-attention.md) | 用压缩时间线和数值例子讲解 CSA 重叠压缩、HCA、局部 SWA、条目就绪条件、异构缓存与 NPU 适配 |
-| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | 从可改写键值记忆推导 KDA 的逐通道衰减与 delta rule，并追踪卷积、chunk prefill、融合 decode 和 serving 状态 |
+| [09-kimi-delta-attention.md](./09-kimi-delta-attention.md) | GDN/KDA 对照演算、逐通道门控、在线学习解释、chunk 下三角推导、SGLang 调用链与纯 CPU 自检 |
 | [10-manifold-constrained-hyper-connections.md](./10-manifold-constrained-hyper-connections.md) | 普通 Residual → HC → mHC：多流读写、双随机约束、Sinkhorn 手算、完整 tensor flow、稳定性边界与 CPU 自检 |
+
+配套程序：[delta_attention_reference.py](./delta_attention_reference.py)（GDN/KDA 递归与 chunk 代数，标准库即可运行；`--self-test` 执行 12 项检查）。
 
 ## 统一符号
 

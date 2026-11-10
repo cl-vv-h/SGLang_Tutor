@@ -4,13 +4,12 @@
 
 GDN 在本专题中指 **Gated Delta Network / Gated DeltaNet**，也就是 Qwen3-Next 等混合架构中使用的一类线性注意力层。它不是图像压缩里的 Generalized Divisive Normalization。GDN 的核心是用一个固定大小的 recurrent state 取代随上下文长度增长的 KV Cache：每个 token 根据 `q/k/v` 读取和写入状态，`g` 控制旧状态遗忘，`beta` 控制新信息写入强度。
 
-## 学习顺序
+## 学习入口
 
-| 顺序 | 文件 | 重点问题 |
-|---|---|---|
-| 1 | [01-gdn-math-and-state.md](./01-gdn-math-and-state.md) | GDN 的数学公式、每个变量含义、state update 为什么叫 delta rule |
-| 2 | [02-gdn-layer-dataflow-and-shapes.md](./02-gdn-layer-dataflow-and-shapes.md) | 端到端 shape、`z` 输出门、短卷积的机制与消融依据、q/k 与 value head 分组及状态大小 |
-| 3 | [03-gdn-training-and-serving.md](./03-gdn-training-and-serving.md) | 哪些参数可训练、训练怎么做、prefill/decode/target verify 如何执行 |
+| 文件 | 内容 |
+|---|---|
+| [GDN 完整教程](./01-gated-deltanet.md) | 数学记忆 → 门控与短卷积 → 全层 shape → 训练 → prefill/decode → serving 状态，原三篇内容合并于此 |
+| [KDA 详解](../Model_Architecture/09-kimi-delta-attention.md) | 从 GDN 扩展到逐通道门控；对照演算、chunk 推导、源码实现与 CPU 自检 |
 
 ## 一张总览图
 
@@ -28,7 +27,7 @@ GDN 在本专题中指 **Gated Delta Network / Gated DeltaNet**，也就是 Qwen
 | GDN 为什么适合长上下文 | 每层每请求状态大小约为 $`\mathrm{num\_value\_heads}\cdot \mathrm{value\_dim}\cdot \mathrm{key\_dim}`$，不随历史 token 数线性增长。 |
 | KDA 有何不同 | GDN 对每个 token/head 使用一个保留率标量；Kimi Delta Attention 在 key 通道上使用向量，因此状态各列可以独立衰减。 |
 
-读完三个章节后，可继续学习 [Kimi Delta Attention](../Model_Architecture/09-kimi-delta-attention.md)，理解细粒度门控如何改变递归、kernel 与 serving 状态契约。
+读完 GDN 完整教程后，可继续学习 [Kimi Delta Attention](../Model_Architecture/09-kimi-delta-attention.md)，理解细粒度门控如何改变递归、kernel 与 serving 状态契约。
 
 ## 与 SGLang 源码阅读的关系
 
